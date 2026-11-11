@@ -144,6 +144,9 @@ pub fn handle(b: &mut Browser, tab: Option<TabId>, cmd: &str, value: &str) {
     match cmd {
         "set" => {
             let Some((k, v)) = value.split_once('=') else { return };
+            if k.contains(['\n', '\r']) || v.contains(['\n', '\r']) {
+                return;
+            }
             if !b.settings.set(k, v) {
                 return;
             }

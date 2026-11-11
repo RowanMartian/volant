@@ -489,7 +489,8 @@ fn serialize(d: &Dom, info: &Info, id: NodeId, url: &str, title: &str, out: &mut
                 out.push('<');
                 out.push_str(tag);
                 if tag == "a" {
-                    if let Some(href) = d.attr(id, "href").and_then(|h| resolve(url, h)) {
+                    // Links may go to web pages and mail, never to data: documents.
+                    if let Some(href) = d.attr(id, "href").and_then(|h| resolve(url, h)).filter(|h| !h.starts_with("data:")) {
                         out.push_str(" href=\"");
                         html::escape_into(&href, out, true);
                         out.push('"');
@@ -617,5 +618,7 @@ mod tests {
         assert!(resolve(b, "javascript:alert(1)").is_none());
         assert!(resolve(b, " JavaScript:alert(1)").is_none());
         assert!(resolve(b, "file:///etc/passwd").is_none());
+        let a = extract(&PAGE.replace("../more.html", "data:application/xhtml+xml,x"), "https://sky.example/a/b").unwrap();
+        assert!(!a.html.contains("data:application"), "data: links must not survive");
     }
 }

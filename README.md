@@ -7,6 +7,7 @@
 - **Tiny.** The whole app is a few megabytes. No bundled browser engine: pages render in the WebKit that already ships with macOS.
 - **Native.** The window, sidebar, command bar and menus are AppKit, driven straight from Rust. No Electron, no web-based UI.
 - **Ads and trackers blocked inside the engine.** Filter lists are compiled once into WebKit content rules, which run as bytecode in WebKit's own networking code. No blocker scripts run on any page.
+- **Reader mode** (⇧⌘R) on Volant's own HTML parser: any article, minus everything around it, in a calm column of type.
 - **Sleeping tabs.** Tabs you haven't looked at in a while hand their memory back, and wake up when you return. At launch only the tab in front loads.
 - **Private by default.** No accounts, no sync, no telemetry. Nothing leaves your Mac except the pages you visit.
 - **100% open source**, MIT licensed.
@@ -36,6 +37,7 @@ Volant needs macOS 12 Monterey or later, on Apple Silicon or Intel.
 | ⌘1 – ⌘9 | Jump to a tab (⌘9 is always the last one) |
 | ⌃Tab, ⇧⌘] / ⇧⌘[ | Next / previous tab |
 | ⌘F, ⌘G, ⇧⌘G | Find on page, next, previous |
+| ⇧⌘R | Reader |
 | ⌘[ / ⌘] | Back / forward |
 | ⌘+ / ⌘- / ⌘0 | Zoom in / out / actual size |
 | ⌘Y | History |
@@ -58,9 +60,10 @@ Downloads go to your Downloads folder.
 
 ```
 crates/core   Platform-independent pieces, zero dependencies, tested on any OS:
-              omnibox (URL vs search), history (append-only log + frecency),
-              fuzzy matching, filter-list → WebKit rule compiler, tab model,
-              settings/session storage, a minimal JSON writer.
+              omnibox (URL vs search), history (append-only log + frecency
+              + search index), fuzzy matching, HTML parser, Reader extraction,
+              filter-list → WebKit rule compiler, tab model, settings/session
+              storage, a minimal JSON writer.
 crates/app    The macOS shell: AppKit window and sidebar, command bar, find bar,
               menus, WKWebView tabs, downloads, volant:// pages, blocking.
 assets/pages  Volant's own pages (welcome, new tab, settings, history, errors).
@@ -80,6 +83,40 @@ Where Volant does its own work, it skips the heavy defaults browsers usually rea
 | History | SQLite database | Append-only text log, loaded in milliseconds |
 | Restoring 50 tabs | Loads them all | Loads 1, the rest wake on demand |
 | UI toolkit | HTML/CSS in a web view | Native AppKit views |
+
+### What's written from scratch, and what's macOS
+
+| Layer | Who does it |
+| --- | --- |
+| Window, sidebar, tabs, command bar, find bar, menus | Volant (AppKit views driven from Rust) |
+| Tabs, navigation, history, sessions, downloads, sleeping tabs | Volant |
+| Address bar: URL or search, suggestions, inline completion | Volant |
+| Ad and tracker blocking: filter-list compiler | Volant; WebKit runs the compiled rules |
+| HTML parsing and article extraction for Reader | Volant |
+| Rendering pages, JavaScript, networking, page storage, process sandboxing | WebKit, the same engine as Safari |
+
+### Performance
+
+The hot paths in `crates/core` are benchmarked (`cargo run --release -p volant-core --example bench`).
+Numbers below are from a 2.1 GHz Xeon; Apple Silicon is faster.
+
+| | Before tuning | Now |
+| --- | --- | --- |
+| Command bar keystroke, 100,000-page history (average) | 27 ms | 0.9 ms |
+| Command bar keystroke, worst case | 33 ms | ~5 ms |
+| Inline completion | 19 ms | < 0.01 ms |
+| Top sites for a new tab | 50 ms | cached (0 ms), 25 ms to refresh |
+| Parse Wikipedia's 590 KB "Jet engine" article | | 4 ms |
+| Find its article for Reader | | 8 ms |
+| Compile EasyList + EasyPrivacy (≈135,000 lines → 119,000 WebKit rules) | | 0.2 s, once a week |
+
+How: a frecency-sorted search index that exists only while the command bar is open,
+stops early once nothing further down can make the top results, and narrows from the
+previous keystroke's matches. The command bar reuses its rows instead of rebuilding
+views. Session saves are debounced, and Volant's only regular timer fires once a minute.
+
+The parser, Reader, filter compiler and address bar are fuzzed with 110,000 random
+and truncated inputs (`--example fuzz`).
 
 ### Building it yourself
 

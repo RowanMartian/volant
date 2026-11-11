@@ -202,10 +202,13 @@ pub fn close_tab(b: &mut Browser, id: TabId) {
     if b.tabs.get(id).is_none() {
         return;
     }
+    let was_front = b.tabs.active == Some(id);
     web::release(b, id);
     let next = b.tabs.close(id);
     match next {
-        Some(n) => select(b, n),
+        // Closing a background tab leaves the front one exactly as it is.
+        Some(n) if was_front => select(b, n),
+        Some(_) => {}
         None => {
             open_tab(b, NEWTAB, true);
         }
