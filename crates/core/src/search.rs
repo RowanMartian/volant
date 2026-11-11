@@ -45,8 +45,12 @@ pub fn search_url(engine_id: &str, query: &str) -> String {
 
 /// If `url` is a results page of one of our engines, returns the query that produced it.
 pub fn query_of(url: &str) -> Option<String> {
+    // Every template ends in `%s`, so the prefix is everything before it.
+    if !url.contains('?') {
+        return None;
+    }
     for e in ENGINES {
-        let prefix = &e.template[..e.template.find("%s")?];
+        let prefix = e.template.strip_suffix("%s")?;
         if let Some(rest) = url.strip_prefix(prefix) {
             let raw = rest.split('&').next().unwrap_or("");
             return Some(decode_query(raw));

@@ -10,7 +10,6 @@ use objc2_app_kit::{
     NSTextView, NSWindowDelegate,
 };
 use objc2_foundation::{NSArray, NSNotification, NSTimer, NSURL};
-use std::cell::Cell;
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements; Delegate does not implement Drop.
@@ -145,30 +144,18 @@ impl Delegate {
     }
 }
 
-thread_local! {
-    static TICKS: Cell<u64> = const { Cell::new(0) };
-}
-
-const TICK_SECS: f64 = 2.0;
+/// Everything else is event-driven; this is Volant's only regular wake-up.
+const TICK_SECS: f64 = 60.0;
 
 pub fn start_timers(b: &Browser) {
     let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(TICK_SECS, &b.delegate, sel!(tick:), None, true) };
-    // Let macOS batch our wake-ups with others to save power.
-    timer.setTolerance(0.5);
+    // Let macOS batch our wake-up with others to save power.
+    timer.setTolerance(10.0);
 }
 
 fn housekeeping(b: &mut Browser) {
-    let n = TICKS.with(|t| {
-        t.set(t.get() + 1);
-        t.get()
-    });
     actions::save_session(b);
-    if !b.downloads.is_empty() {
-        ui::update_downloads(b);
-    }
-    if n % 30 == 0 {
-        actions::sleep_idle(b);
-    }
+    actions::sleep_idle(b);
 }
 
 /// `--smoke-test`: drives the real app through its main screens, saves

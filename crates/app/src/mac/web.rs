@@ -272,7 +272,7 @@ impl WebDelegate {
         let obj: Retained<WKDownload> = unsafe { Retained::retain(download as *const WKDownload as *mut WKDownload) }.expect("download");
         with(move |b| {
             b.downloads.push(Download { obj, name: "file".into(), path: PathBuf::new(), done: false, failed: false, finished_at: 0 });
-            ui::update_downloads(b);
+            ui::watch_downloads(b);
         });
     }
 }
@@ -492,7 +492,7 @@ fn changed(b: &mut Browser, ptr: usize, key: &str) {
                 b.history.set_title(&url, &title);
             }
             ui::update_row(b, id);
-            b.session_dirty = true;
+            super::mark_dirty(b);
             if active {
                 ui::update_chrome(b);
             }
@@ -505,7 +505,7 @@ fn changed(b: &mut Browser, ptr: usize, key: &str) {
             if let Some(tab) = b.tabs.get_mut(id) {
                 if tab.url != url {
                     tab.url = url.clone();
-                    b.session_dirty = true;
+                    super::mark_dirty(b);
                 }
             }
             if let Some(w) = b.webs.get_mut(&id) {

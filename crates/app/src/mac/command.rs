@@ -4,13 +4,14 @@
 
 use super::theme::{self, Rgba};
 use super::ui::SiteIcon;
-use super::views::{self, fill, label, symbol, Hit, Kind, Weight};
+use super::views::{self, label, set_text, symbol, Hit, Kind, Weight};
 use super::{actions, ns, rect, Browser};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSEventModifierFlags, NSFocusRingType, NSImageView, NSTextField};
 use objc2_foundation::NSRange;
+use std::cell::Cell;
 use volant_core::tabs::TabId;
 use volant_core::{fuzzy, omnibox, search};
 
@@ -32,10 +33,12 @@ enum Sugg {
 
 struct Row {
     hit: Retained<Hit>,
-    _icon: SiteIcon,
+    icon: SiteIcon,
     glyph: Retained<NSImageView>,
     title: Retained<NSTextField>,
     sub: Retained<NSTextField>,
+    /// Which SF Symbol the glyph shows, to skip reloading it.
+    glyph_name: Cell<&'static str>,
 }
 
 pub struct CommandBar {
@@ -44,6 +47,8 @@ pub struct CommandBar {
     pub field: Retained<NSTextField>,
     lens: Retained<NSImageView>,
     rows: Vec<Row>,
+    /// How many rows are in use.
+    shown: usize,
     suggs: Vec<Sugg>,
     selected: usize,
     mode: Mode,
@@ -82,7 +87,11 @@ impl CommandBar {
         panel.addSubview(&field);
         let lens = views::image_view(symbol("magnifyingglass", 16.0, Weight::Medium).as_deref(), rect(20.0, 19.0, 20.0, 20.0), None, mtm);
         panel.addSubview(&lens);
-        Self { overlay, panel, field, lens, rows: Vec::new(), suggs: Vec::new(), selected: 0, mode: Mode::Current, open: false, typed: String::new() }
+        let rows: Vec<Row> = (0..MAX_ROWS).map(|i| make_row(i, mtm)).collect();
+        for r in &rows {
+            panel.addSubview(&r.hit);
+        }
+        Self { overlay, panel, field, lens, rows, shown: 0, suggs: Vec::new(), selected: 0, mode: Mode::Current, open: false, typed: String::new() }
     }
 }
 
@@ -108,6 +117,8 @@ pub fn open(b: &mut Browser, mode: Mode, text: &str) {
     c.selected = 0;
     c.field.setStringValue(&ns(text));
     c.overlay.setHidden(false);
+    // Build the history index now, so typing never waits for it.
+    b.history.warm(super::now());
     // Re-adding moves it above the page.
     b.ui.root.addSubview(&b.command.overlay);
     rebuild(b);
@@ -124,6 +135,8 @@ pub fn close(b: &mut Browser) {
     }
     b.command.open = false;
     b.command.overlay.setHidden(true);
+    // Give the index's memory back until next time.
+    b.history.cool();
     if let Some(w) = b.tabs.active.and_then(|id| b.webs.get(&id)) {
         b.window.makeFirstResponder(Some(&w.web));
     }
@@ -137,11 +150,11 @@ pub fn layout(b: &Browser) {
     let pw = (content.size.width - 48.0).clamp(320.0, 640.0);
     let x = content.origin.x + ((content.size.width - pw) / 2.0).round();
     let y = content.origin.y + (content.size.height * 0.13).round().max(48.0);
-    let n = c.rows.len() as f64;
+    let n = c.shown as f64;
     let h = HEAD_H + if n > 0.0 { n * ROW_H + 8.0 } else { 0.0 };
     c.panel.setFrame(rect(x, y, pw, h));
     c.field.setFrame(rect(52.0, 16.0, pw - 70.0, 28.0));
-    for (i, r) in c.rows.iter().enumerate() {
+    for (i, r) in c.rows.iter().enumerate().take(c.shown) {
         let w = pw - 16.0;
         r.hit.setFrame(rect(8.0, HEAD_H + i as f64 * ROW_H, w, ROW_H - 2.0));
         r.title.setFrame(rect(48.0, 5.0, w - 60.0, 19.0));
@@ -163,7 +176,7 @@ fn restyle_rows(b: &Browser) {
     let t = theme::current();
     let c = &b.command;
     for (i, r) in c.rows.iter().enumerate() {
-        let on = i == c.selected;
+        let on = i == c.selected && i < c.shown;
         r.hit.set_fill(Some(if on { t.accent_soft } else { Rgba(0.0, 0.0, 0.0, 0.0) }));
         views::recolor(&r.title, t.text);
         views::recolor(&r.sub, if on { t.accent } else { t.text2 });
@@ -252,69 +265,83 @@ fn suggestions(b: &Browser) -> Vec<Sugg> {
     out
 }
 
-fn rebuild(b: &mut Browser) {
-    let mtm = b.mtm;
-    let suggs = suggestions(b);
-    for r in b.command.rows.drain(..) {
-        r.hit.removeFromSuperview();
-    }
-    let engine = search::engine(&b.settings.engine).name;
+fn make_row(i: usize, mtm: MainThreadMarker) -> Row {
     let t = theme::current();
-    let mut rows = Vec::new();
-    for (i, s) in suggs.iter().enumerate() {
-        let hit = Hit::new(Kind::Suggestion, i as u64, rect(8.0, 0.0, 400.0, ROW_H - 2.0), false, mtm);
-        if let Some(l) = hit.layer() {
-            l.setCornerRadius(10.0);
-        }
-        let icon = SiteIcon::new(14.0, 11.0, 22.0, mtm);
-        let glyph = views::image_view(None, rect(15.0, 12.0, 20.0, 20.0), Some(t.text2), mtm);
-        let (title, sub, url, sym): (String, String, Option<&str>, Option<&str>) = match s {
-            Sugg::Go(u) => (omnibox::display(u), "Open website".into(), Some(u), None),
-            Sugg::Search(q) => (q.clone(), format!("Search {engine}"), None, Some("magnifyingglass")),
-            Sugg::Page { url, title } => (
-                if title.is_empty() { omnibox::display(url) } else { title.clone() },
-                omnibox::display(url),
-                if search::query_of(url).is_some() { None } else { Some(url) },
-                if search::query_of(url).is_some() { Some("clock") } else { None },
-            ),
+    let hit = Hit::new(Kind::Suggestion, i as u64, rect(8.0, 0.0, 400.0, ROW_H - 2.0), false, mtm);
+    if let Some(l) = hit.layer() {
+        l.setCornerRadius(10.0);
+    }
+    let icon = SiteIcon::new(14.0, 11.0, 22.0, mtm);
+    let glyph = views::image_view(None, rect(15.0, 12.0, 20.0, 20.0), Some(t.text2), mtm);
+    let title = label("", 13.5, Weight::Medium, t.text, mtm);
+    let sub = label("", 12.0, Weight::Regular, t.text2, mtm);
+    hit.addSubview(&icon.tile);
+    hit.addSubview(&glyph);
+    hit.addSubview(&title);
+    hit.addSubview(&sub);
+    hit.setHidden(true);
+    Row { hit, icon, glyph, title, sub, glyph_name: Cell::new("") }
+}
+
+/// Fills the (reused) rows with fresh suggestions. Rows are created once,
+/// so a keystroke only changes text and images, never the view tree.
+fn rebuild(b: &mut Browser) {
+    let suggs = suggestions(b);
+    let engine = search::engine(&b.settings.engine).name;
+    for (i, row) in b.command.rows.iter().enumerate() {
+        let Some(s) = suggs.get(i) else {
+            row.hit.setHidden(true);
+            continue;
+        };
+        let (title, sub, url, sym): (String, String, Option<&str>, &'static str) = match s {
+            Sugg::Go(u) => (omnibox::display(u), "Open website".into(), Some(u), ""),
+            Sugg::Search(q) => (q.clone(), format!("Search {engine}"), None, "magnifyingglass"),
+            Sugg::Page { url, title } => {
+                let searched = search::query_of(url).is_some();
+                (
+                    if title.is_empty() { omnibox::display(url) } else { title.clone() },
+                    omnibox::display(url),
+                    if searched { None } else { Some(url) },
+                    if searched { "clock" } else { "" },
+                )
+            }
             Sugg::Tab { url, title, .. } => (
                 if title.is_empty() { omnibox::display(url) } else { title.clone() },
                 format!("Switch to tab  ·  {}", omnibox::display(url)),
                 Some(url),
-                None,
+                "",
             ),
         };
-        match (url, sym) {
-            (Some(u), None) => {
-                icon.set(b, u);
-                glyph.setHidden(true);
+        match url {
+            Some(u) if sym.is_empty() => {
+                row.icon.set(b, u);
+                row.icon.tile.setHidden(false);
+                row.glyph.setHidden(true);
             }
-            (_, s) => {
-                icon.tile.setHidden(true);
-                glyph.setImage(symbol(s.unwrap_or("globe"), 15.0, Weight::Medium).as_deref());
+            _ => {
+                row.icon.tile.setHidden(true);
+                row.glyph.setHidden(false);
+                if row.glyph_name.get() != sym {
+                    row.glyph.setImage(symbol(sym, 15.0, Weight::Medium).as_deref());
+                    row.glyph_name.set(sym);
+                }
             }
         }
-        let tl = label(&title, 13.5, Weight::Medium, t.text, mtm);
-        let sl = label(&sub, 12.0, Weight::Regular, t.text2, mtm);
-        hit.addSubview(&icon.tile);
-        hit.addSubview(&glyph);
-        hit.addSubview(&tl);
-        hit.addSubview(&sl);
-        b.command.panel.addSubview(&hit);
-        rows.push(Row { hit, _icon: icon, glyph, title: tl, sub: sl });
+        set_text(&row.title, &title);
+        set_text(&row.sub, &sub);
+        row.hit.setHidden(false);
     }
-    b.command.rows = rows;
+    b.command.shown = suggs.len().min(b.command.rows.len());
     b.command.suggs = suggs;
-    if b.command.selected >= b.command.rows.len() {
+    if b.command.selected >= b.command.shown {
         b.command.selected = 0;
     }
     restyle_rows(b);
-    fill(&b.command.panel, t.panel);
 }
 
 /// Arrow keys, Return and Escape while the field has focus. Returns true if handled.
 pub fn key(b: &mut Browser, selector: &str) -> bool {
-    let n = b.command.rows.len();
+    let n = b.command.shown;
     match selector {
         "moveDown:" | "moveDownAndModifySelection:" if n > 0 => {
             b.command.selected = (b.command.selected + 1) % n;

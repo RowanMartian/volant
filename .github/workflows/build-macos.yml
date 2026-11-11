@@ -43,6 +43,22 @@ jobs:
           ls -la smoke
           grep -q "exit 0" smoke/log.txt
 
+      - name: Benchmark against Safari, Chrome and Firefox
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          bash scripts/bench/run.sh
+          cat bench/results.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark
+          path: bench/results.md
+          if-no-files-found: ignore
+
       - name: Keep the smoke test results
         if: always()
         uses: actions/upload-artifact@v4

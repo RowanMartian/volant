@@ -131,6 +131,25 @@ pub fn later(f: impl FnOnce() + 'static) {
     });
 }
 
+/// Runs `f` on the main thread after `secs` seconds, without a timer or thread.
+pub fn after(secs: f64, f: impl FnOnce() + 'static) {
+    let job = MainOnly(f);
+    let when = dispatch2::DispatchTime::try_from(std::time::Duration::from_secs_f64(secs)).unwrap_or(dispatch2::DispatchTime::NOW);
+    let _ = dispatch2::DispatchQueue::main().after(when, move || {
+        let job = job;
+        (job.0)()
+    });
+}
+
+/// Notes that the open tabs changed; they're written to disk shortly after,
+/// once, however many changes arrive in between.
+pub fn mark_dirty(b: &mut Browser) {
+    if !b.session_dirty {
+        b.session_dirty = true;
+        after(1.5, || with(actions::save_session));
+    }
+}
+
 /// Runs `f` on the main thread from any thread.
 pub fn on_main(f: impl FnOnce() + Send + 'static) {
     dispatch2::DispatchQueue::main().exec_async(f);
@@ -207,6 +226,10 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
             delegate::smoke_test(b);
         }
     });
+    // `Volant https://a.com https://b.com` opens those pages, like other browsers.
+    for arg in std::env::args().skip(1).filter(|a| a.starts_with("http://") || a.starts_with("https://")) {
+        PENDING_URLS.with(|p| p.borrow_mut().push(arg));
+    }
     let pending: Vec<String> = PENDING_URLS.with(|p| std::mem::take(&mut *p.borrow_mut()));
     for url in pending {
         with(move |b| actions::open_external(b, &url));

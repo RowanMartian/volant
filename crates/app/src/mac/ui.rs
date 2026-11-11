@@ -375,7 +375,7 @@ pub fn sync_tabs(b: &mut Browser) {
         fill_row(b, r);
     }
     update_chrome(b);
-    b.session_dirty = true;
+    super::mark_dirty(b);
 }
 
 /// Refreshes one tab's row (title, icon) without touching the rest.
@@ -441,6 +441,16 @@ pub fn update_progress(b: &Browser) {
         }
     } else {
         ui.progress.setHidden(true);
+    }
+}
+
+/// Refreshes the download line once a second, only while something is downloading.
+pub fn watch_downloads(b: &mut Browser) {
+    update_downloads(b);
+    let busy = b.downloads.iter().any(|d| !d.done && !d.failed);
+    let recent = b.downloads.iter().any(|d| super::now().saturating_sub(d.finished_at) < 61);
+    if busy || recent {
+        super::after(if busy { 1.0 } else { 5.0 }, || super::with(watch_downloads));
     }
 }
 
