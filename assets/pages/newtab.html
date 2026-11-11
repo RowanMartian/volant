@@ -17,8 +17,9 @@ form.search svg{width:16px;height:16px;flex:none}
 form.search input{flex:1;min-width:0;border:0;background:none;font-size:15px;height:100%;-webkit-user-select:text;user-select:text;color:var(--text)}
 form.search input::placeholder{color:var(--text3)}
 form.search input:focus,form.search input:focus-visible{outline:none}
-.sites{display:grid;grid-template-columns:repeat(auto-fill,96px);justify-content:center;gap:8px;width:min(640px,100%);margin-top:40px}
-.site{display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 6px 10px;border-radius:var(--r-md);color:var(--text);text-decoration:none!important}
+/* Wrapping row, centred on the search bar: any count, any last row, stays centred. */
+.sites{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:min(560px,100%);margin-top:40px}
+.site{width:96px;flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 6px 10px;border-radius:var(--r-md);color:var(--text);text-decoration:none!important}
 .site:hover{background:var(--fill-soft)}
 .site span{font-size:12px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)}
 
