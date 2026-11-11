@@ -188,7 +188,7 @@ pub fn smoke_test(b: &Browser) {
         r.lock().unwrap().push_str(&line);
         eprint!("{line}");
     };
-    let since_exec = crate::STARTED.get().map(|t| t.elapsed()).unwrap_or_default();
+    let since_exec = super::SHOWN.with(|t| t.get()).unwrap_or_default();
     report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
     let (s1, s2, s3, s4, s5, s6) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
     let (m1, m2) = (mem.clone(), mem);

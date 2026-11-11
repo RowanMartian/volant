@@ -92,6 +92,8 @@ pub struct Browser {
 }
 
 thread_local! {
+    /// How long after the process started the window appeared.
+    pub static SHOWN: std::cell::Cell<Option<std::time::Duration>> = const { std::cell::Cell::new(None) };
     static STATE: RefCell<Option<Browser>> = const { RefCell::new(None) };
     static PENDING_URLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -212,19 +214,27 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
     };
     STATE.with(|s| *s.borrow_mut() = Some(browser));
 
+    // Show the window first; starting WebKit for the first tab can wait one
+    // turn of the run loop, so the window is on screen as early as possible.
     with(|b| {
         command::attach(b);
         find::attach(b);
         menu::install(b);
         theme::refresh(b);
-        actions::restore(b);
-        blocking::init(b);
         ui::layout(b);
         b.window.makeKeyAndOrderFront(None);
-        delegate::start_timers(b);
-        if std::env::args().any(|a| a == "--smoke-test") {
-            delegate::smoke_test(b);
-        }
+        SHOWN.with(|t| t.set(crate::STARTED.get().map(|s| s.elapsed())));
+    });
+    later(|| {
+        with(|b| {
+            actions::restore(b);
+            blocking::init(b);
+            ui::layout(b);
+            delegate::start_timers(b);
+            if std::env::args().any(|a| a == "--smoke-test") {
+                delegate::smoke_test(b);
+            }
+        })
     });
     // `Volant https://a.com https://b.com` opens those pages, like other browsers.
     for arg in std::env::args().skip(1).filter(|a| a.starts_with("http://") || a.starts_with("https://")) {
@@ -232,7 +242,7 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
     }
     let pending: Vec<String> = PENDING_URLS.with(|p| std::mem::take(&mut *p.borrow_mut()));
     for url in pending {
-        with(move |b| actions::open_external(b, &url));
+        later(move || with(move |b| actions::open_external(b, &url)));
     }
     #[allow(deprecated)]
     NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
@@ -242,7 +252,8 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
 pub fn queue_url(url: String) {
     let ready = STATE.with(|s| s.try_borrow().map(|g| g.is_some()).unwrap_or(true));
     if ready {
-        with(move |b| actions::open_external(b, &url));
+        // Behind anything already queued, such as restoring the last session.
+        later(move || with(move |b| actions::open_external(b, &url)));
     } else {
         PENDING_URLS.with(|p| p.borrow_mut().push(url));
     }
