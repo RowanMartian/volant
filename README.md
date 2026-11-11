@@ -118,6 +118,24 @@ views. Session saves are debounced, and Volant's only regular timer fires once a
 The parser, Reader, filter compiler and address bar are fuzzed with 110,000 random
 and truncated inputs (`--example fuzz`).
 
+### Compared with other browsers
+
+Measured by CI on GitHub's macOS runners (Apple M1, virtualised) with `scripts/bench/run.sh`:
+the same five pages open in each browser, memory as Activity Monitor's footprint summed over
+every process the browser started. Two runs; ranges show how much shared runners vary.
+
+| | Volant | Safari | Chrome | Firefox |
+| --- | --- | --- | --- | --- |
+| App size | **2 MB** | ships with macOS (29 MB app) | 732 MB | 521 MB |
+| Launch to window | **0.30–0.74 s** | 2.1–2.9 s | 0.60–0.87 s | 1.3–1.4 s |
+| Memory, 5 pages | 253–279 MB | 160–308 MB | 518–523 MB | 805–823 MB |
+| Idle CPU over 30 s | **0.00 s** | 0.02–0.20 s | 0.23–0.33 s | 1.5–2.2 s |
+
+Volant draws pages with the same engine as Safari, so page loading and JavaScript run at
+Safari's speed and memory lands in the same range. Against Chrome and Firefox it uses about
+half and a third of the memory, launches faster, ships in a fraction of the size, and sits
+truly idle when you aren't doing anything.
+
 ### Building it yourself
 
 GitHub builds Volant on every push (see `.github/workflows/build-macos.yml`): it runs the tests,

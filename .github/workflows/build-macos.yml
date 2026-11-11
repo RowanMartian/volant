@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write
 
+# A newer push supersedes an older run.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest
@@ -77,6 +82,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Never let an older, delayed run replace a newer build.
+          git fetch --quiet origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then echo "main has moved on; not publishing"; exit 0; fi
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest dist/Volant.dmg dist/Volant-mac.zip \
             --title "Volant — latest build" \

@@ -94,7 +94,8 @@ JS
 for b in Volant Safari Chrome Firefox; do
   [ -e "$(app_of "$b")" ] || { echo "skip $b (not installed)"; continue; }
   echo "== $b"
-  size=$(du -sLm "$(app_of "$b")" 2>/dev/null | cut -f1)
+  # Safari.app is a link into the system volume on recent macOS; follow it only there.
+  if [ "$b" = Safari ]; then size=$(du -sLm "$(app_of "$b")" 2>/dev/null | cut -f1); else size=$(du -sm "$(app_of "$b")" | cut -f1); fi
   [ "$b" = Safari ] && [ "${size:-0}" -lt 2 ] && size="(in macOS)"
   quit_all
   export VOLANT_DATA_DIR="$TMP/volant"
