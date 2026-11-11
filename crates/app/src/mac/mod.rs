@@ -246,6 +246,10 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
             if std::env::args().any(|a| a == "--smoke-test") {
                 delegate::smoke_test(b);
             }
+            // CI: install the latest release over this copy, end to end, without asking.
+            if std::env::args().any(|a| a == "--install-update") {
+                updater::install(b);
+            }
         })
     });
     // `Volant https://a.com https://b.com` opens those pages, like other browsers.

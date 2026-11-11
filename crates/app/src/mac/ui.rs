@@ -443,7 +443,10 @@ pub fn update_chrome(b: &Browser) {
         (omnibox::display(&url), "doc", false)
     };
     let reading = b.tabs.active.map(|id| super::actions::in_reader(b, id)).unwrap_or(false);
-    ui.reader.hit.setHidden(!(reading || url.starts_with("http")));
+    let reader_shown = reading || url.starts_with("http");
+    ui.reader.hit.setHidden(!reader_shown);
+    // The text gets the room the Reader button would use when it isn't there.
+    ui.address_text.setFrame(rect(34.0, 9.0, SIDEBAR_W - 20.0 - if reader_shown { 72.0 } else { 44.0 }, 18.0));
     views::tint(&ui.reader.img, if reading { t.accent } else { t.text2 });
     ui.reader.hit.setToolTip(Some(&ns(if reading { "Hide Reader (⇧⌘R)" } else { "Show Reader (⇧⌘R)" })));
     set_text(&ui.address_text, &text);

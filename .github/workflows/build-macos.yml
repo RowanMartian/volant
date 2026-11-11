@@ -50,6 +50,30 @@ jobs:
           ls -la smoke
           grep -q "exit 0" smoke/log.txt
 
+      - name: Updater test (install the current release over a copy of this build)
+        run: |
+          ZIP_URL="https://github.com/${{ github.repository }}/releases/download/latest/Volant-mac.zip"
+          if ! curl -sfL -o "$RUNNER_TEMP/release.zip" "$ZIP_URL"; then echo "No release yet; skipping."; exit 0; fi
+          APPS="$RUNNER_TEMP/apps"; rm -rf "$APPS"; mkdir -p "$APPS"
+          cp -R dist/Volant.app "$APPS/"
+          mkdir -p "$RUNNER_TEMP/release" && ditto -x -k "$RUNNER_TEMP/release.zip" "$RUNNER_TEMP/release"
+          want=$(shasum -a 256 "$RUNNER_TEMP/release/Volant.app/Contents/MacOS/Volant" | cut -d' ' -f1)
+          before=$(shasum -a 256 "$APPS/Volant.app/Contents/MacOS/Volant" | cut -d' ' -f1)
+          VOLANT_DATA_DIR="$RUNNER_TEMP/update-data" "$APPS/Volant.app/Contents/MacOS/Volant" --install-update &
+          PID=$!
+          for i in $(seq 1 60); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          if kill -0 $PID 2>/dev/null; then echo "Volant didn't quit to update"; exit 1; fi
+          relaunched=""
+          for i in $(seq 1 30); do relaunched=$(pgrep -f "$APPS/Volant.app/Contents/MacOS/Volant" || true); [ -n "$relaunched" ] && break; sleep 1; done
+          after=$(shasum -a 256 "$APPS/Volant.app/Contents/MacOS/Volant" | cut -d' ' -f1)
+          echo "before:  $before"; echo "release: $want"; echo "after:   $after"; echo "relaunched pid: ${relaunched:-none}"
+          ls -la "$APPS"
+          [ -n "$relaunched" ] && kill $relaunched || true
+          [ "$after" = "$want" ] || { echo "The app wasn't replaced with the release"; exit 1; }
+          [ -n "$relaunched" ] || { echo "The updated app didn't relaunch"; exit 1; }
+          [ ! -e "$APPS/Volant.app.previous" ] || { echo "Left the old copy behind"; exit 1; }
+          echo "Updated in place and relaunched."
+
       - name: Benchmark against Safari, Chrome and Firefox
         if: github.event_name != 'pull_request'
         continue-on-error: true
