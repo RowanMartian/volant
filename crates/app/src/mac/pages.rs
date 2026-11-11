@@ -17,6 +17,7 @@ const NEWTAB: &str = include_str!("../../../../assets/pages/newtab.html");
 const SETTINGS: &str = include_str!("../../../../assets/pages/settings.html");
 const HISTORY: &str = include_str!("../../../../assets/pages/history.html");
 const ERROR: &str = include_str!("../../../../assets/pages/error.html");
+const READER: &str = include_str!("../../../../assets/pages/reader.html");
 const ICON: &str = include_str!("../../../../assets/icon.svg");
 
 fn engines_json() -> String {
@@ -108,6 +109,22 @@ pub fn serve(b: &Browser, url: &str) -> (&'static str, Vec<u8>) {
     }
 }
 
+/// Reader mode's page for an extracted article.
+pub fn reader_page(b: &Browser, a: &volant_core::reader::Article, url: &str) -> String {
+    let data = Obj::new()
+        .str("title", &a.title)
+        .str("byline", &a.byline)
+        .str("site", &a.site)
+        .str("host", volant_core::omnibox::host(url))
+        .str("url", url)
+        .num("minutes", a.minutes())
+        .num("size", b.settings.reader_size)
+        .str("font", &b.settings.reader_font)
+        .str("html", &a.html)
+        .done();
+    READER.replacen("__VOLANT_DATA__", &data, 1)
+}
+
 pub fn error_page(url: &str, message: &str, code: isize) -> String {
     let data = Obj::new().str("url", url).str("host", volant_core::omnibox::host(url)).str("message", message).num("code", code).done();
     ERROR.replacen("__VOLANT_DATA__", &data, 1)
@@ -166,6 +183,7 @@ pub fn handle(b: &mut Browser, tab: Option<TabId>, cmd: &str, value: &str) {
         "clearHistory" => b.history.clear(),
         "clearData" => clear_website_data(b),
         "updateLists" => blocking::download_lists(b, true),
+        "exitReader" => actions::toggle_reader(b),
         _ => {}
     }
 }

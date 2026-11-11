@@ -36,12 +36,13 @@ pub enum Kind {
     FindNext,
     FindClose,
     Panel,
+    Reader,
 }
 
 impl Kind {
     fn from(v: u32) -> Self {
         use Kind::*;
-        [None, Tab, CloseTab, NewTab, Address, Back, Forward, Reload, Settings, Sidebar, Suggestion, Scrim, Downloads, FindPrev, FindNext, FindClose, Panel]
+        [None, Tab, CloseTab, NewTab, Address, Back, Forward, Reload, Settings, Sidebar, Suggestion, Scrim, Downloads, FindPrev, FindNext, FindClose, Panel, Reader]
             .get(v as usize)
             .copied()
             .unwrap_or(None)

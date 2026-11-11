@@ -164,7 +164,6 @@ pub fn smoke_test(b: &Browser) {
     let dir = std::env::var("VOLANT_SMOKE_DIR").unwrap_or_else(|_| "/tmp/volant-smoke".into());
     let _ = std::fs::create_dir_all(&dir);
     let window_id = b.window.windowNumber();
-    let started = std::time::Instant::now();
     let report = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let step = move |secs: f64, f: Box<dyn FnOnce(&mut Browser) + Send>| {
         std::thread::spawn(move || {
@@ -181,21 +180,17 @@ pub fn smoke_test(b: &Browser) {
     };
     let r = report.clone();
     let mem = move |label: &str| {
+        // Memory footprint, the figure Activity Monitor shows (RSS overcounts shared system libraries).
         let pid = std::process::id().to_string();
-        let out = std::process::Command::new("/bin/ps").args(["-o", "rss=", "-p", &pid]).output().ok();
-        let rss = out.and_then(|o| String::from_utf8(o.stdout).ok()).and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
-        let web = std::process::Command::new("/bin/sh")
-            .args(["-c", "ps -axo rss=,comm= | grep -i 'com.apple.WebKit' | awk '{s+=$1; n+=1} END {print n\" \"s}'"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .unwrap_or_default();
-        let line = format!("{label}: volant RSS {:.1} MB; WebKit helpers (count, total KB): {}\n", rss as f64 / 1024.0, web.trim());
+        let out = std::process::Command::new("/usr/bin/top").args(["-l", "1", "-pid", &pid, "-stats", "mem"]).output().ok();
+        let foot = out.and_then(|o| String::from_utf8(o.stdout).ok()).and_then(|s| s.lines().last().map(|l| l.trim().to_string())).unwrap_or_default();
+        let line = format!("{label}: Volant app process footprint {foot}\n");
         r.lock().unwrap().push_str(&line);
         eprint!("{line}");
     };
-    report.lock().unwrap().push_str(&format!("window shown after {:?}\n", started.elapsed()));
-    let (s1, s2, s3, s4, s5) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
+    let since_exec = crate::STARTED.get().map(|t| t.elapsed()).unwrap_or_default();
+    report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
+    let (s1, s2, s3, s4, s5, s6) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
     let (m1, m2) = (mem.clone(), mem);
     let rep = report.clone();
     let dir2 = dir.clone();
@@ -219,7 +214,7 @@ pub fn smoke_test(b: &Browser) {
     step(17.0, Box::new(move |_b| s3("3-command-bar")));
     step(18.0, Box::new(|b| {
         command::close(b);
-        actions::select_index(b, 4);
+        actions::open_or_switch(b, "volant://settings");
     }));
     step(21.0, Box::new(move |_b| s4("4-settings")));
     step(22.0, Box::new(|b| {
@@ -231,7 +226,9 @@ pub fn smoke_test(b: &Browser) {
         m2("5 tabs open, 2 loaded");
         s5("5-dark");
     }));
-    step(26.0, Box::new(move |_b| {
+    step(26.0, Box::new(actions::toggle_reader));
+    step(29.0, Box::new(move |_b| s6("6-reader")));
+    step(30.0, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

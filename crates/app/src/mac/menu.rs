@@ -38,13 +38,14 @@ pub enum Cmd {
     PrevTab,
     Welcome,
     Source,
+    Reader,
     Tab1 = 100,
 }
 
 const CMDS: &[Cmd] = &[
     Cmd::Settings, Cmd::MakeDefault, Cmd::NewTab, Cmd::OpenLocation, Cmd::ReopenTab, Cmd::CloseTab, Cmd::Print, Cmd::Find, Cmd::FindNext,
     Cmd::FindPrev, Cmd::CopyUrl, Cmd::ToggleSidebar, Cmd::Reload, Cmd::HardReload, Cmd::Stop, Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomReset,
-    Cmd::Back, Cmd::Forward, Cmd::Home, Cmd::History, Cmd::PinTab, Cmd::NextTab, Cmd::PrevTab, Cmd::Welcome, Cmd::Source,
+    Cmd::Back, Cmd::Forward, Cmd::Home, Cmd::History, Cmd::PinTab, Cmd::NextTab, Cmd::PrevTab, Cmd::Welcome, Cmd::Source, Cmd::Reader,
 ];
 
 const CMD: u8 = 1;
@@ -173,9 +174,10 @@ pub fn install(b: &Browser) {
 
     Builder::new(b, "View")
         .cmd("Toggle Sidebar", "s", CMD, Cmd::ToggleSidebar)
+        .cmd("Show Reader", "r", CMD | SHIFT, Cmd::Reader)
         .sep()
         .cmd("Reload Page", "r", CMD, Cmd::Reload)
-        .cmd("Reload Ignoring Cache", "r", CMD | SHIFT, Cmd::HardReload)
+        .cmd("Reload Ignoring Cache", "r", CMD | OPT, Cmd::HardReload)
         .cmd("Stop", ".", CMD, Cmd::Stop)
         .sep()
         .cmd("Actual Size", "0", CMD, Cmd::ZoomReset)
@@ -281,6 +283,7 @@ pub fn run(b: &mut Browser, tag: isize) {
         Cmd::Source => {
             actions::open_tab(b, "https://github.com/RowanMartian/volant", true);
         }
+        Cmd::Reader => actions::toggle_reader(b),
         Cmd::Tab1 => {}
     }
 }

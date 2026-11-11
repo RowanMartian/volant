@@ -24,6 +24,8 @@ pub struct Tabs {
     pub active: Option<TabId>,
     closed: Vec<(SavedTab, usize)>,
     next_id: TabId,
+    /// Background tabs opened in a row from the same tab, so the next one goes after them.
+    run: Option<(TabId, usize)>,
 }
 
 impl Tabs {
@@ -67,7 +69,16 @@ impl Tabs {
         let at = if pinned {
             self.pinned_count()
         } else if next_to_active {
-            self.active.and_then(|a| self.index(a)).map(|i| i + 1).unwrap_or(self.list.len()).max(self.pinned_count())
+            // Like Chrome and Safari: links opened one after another from the same
+            // page line up in the order you opened them, right after that page.
+            let after = match (self.active, self.run) {
+                (Some(a), Some((opener, n))) if opener == a => n,
+                _ => 0,
+            };
+            if let Some(a) = self.active {
+                self.run = Some((a, after + 1));
+            }
+            self.active.and_then(|a| self.index(a)).map(|i| i + 1 + after).unwrap_or(self.list.len()).max(self.pinned_count())
         } else {
             self.list.len()
         };
@@ -76,6 +87,9 @@ impl Tabs {
     }
 
     pub fn select(&mut self, id: TabId, now: u64) -> bool {
+        if self.active != Some(id) {
+            self.run = None;
+        }
         if let Some(t) = self.get_mut(id) {
             t.last_active = now;
             self.active = Some(id);
@@ -169,8 +183,12 @@ mod tests {
         let a = t.open("a", "", false, true, 0);
         t.select(a, 0);
         let b = t.open("b", "", false, true, 0);
-        let c = t.open("c", "", false, true, 0); // goes right after a, before b
-        assert_eq!(t.list.iter().map(|x| x.url.as_str()).collect::<Vec<_>>(), ["a", "c", "b"]);
+        let c = t.open("c", "", false, true, 0); // a run from a: b, then c
+        assert_eq!(t.list.iter().map(|x| x.url.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        t.select(b, 1);
+        let d = t.open("d", "", false, true, 1); // a new run starts after b
+        assert_eq!(t.list.iter().map(|x| x.url.as_str()).collect::<Vec<_>>(), ["a", "b", "d", "c"]);
+        t.close(d);
         t.select(c, 1);
         assert_eq!(t.close(c), Some(b));
         assert_eq!(t.close(b), Some(a));

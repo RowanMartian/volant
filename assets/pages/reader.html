@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Belt and braces: the article is already sanitised; nothing from the page may run here either way. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src * data:; style-src volant: 'unsafe-inline'; script-src volant: 'unsafe-inline'; font-src volant:">
+<title>Reader</title>
+<link rel="stylesheet" href="volant://app/style.css">
+<style>
+:root{--size:20px;--measure:680px}
+body{padding:0 24px 96px;-webkit-user-select:text;user-select:text;cursor:auto}
+.bar{position:sticky;top:0;z-index:2;display:flex;justify-content:center;padding:12px 0;background:var(--bg)}
+.tools{display:flex;align-items:center;gap:2px;background:var(--fill-soft);border-radius:12px;padding:3px}
+.tools button{height:30px;min-width:34px;padding:0 10px;border-radius:9px;color:var(--text2);font-weight:550}
+.tools button:hover{background:var(--fill);color:var(--text)}
+.tools button.on{background:var(--bg);color:var(--text)}
+@media (prefers-color-scheme: dark){.tools button.on{background:var(--fill-hover)}}
+.tools .sep{width:1px;height:16px;background:var(--fill-hover);margin:0 4px}
+.tools .small{font-size:12px}
+.tools .big{font-size:16px}
+article{max-width:var(--measure);margin:28px auto 0}
+.meta{color:var(--text2);font-size:13px;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-bottom:14px}
+.meta a{color:var(--text2)}
+.meta i{width:3px;height:3px;border-radius:50%;background:var(--text3)}
+h1.title{font:700 calc(var(--size) * 1.8)/1.15 var(--face);letter-spacing:-.02em;margin:0 0 28px;color:var(--text)}
+.content{font:400 var(--size)/1.65 var(--face);color:var(--text);overflow-wrap:break-word}
+body.serif{--face:ui-serif,"New York",Georgia,serif}
+body.sans{--face:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
+.content p{margin:0 0 1.1em}
+.content h2,.content h3,.content h4,.content h5,.content h6{font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:-.01em;line-height:1.25;margin:1.8em 0 .6em}
+.content h2{font-size:1.3em}
+.content h3{font-size:1.12em}
+.content h4,.content h5,.content h6{font-size:1em}
+.content a{color:var(--accent);text-decoration:none}
+.content a:hover{text-decoration:underline}
+.content img{display:block;max-width:100%;height:auto;margin:1.4em auto;border-radius:12px}
+.content figure{margin:1.6em 0}
+.content figure img{margin:0 auto}
+.content figcaption{font:13px/1.45 -apple-system,system-ui,sans-serif;color:var(--text2);margin-top:8px;text-align:center}
+.content blockquote{margin:1.4em 0;padding:16px 20px;background:var(--fill-soft);border-radius:12px;color:var(--text)}
+.content blockquote p:last-child{margin-bottom:0}
+.content pre{font:13.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--fill-soft);border-radius:12px;padding:14px 16px;overflow:auto;white-space:pre}
+.content code{font:.85em ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--fill-soft);border-radius:5px;padding:1px 5px}
+.content pre code{background:none;padding:0;font-size:inherit}
+.content ul,.content ol{padding-left:1.4em;margin:0 0 1.1em}
+.content li{margin:.3em 0}
+.content hr{border:0;height:1px;background:var(--fill);margin:2em 0}
+.content table{border-collapse:collapse;width:100%;font:14px/1.45 -apple-system,system-ui,sans-serif;margin:1.4em 0;display:block;overflow-x:auto}
+.content th,.content td{padding:8px 10px;text-align:left;vertical-align:top}
+.content th{background:var(--fill-soft);font-weight:600}
+.content tr:nth-child(even) td{background:var(--fill-soft)}
+.content sup{font-size:.65em;line-height:0}
+.content sup a{color:var(--text3)}
+.end{max-width:var(--measure);margin:48px auto 0;color:var(--text3);font-size:12px;display:flex;align-items:center;gap:10px}
+.end svg{width:20px;height:20px;color:var(--text3)}
+</style>
+</head>
+<body class="serif">
+<script id="volant-data" type="application/json">__VOLANT_DATA__</script>
+<script>window.VOLANT_SAMPLE = { title: 'How jets fly', byline: 'Ada Wright', site: 'Sky Weekly', host: 'sky.example', url: 'https://sky.example/jets', minutes: 4, size: 20, font: 'serif',
+  html: '<p>A jet engine pulls in air, squeezes it, mixes it with fuel, and burns it. The hot exhaust rushes out of the back, and the engine is pushed forward.</p><h2>Wings</h2><p>Wings do the rest. Air moving over the curved top of a wing pushes the aircraft up. Pilots trim, climb and turn by changing the angle the wing meets the air at.</p><blockquote><p>At cruising height the air is thin, so engines burn less fuel.</p></blockquote><pre><code>thrust = mass_flow * (v_exit - v_in)</code></pre><ul><li>Turbojets</li><li>Turbofans</li><li>Ramjets</li></ul>' };</script>
+<script src="volant://app/volant.js"></script>
+
+<div class="bar">
+  <div class="tools">
+    <button class="small" id="smaller" title="Smaller text">A</button>
+    <button class="big" id="bigger" title="Larger text">A</button>
+    <span class="sep"></span>
+    <button id="serif">Serif</button>
+    <button id="sans">Sans</button>
+    <span class="sep"></span>
+    <button id="exit" title="Leave Reader (⇧⌘R)">Done</button>
+  </div>
+</div>
+<article>
+  <div class="meta" id="meta"></div>
+  <h1 class="title" id="title"></h1>
+  <div class="content" id="content"></div>
+</article>
+<div class="end" id="end"></div>
+
+<script>
+document.title = V.title || 'Reader';
+$('#title').textContent = V.title || '';
+const meta = [];
+if (V.site || V.host) meta.push(`<a href="${esc(V.url)}">${esc(V.site || V.host)}</a>`);
+if (V.byline) meta.push(esc(V.byline));
+if (V.minutes) meta.push(`${V.minutes} min read`);
+$('#meta').innerHTML = meta.join('<i></i>');
+// Already sanitised by Volant: an allow-list of tags, no attributes beyond href/src/alt, no scripts.
+$('#content').innerHTML = V.html || '';
+$('#end').innerHTML = logo() + '<span>Read in Volant</span>';
+
+let size = Number(V.size) || 20;
+let font = V.font === 'sans' ? 'sans' : 'serif';
+function apply() {
+  document.documentElement.style.setProperty('--size', size + 'px');
+  document.body.className = font;
+  $('#serif').classList.toggle('on', font === 'serif');
+  $('#sans').classList.toggle('on', font === 'sans');
+}
+function save() { volant.send('set', 'reader_size=' + size); volant.send('set', 'reader_font=' + font); }
+$('#smaller').onclick = () => { size = Math.max(14, size - 1); apply(); save(); };
+$('#bigger').onclick = () => { size = Math.min(30, size + 1); apply(); save(); };
+$('#serif').onclick = () => { font = 'serif'; apply(); save(); };
+$('#sans').onclick = () => { font = 'sans'; apply(); save(); };
+$('#exit').onclick = () => volant.send('exitReader');
+apply();
+</script>
+</body>
+</html>

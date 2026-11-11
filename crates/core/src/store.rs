@@ -66,6 +66,9 @@ pub struct Settings {
     pub lists_updated: u64,
     /// Sites removed from the new tab page.
     pub hidden: Vec<String>,
+    /// Reader text size in points, and "serif" or "sans".
+    pub reader_size: u32,
+    pub reader_font: String,
 }
 
 impl Default for Settings {
@@ -80,6 +83,8 @@ impl Default for Settings {
             suspend_minutes: 20,
             lists_updated: 0,
             hidden: Vec::new(),
+            reader_size: 20,
+            reader_font: "serif".into(),
         }
     }
 }
@@ -108,6 +113,8 @@ impl Settings {
                 "sidebar" => s.sidebar = v == "1",
                 "suspend_minutes" => s.suspend_minutes = v.parse().unwrap_or(s.suspend_minutes),
                 "lists_updated" => s.lists_updated = v.parse().unwrap_or(0),
+                "reader_size" => s.reader_size = v.parse::<u32>().map(|n| n.clamp(14, 30)).unwrap_or(s.reader_size),
+                "reader_font" => s.reader_font = if v == "sans" { "sans".into() } else { "serif".into() },
                 "hidden" => s.hidden = v.split(',').map(str::trim).filter(|h| !h.is_empty()).map(String::from).collect(),
                 _ => {}
             }
@@ -118,7 +125,7 @@ impl Settings {
     pub fn serialize(&self) -> String {
         let b = |x: bool| if x { "1" } else { "0" };
         format!(
-            "engine={}\nblocking={}\nappearance={}\nonboarded={}\nrestore_session={}\nsidebar={}\nsuspend_minutes={}\nlists_updated={}\nhidden={}\n",
+            "engine={}\nblocking={}\nappearance={}\nonboarded={}\nrestore_session={}\nsidebar={}\nsuspend_minutes={}\nlists_updated={}\nhidden={}\nreader_size={}\nreader_font={}\n",
             self.engine,
             self.blocking.as_str(),
             self.appearance.as_str(),
@@ -127,7 +134,9 @@ impl Settings {
             b(self.sidebar),
             self.suspend_minutes,
             self.lists_updated,
-            self.hidden.join(",")
+            self.hidden.join(","),
+            self.reader_size,
+            self.reader_font
         )
     }
 
@@ -143,7 +152,8 @@ impl Settings {
     pub fn set(&mut self, key: &str, value: &str) -> bool {
         let before = self.clone();
         *self = Self::parse(&format!("{}{key}={value}\n", self.serialize()));
-        *self != before || matches!(key, "engine" | "blocking" | "appearance" | "onboarded" | "restore_session" | "sidebar" | "suspend_minutes")
+        *self != before
+            || matches!(key, "engine" | "blocking" | "appearance" | "onboarded" | "restore_session" | "sidebar" | "suspend_minutes" | "reader_size" | "reader_font")
     }
 }
 

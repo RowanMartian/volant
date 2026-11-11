@@ -1,5 +1,5 @@
-target/
-dist/
-bench/
-smoke/
+/target/
+/dist/
+/bench/
+/smoke/
 .DS_Store

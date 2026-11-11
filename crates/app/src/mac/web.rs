@@ -485,7 +485,7 @@ fn changed(b: &mut Browser, ptr: usize, key: &str) {
         "title" => {
             let title = unsafe { web.title() }.map(|t| t.to_string()).unwrap_or_default();
             if let Some(tab) = b.tabs.get_mut(id) {
-                if !title.is_empty() && !tab.url.starts_with("volant://error") {
+                if !title.is_empty() {
                     tab.title = title.clone();
                 }
                 let url = tab.url.clone();
@@ -499,7 +499,9 @@ fn changed(b: &mut Browser, ptr: usize, key: &str) {
         }
         "URL" => {
             let url = unsafe { web.URL() }.and_then(|u| u.absoluteString()).map(|s| s.to_string()).unwrap_or_default();
-            if url.is_empty() || url.starts_with("volant://error") {
+            if url.is_empty() || url.starts_with("volant://error") || url.starts_with("volant://reader") {
+                // Error and Reader pages stand in for the real page; keep its address.
+                ui::update_chrome(b);
                 return;
             }
             if let Some(tab) = b.tabs.get_mut(id) {

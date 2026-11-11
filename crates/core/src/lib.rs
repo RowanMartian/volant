@@ -9,6 +9,8 @@
 //! * [`blocker`]: compiles Adblock Plus / uBlock filter lists into WebKit
 //!   content-rule JSON, so blocking runs inside the engine as compiled bytecode
 //!   with zero JavaScript.
+//! * [`html`]: an HTML tokenizer and tree builder, written from scratch.
+//! * [`reader`]: Reader mode, which finds the article in a page and rewrites it as clean HTML.
 //! * [`store`]: settings and session files in a plain line format.
 //! * [`tabs`]: tab order, pinning, closed-tab memory and sleeping tabs.
 //! * [`json`]: the minimal JSON writer/reader the app needs.
@@ -17,7 +19,9 @@ pub mod blocker;
 pub mod fuzzy;
 pub mod history;
 pub mod json;
+pub mod html;
 pub mod omnibox;
+pub mod reader;
 pub mod search;
 pub mod store;
 pub mod tabs;

@@ -34,6 +34,7 @@ pub fn hit(kind: Kind, data: u64, click: Click) {
         (Kind::Suggestion, _) => command::choose(b, data as usize, false),
         (Kind::Scrim, _) => command::close(b),
         (Kind::Downloads, _) => reveal_download(b),
+        (Kind::Reader, _) => toggle_reader(b),
         (Kind::FindPrev, _) => find::step(b, true),
         (Kind::FindNext, _) => find::step(b, false),
         (Kind::FindClose, _) => find::close(b),
@@ -258,6 +259,59 @@ pub fn navigate(b: &mut Browser, url: &str) {
     b.window.makeFirstResponder(Some(&web));
     ui::update_row(b, id);
     ui::update_chrome(b);
+}
+
+/// Is this tab showing Reader mode?
+pub fn in_reader(b: &Browser, id: TabId) -> bool {
+    b.webs.get(&id).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string().starts_with("volant://reader")).unwrap_or(false)
+}
+
+/// ⇧⌘R: shows the page's article in Reader, or goes back to the page.
+///
+/// The page's live DOM (after its scripts ran) is parsed by Volant's own HTML
+/// parser on a background thread, then shown as a new history entry, so Back
+/// returns to the original page.
+pub fn toggle_reader(b: &mut Browser) {
+    let Some(id) = b.tabs.active else { return };
+    let Some(web) = b.webs.get(&id).map(|w| w.web.clone()) else { return };
+    if in_reader(b, id) {
+        unsafe { web.goBack() };
+        return;
+    }
+    let url = b.tabs.get(id).map(|t| t.url.clone()).unwrap_or_default();
+    if !url.starts_with("http") {
+        beep();
+        return;
+    }
+    let block = RcBlock::new(move |res: *mut AnyObject, _e: *mut NSError| {
+        let Some(html) = unsafe { res.as_ref() }.and_then(|o| o.downcast_ref::<objc2_foundation::NSString>()).map(|s| s.to_string()) else {
+            beep();
+            return;
+        };
+        let url = url.clone();
+        std::thread::spawn(move || {
+            let article = volant_core::reader::extract(&html, &url);
+            super::on_main(move || {
+                with(move |b| {
+                    let Some(a) = article else { return beep() };
+                    // Only if the user is still on that page.
+                    if b.tabs.active != Some(id) || b.tabs.get(id).map(|t| t.url != url).unwrap_or(true) {
+                        return;
+                    }
+                    let page = super::pages::reader_page(b, &a, &url);
+                    if let Some(w) = b.webs.get(&id) {
+                        let base = NSURL::URLWithString(&ns("volant://reader"));
+                        unsafe { w.web.loadHTMLString_baseURL(&ns(&page), base.as_deref()) };
+                    }
+                });
+            });
+        });
+    });
+    unsafe { web.evaluateJavaScript_completionHandler(&ns("document.documentElement.outerHTML"), Some(&block)) };
+}
+
+fn beep() {
+    objc2_app_kit::NSBeep();
 }
 
 fn active_web(b: &Browser) -> Option<Retained<WKWebView>> {

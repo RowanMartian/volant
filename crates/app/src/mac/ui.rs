@@ -110,6 +110,7 @@ pub struct Ui {
     pub address: Retained<Hit>,
     pub address_icon: Retained<NSImageView>,
     pub address_text: Retained<NSTextField>,
+    pub reader: IconButton,
     pub new_tab: Retained<Hit>,
     pub new_tab_icon: Retained<NSImageView>,
     pub new_tab_label: Retained<NSTextField>,
@@ -171,9 +172,11 @@ impl Ui {
         }
         let address_icon = views::image_view(None, rect(11.0, 10.0, 16.0, 16.0), None, mtm);
         let address_text = label("", 13.0, Weight::Medium, theme::current().text, mtm);
-        address_text.setFrame(rect(34.0, 9.0, SIDEBAR_W - 20.0 - 44.0, 18.0));
+        address_text.setFrame(rect(34.0, 9.0, SIDEBAR_W - 20.0 - 72.0, 18.0));
+        let reader = IconButton::new(Kind::Reader, "doc.plaintext", 12.0, rect(SIDEBAR_W - 20.0 - 34.0, 6.0, 26.0, 24.0), "Show Reader (⇧⌘R)", mtm);
         address.addSubview(&address_icon);
         address.addSubview(&address_text);
+        address.addSubview(&reader.hit);
         address.setToolTip(Some(&ns("Search or enter an address (⌘L)")));
         sidebar.addSubview(&address);
 
@@ -223,6 +226,7 @@ impl Ui {
             address,
             address_icon,
             address_text,
+            reader,
             new_tab,
             new_tab_icon,
             new_tab_label,
@@ -411,6 +415,10 @@ pub fn update_chrome(b: &Browser) {
     } else {
         (omnibox::display(&url), "doc", false)
     };
+    let reading = b.tabs.active.map(|id| super::actions::in_reader(b, id)).unwrap_or(false);
+    ui.reader.hit.setHidden(!(reading || url.starts_with("http")));
+    views::tint(&ui.reader.img, if reading { t.accent } else { t.text2 });
+    ui.reader.hit.setToolTip(Some(&ns(if reading { "Hide Reader (⇧⌘R)" } else { "Show Reader (⇧⌘R)" })));
     set_text(&ui.address_text, &text);
     views::recolor(&ui.address_text, if dim { t.text3 } else { t.text });
     ui.address_icon.setImage(symbol(icon, 11.0, Weight::Semibold).as_deref());
@@ -490,7 +498,7 @@ pub fn repaint(b: &mut Browser) {
     fill(&ui.content, t.content);
     fill(&ui.progress, t.accent);
     ui.address.set_fill(Some(t.fill));
-    for btn in [&ui.back, &ui.forward, &ui.reload, &ui.settings, &ui.toggle] {
+    for btn in [&ui.back, &ui.forward, &ui.reload, &ui.settings, &ui.toggle, &ui.reader] {
         views::tint(&btn.img, t.text2);
         btn.hit.restyle();
     }
