@@ -468,8 +468,12 @@ fn serialize(d: &Dom, info: &Info, id: NodeId, url: &str, title: &str, out: &mut
                 }
                 return;
             }
-            // Nothing left to read inside (and no pictures): skip it.
+            // Nothing left to read inside (and no pictures): skip it. An inline
+            // element holding only a space (a wrapped &nbsp;) still separates words.
             if info.text[id as usize] == 0 && !matches!(name, "br" | "hr") && !has_image(d, info, id) {
+                if !BLOCKS.contains(&name) && d.text(id).chars().any(char::is_whitespace) {
+                    out.push(' ');
+                }
                 return;
             }
             // Link-heavy lists and tables inside an article are usually navigation.
@@ -598,6 +602,13 @@ mod tests {
             assert!(!a.html.contains(bad), "{bad} leaked into {}", a.html);
         }
         assert!(!a.html.contains("<h2>How jets fly"), "title repeated");
+    }
+
+    #[test]
+    fn keeps_spaces_wrapped_in_inline_elements() {
+        let page = PAGE.replace("At cruising height", "At Mach<span>&nbsp;</span>0.8 and 981<span> </span>km/h, at cruising height");
+        let a = extract(&page, "https://sky.example/").unwrap();
+        assert!(a.html.contains("Mach 0.8 and 981 km/h"), "{}", a.html);
     }
 
     #[test]

@@ -60,7 +60,7 @@ quit_all() {
 
 # Per-browser details (plain functions: macOS ships bash 3.2, which has no maps).
 app_of() { case "$1" in Volant) echo "dist/Volant.app";; Safari) echo "/Applications/Safari.app";; Chrome) echo "/Applications/Google Chrome.app";; Firefox) echo "/Applications/Firefox.app";; esac; }
-exe_of() { case "$1" in Volant) echo "dist/Volant.app/Contents/MacOS/Volant";; Safari) echo "/usr/bin/open";; Chrome) echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";; Firefox) echo "/Applications/Firefox.app/Contents/MacOS/firefox";; esac; }
+exe_of() { case "$1" in Volant) echo "dist/Volant.app/Contents/MacOS/Volant";; Safari) echo "/Applications/Safari.app/Contents/MacOS/Safari";; Chrome) echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";; Firefox) echo "/Applications/Firefox.app/Contents/MacOS/firefox";; esac; }
 owner_of() { case "$1" in Chrome) echo "Google Chrome";; *) echo "$1";; esac; }
 pattern_of() { case "$1" in Volant) echo 'Volant|com\.apple\.WebKit';; Safari) echo 'Safari|com\.apple\.WebKit';; Chrome) echo 'Google Chrome';; Firefox) echo 'firefox|plugin-container|Firefox';; esac; }
 
@@ -70,7 +70,7 @@ args_for() {
     Volant)
       mkdir -p "$TMP/volant"; printf 'onboarded=1\nrestore_session=0\n' > "$TMP/volant/settings.txt"
       echo "$@" ;;
-    Safari) echo "-a Safari $*" ;;
+    Safari) echo "$*" ;;
     Chrome) echo "--user-data-dir=$TMP/chrome --no-first-run --no-default-browser-check --disable-search-engine-choice-screen $*" ;;
     Firefox)
       mkdir -p "$TMP/firefox"
@@ -94,7 +94,8 @@ JS
 for b in Volant Safari Chrome Firefox; do
   [ -e "$(app_of "$b")" ] || { echo "skip $b (not installed)"; continue; }
   echo "== $b"
-  size=$(du -sm "$(app_of "$b")" | cut -f1)
+  size=$(du -sLm "$(app_of "$b")" 2>/dev/null | cut -f1)
+  [ "$b" = Safari ] && [ "${size:-0}" -lt 2 ] && size="(in macOS)"
   quit_all
   export VOLANT_DATA_DIR="$TMP/volant"
   # Launch time: one warm-up run, then the median of three.
@@ -116,8 +117,9 @@ for b in Volant Safari Chrome Firefox; do
   read -r mem1 cpu1 n2 < <(measure "$OUT/before.txt" "$(pattern_of "$b")")
   idle=$(python3 -c "print(f'{max(0, $cpu1 - $cpu0):.2f} s')")
   mem="${mem1} MB"
-  echo "  size ${size} MB, launch ${launch} ms, memory $mem in $n2 processes, idle CPU $idle"
-  echo "| $b | ${size} MB | ${launch} ms | $mem | $n2 | $idle |" >> "$OUT/table.md"
+  echo "  size ${size}, launch ${launch} ms, memory $mem in $n2 processes, idle CPU $idle"
+  [[ "$size" =~ ^[0-9]+$ ]] && size="$size MB"
+  echo "| $b | ${size} | ${launch} ms | $mem | $n2 | $idle |" >> "$OUT/table.md"
   quit_all
 done
 
