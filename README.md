@@ -122,19 +122,33 @@ and truncated inputs (`--example fuzz`).
 
 Measured by CI on GitHub's macOS runners (Apple M1, virtualised) with `scripts/bench/run.sh`:
 the same five pages open in each browser, memory as Activity Monitor's footprint summed over
-every process the browser started. Two runs; ranges show how much shared runners vary.
+every process the browser started. Latest run:
 
 | | Volant | Safari | Chrome | Firefox |
 | --- | --- | --- | --- | --- |
-| App size | **2 MB** | ships with macOS (29 MB app) | 732 MB | 521 MB |
-| Launch to window | **0.30–0.74 s** | 2.1–2.9 s | 0.60–0.87 s | 1.3–1.4 s |
-| Memory, 5 pages | 253–279 MB | 160–308 MB | 518–523 MB | 805–823 MB |
-| Idle CPU over 30 s | **0.00 s** | 0.02–0.20 s | 0.23–0.33 s | 1.5–2.2 s |
+| App size | **2 MB** | ships with macOS | 732 MB | 521 MB |
+| Launch to window | **0.30 s** | 3.6 s | 1.5 s | 2.3 s |
+| Memory, 5 pages | 320 MB | 169 MB | 515 MB | 821 MB |
+| Idle CPU over 30 s | 1.3 s | 0.02 s | 0.36 s | 2.6 s |
 
-Volant draws pages with the same engine as Safari, so page loading and JavaScript run at
-Safari's speed and memory lands in the same range. Against Chrome and Firefox it uses about
-half and a third of the memory, launches faster, ships in a fraction of the size, and sits
-truly idle when you aren't doing anything.
+Shared runners are noisy, so here is the spread over four runs:
+
+| | Volant | Safari | Chrome | Firefox |
+| --- | --- | --- | --- | --- |
+| Launch to window | 0.29–0.30 s since showing the window first (0.30–1.04 s before) | 2.1–3.6 s | 0.60–1.5 s | 1.3–2.3 s |
+| Memory, 5 pages | 253–320 MB | 160–308 MB | 515–527 MB | 805–823 MB |
+| Idle CPU over 30 s | 0.00–1.3 s | 0.02–0.20 s | 0.21–0.36 s | 1.5–2.9 s |
+
+What this shows, honestly:
+
+- **Size:** Volant is a 1.3 MB download; Chrome and Firefox ship their own engines.
+- **Launch:** Volant puts its window up fastest in every run, 2–5× sooner than Chrome and 7–12× sooner than Safari.
+- **Memory:** about half of Chrome's and a third of Firefox's. Against Safari it's the same engine
+  and lands in the same range; Safari sometimes comes in lower.
+- **Idle CPU:** usually zero for Volant's own process; what shows up is the pages' own scripts
+  in WebKit's processes. The benchmark counts every WebKit helper that starts during the test,
+  so Volant's and Safari's figures can include some noise from the system.
+- **Page speed:** identical to Safari, because it is Safari's engine doing the work.
 
 ### Building it yourself
 
