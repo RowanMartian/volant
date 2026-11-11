@@ -51,7 +51,6 @@ fn binary_mb() -> Option<String> {
 }
 
 fn page_data(b: &Browser, page: &str) -> String {
-    let now = super::now();
     match page {
         "welcome" => {
             let mut o = Obj::new().raw("engines", &engines_json()).raw("settings", &settings_json(b)).bool("isDefault", is_default()).str("version", super::VERSION);
@@ -61,14 +60,14 @@ fn page_data(b: &Browser, page: &str) -> String {
             o.done()
         }
         "newtab" => {
-            let top = b
-                .history
-                .top_sites(16, now)
-                .into_iter()
-                .filter(|(h, _, _)| !b.settings.hidden.iter().any(|x| x == h))
-                .take(8)
-                .map(|(h, u, t)| json::array([json::string(&h), json::string(&u), json::string(&t)]));
-            Obj::new().raw("top", &json::array(top)).str("engineName", search::engine(&b.settings.engine).name).done()
+            let s = &b.settings;
+            let weather = Obj::new()
+                .bool("on", s.weather)
+                .str("place", &s.weather_place)
+                .str("unit", &s.weather_unit)
+                .str("data", super::weather::cached(b).unwrap_or(""))
+                .done();
+            Obj::new().raw("favorites", &favorites_json(b)).raw("weather", &weather).str("engineName", search::engine(&s.engine).name).done()
         }
         "settings" => Obj::new()
             .raw("engines", &engines_json())
@@ -80,6 +79,7 @@ fn page_data(b: &Browser, page: &str) -> String {
             .str("version", super::VERSION)
             .str("commit", super::COMMIT.map(|c| &c[..c.len().min(7)]).unwrap_or(""))
             .num("historyCount", b.history.len())
+            .str("update", super::updater::state_word(b))
             .done(),
         "history" => {
             let items = b.history.recent(3000).into_iter().map(|p| json::array([json::string(&p.url), json::string(&p.title), p.last.to_string()]));
@@ -87,6 +87,14 @@ fn page_data(b: &Browser, page: &str) -> String {
         }
         _ => "{}".into(),
     }
+}
+
+fn favorites_json(b: &Browser) -> String {
+    json::array(b.favorites.list.iter().map(|f| json::array([json::string(&f.url), json::string(&f.title)])))
+}
+
+fn send_favorites(b: &Browser, err: &str) {
+    notify(b, &format!("window.volantFavorites && volantFavorites({}, {})", favorites_json(b), json::string(err)));
 }
 
 fn fill(template: &str, data: &str) -> Vec<u8> {
@@ -169,19 +177,47 @@ pub fn handle(b: &mut Browser, tab: Option<TabId>, cmd: &str, value: &str) {
             }
             actions::navigate(b, actions::NEWTAB);
         }
-        "command" => super::command::open(b, super::command::Mode::Current, ""),
+        // The new tab page's search field.
+        "go" => {
+            let text = value.trim();
+            if !text.is_empty() {
+                let url = volant_core::omnibox::resolve(text, &b.settings.engine);
+                actions::navigate(b, &url);
+            }
+        }
+        "favAdd" => {
+            let (url, title) = value.split_once('\t').unwrap_or((value, ""));
+            if b.favorites.add(url, title) {
+                b.favorites.save(&b.paths.favorites);
+                send_favorites(b, "");
+            } else if volant_core::omnibox::as_url(url).is_none() {
+                send_favorites(b, "That doesn’t look like a web address.");
+            } else if b.favorites.list.len() >= volant_core::store::MAX_FAVORITES {
+                send_favorites(b, "That’s the most favourites the page can show.");
+            } else {
+                send_favorites(b, "That site is already a favourite.");
+            }
+        }
+        "favRemove" => {
+            b.favorites.remove(value);
+            b.favorites.save(&b.paths.favorites);
+        }
+        "favMove" => {
+            if let Some((from, to)) = value.split_once('\t').and_then(|(f, t)| Some((f.parse().ok()?, t.parse().ok()?))) {
+                b.favorites.reorder(from, to);
+                b.favorites.save(&b.paths.favorites);
+            }
+        }
+        "weatherPlace" => super::weather::find_place(value),
+        "weatherFetch" => super::weather::refresh(b),
+        "checkUpdates" => super::updater::check(b, true),
+        "installUpdate" => super::updater::install(b),
         "open" => {
             if !value.is_empty() {
                 actions::navigate(b, value);
             }
         }
         "makeDefault" => make_default(),
-        "hideSite" => {
-            if !b.settings.hidden.iter().any(|h| h == value) {
-                b.settings.hidden.push(value.to_string());
-                b.settings.save(&b.paths.settings);
-            }
-        }
         "removeHistory" => b.history.remove(value),
         "clearHistory" => b.history.clear(),
         "clearData" => clear_website_data(b),

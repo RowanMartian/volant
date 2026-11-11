@@ -18,6 +18,9 @@ use volant_core::tabs::TabId;
 
 pub const SIDEBAR_W: f64 = 252.0;
 pub const INSET: f64 = 8.0;
+/// With the sidebar hidden, a slim strip above the page holds the window
+/// buttons and the button that brings the sidebar back.
+const STRIP_H: f64 = 40.0;
 const ROW_H: f64 = 34.0;
 const ROW_GAP: f64 = 2.0;
 const LIST_TOP: f64 = 136.0;
@@ -121,8 +124,12 @@ pub struct Ui {
     pub toggle: IconButton,
     pub downloads: Retained<Hit>,
     pub downloads_label: Retained<NSTextField>,
+    pub update: Retained<Hit>,
+    pub update_label: Retained<NSTextField>,
+    pub update_dot: Retained<Flipped>,
     pub content: Retained<Flipped>,
     pub progress: Retained<Flipped>,
+    pub show_sidebar: IconButton,
 }
 
 pub fn make_window(delegate: &Delegate, mtm: MainThreadMarker) -> Retained<NSWindow> {
@@ -205,7 +212,15 @@ impl Ui {
         downloads_label.setFrame(rect(8.0, 6.0, SIDEBAR_W - 100.0, 16.0));
         downloads.addSubview(&downloads_label);
         downloads.setHidden(true);
-        for v in [&settings.hit, &toggle.hit, &downloads] {
+        let update = Hit::new(Kind::Update, 0, rect(42.0, h - 38.0, SIDEBAR_W - 84.0, 28.0), true, mtm);
+        let update_dot = plate(rect(9.0, 11.0, 6.0, 6.0), 3.0, mtm);
+        let update_label = label("Update available", 12.0, Weight::Semibold, theme::current().accent, mtm);
+        update_label.setFrame(rect(21.0, 6.0, SIDEBAR_W - 110.0, 16.0));
+        update.addSubview(&update_dot);
+        update.addSubview(&update_label);
+        update.setToolTip(Some(&ns("A newer build of Volant is ready. Click to update.")));
+        update.setHidden(true);
+        for v in [&settings.hit, &toggle.hit, &downloads, &update] {
             sidebar.addSubview(v);
         }
 
@@ -216,6 +231,9 @@ impl Ui {
         root.addSubview(&content);
         let progress = Flipped::new(rect(0.0, 0.0, 0.0, 2.5), mtm);
         progress.setHidden(true);
+        let show_sidebar = IconButton::new(Kind::ShowSidebar, "sidebar.left", 14.0, rect(84.0, 6.0, 28.0, 28.0), "Show Sidebar (⌘S)", mtm);
+        show_sidebar.hit.setHidden(true);
+        root.addSubview(&show_sidebar.hit);
 
         Self {
             root,
@@ -237,14 +255,18 @@ impl Ui {
             toggle,
             downloads,
             downloads_label,
+            update,
+            update_label,
+            update_dot,
             content,
             progress,
+            show_sidebar,
         }
     }
 }
 
 /// Moves the window's traffic lights so they line up with the sidebar's buttons.
-fn place_traffic_lights(window: &NSWindow, visible: bool) {
+fn place_traffic_lights(window: &NSWindow, visible: bool, inset_y: f64) {
     let buttons: Vec<Retained<objc2_app_kit::NSButton>> =
         [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton].iter().filter_map(|&k| window.standardWindowButton(k)).collect();
     if buttons.len() != 3 {
@@ -256,7 +278,7 @@ fn place_traffic_lights(window: &NSWindow, visible: bool) {
     if !visible || window.styleMask().contains(NSWindowStyleMask::FullScreen) {
         return;
     }
-    let (inset_x, inset_y) = (18.0, 20.0);
+    let inset_x = 18.0;
     let close = &buttons[0];
     let Some(container) = unsafe { close.superview() }.and_then(|v| unsafe { v.superview() }) else { return };
     let close_frame = close.frame();
@@ -279,9 +301,13 @@ pub fn layout(b: &mut Browser) {
     let ui = &b.ui;
     ui.sidebar.setHidden(!show);
     ui.sidebar.setFrame(rect(0.0, 0.0, SIDEBAR_W, h));
-    place_traffic_lights(&b.window, show);
-    let cx = if show { SIDEBAR_W } else { INSET };
-    ui.content.setFrame(rect(cx, INSET, w - cx - INSET, h - INSET * 2.0));
+    // Lights line up with the sidebar's buttons, or centre in the strip when it's hidden.
+    place_traffic_lights(&b.window, true, if show { 20.0 } else { 13.0 });
+    ui.show_sidebar.hit.setHidden(show);
+    let full_screen = b.window.styleMask().contains(NSWindowStyleMask::FullScreen);
+    ui.show_sidebar.hit.setFrame(rect(if full_screen { 10.0 } else { 84.0 }, 6.0, 28.0, 28.0));
+    let (cx, cy) = if show { (SIDEBAR_W, INSET) } else { (INSET, STRIP_H) };
+    ui.content.setFrame(rect(cx, cy, w - cx - INSET, h - cy - INSET));
     let cb = ui.content.bounds();
     if let Some(t) = b.tabs.active.and_then(|id| b.webs.get(&id)) {
         t.web.setFrame(cb);
@@ -291,6 +317,7 @@ pub fn layout(b: &mut Browser) {
     ui.settings.hit.setFrame(rect(10.0, fy, 28.0, 28.0));
     ui.toggle.hit.setFrame(rect(SIDEBAR_W - 38.0, fy, 28.0, 28.0));
     ui.downloads.setFrame(rect(42.0, fy, SIDEBAR_W - 84.0, 28.0));
+    ui.update.setFrame(rect(42.0, fy, SIDEBAR_W - 84.0, 28.0));
     layout_rows(b);
     update_progress(b);
     super::command::layout(b);
@@ -487,6 +514,10 @@ pub fn update_downloads(b: &Browser) {
         }
         None => ui.downloads.setHidden(true),
     }
+    // Downloads take the slot first; otherwise it tells you about a new Volant.
+    let offer = b.update.installing || b.update.available.is_some();
+    ui.update.setHidden(!offer || !ui.downloads.isHidden());
+    set_text(&ui.update_label, if b.update.installing { "Updating Volant…" } else { "Update available" });
 }
 
 /// Applies the current theme's colours everywhere.
@@ -498,13 +529,16 @@ pub fn repaint(b: &mut Browser) {
     fill(&ui.content, t.content);
     fill(&ui.progress, t.accent);
     ui.address.set_fill(Some(t.fill));
-    for btn in [&ui.back, &ui.forward, &ui.reload, &ui.settings, &ui.toggle, &ui.reader] {
+    for btn in [&ui.back, &ui.forward, &ui.reload, &ui.settings, &ui.toggle, &ui.reader, &ui.show_sidebar] {
         views::tint(&btn.img, t.text2);
         btn.hit.restyle();
     }
     views::tint(&ui.new_tab_icon, t.text2);
     views::recolor(&ui.new_tab_label, t.text2);
     views::recolor(&ui.downloads_label, t.text2);
+    views::recolor(&ui.update_label, t.accent);
+    fill(&ui.update_dot, t.accent);
+    ui.update.restyle();
     ui.new_tab.restyle();
     ui.downloads.restyle();
     for r in &ui.rows {

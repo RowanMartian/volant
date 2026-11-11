@@ -156,6 +156,7 @@ pub fn start_timers(b: &Browser) {
 fn housekeeping(b: &mut Browser) {
     actions::save_session(b);
     actions::sleep_idle(b);
+    super::updater::tick(b);
 }
 
 /// `--smoke-test`: drives the real app through its main screens, saves
@@ -190,7 +191,8 @@ pub fn smoke_test(b: &Browser) {
     };
     let since_exec = super::SHOWN.with(|t| t.get()).unwrap_or_default();
     report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
-    let (s1, s2, s3, s4, s5, s6) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
+    let (s1, s2, s3, s4, s5, s6, s7, s8) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone());
+    let s9 = shot;
     let (m1, m2) = (mem.clone(), mem);
     let rep = report.clone();
     let dir2 = dir.clone();
@@ -228,7 +230,28 @@ pub fn smoke_test(b: &Browser) {
     }));
     step(26.0, Box::new(actions::toggle_reader));
     step(29.0, Box::new(move |_b| s6("6-reader")));
-    step(30.0, Box::new(move |_b| {
+    // The home page: favourites, live weather, the edit panel, then the sidebar hidden.
+    step(30.0, Box::new(|b| {
+        super::theme::apply_appearance(volant_core::store::Appearance::Light, b.mtm);
+        super::theme::refresh(b);
+        for (u, t) in [("github.com", "GitHub"), ("en.wikipedia.org", "Wikipedia"), ("news.ycombinator.com", "Hacker News"), ("apple.com", "Apple"), ("rust-lang.org", "Rust")] {
+            b.favorites.add(u, t);
+        }
+        b.settings.weather = true;
+        b.settings.weather_place = "Toronto, Ontario".into();
+        b.settings.weather_at = Some((43.70643, -79.39864));
+        actions::open_tab(b, actions::NEWTAB, true);
+    }));
+    step(35.0, Box::new(move |_b| s7("7-home")));
+    step(35.5, Box::new(|b| {
+        if let Some(w) = b.tabs.active.and_then(|id| b.webs.get(&id)) {
+            unsafe { w.web.evaluateJavaScript_completionHandler(&super::ns("document.getElementById('edit').click()"), None) };
+        }
+    }));
+    step(37.0, Box::new(move |_b| s8("8-home-edit")));
+    step(37.5, Box::new(actions::toggle_sidebar));
+    step(39.0, Box::new(move |_b| s9("9-no-sidebar")));
+    step(40.0, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

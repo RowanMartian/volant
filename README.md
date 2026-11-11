@@ -9,6 +9,8 @@
 - **Ads and trackers blocked inside the engine.** Filter lists are compiled once into WebKit content rules, which run as bytecode in WebKit's own networking code. No blocker scripts run on any page.
 - **Reader mode** (⇧⌘R) on Volant's own HTML parser: any article, minus everything around it, in a calm column of type.
 - **Sleeping tabs.** Tabs you haven't looked at in a while hand their memory back, and wake up when you return. At launch only the tab in front loads.
+- **A calm home page.** A search field, the favourite sites you choose, and an optional weather widget, all set up from the pencil in the corner.
+- **Updates itself.** When a new build is out, an "Update available" note appears at the bottom of the sidebar; one click and Volant restarts on the new version with your tabs intact.
 - **Private by default.** No accounts, no sync, no telemetry. Nothing leaves your Mac except the pages you visit.
 - **100% open source**, MIT licensed.
 
@@ -28,8 +30,8 @@ Volant needs macOS 12 Monterey or later, on Apple Silicon or Intel.
 
 | | |
 | --- | --- |
-| ⌘T | New tab, with the command bar open: type an address, a search, or part of a page you've visited |
-| ⌘L | Edit the current address |
+| ⌘T | New tab, ready to search or type an address |
+| ⌘L | The command bar: addresses, searches, history and open tabs |
 | ⌘S | Show or hide the sidebar |
 | ⌘D | Pin or unpin the current tab |
 | ⇧⌘T | Reopen the last tab you closed |
@@ -44,6 +46,16 @@ Volant needs macOS 12 Monterey or later, on Apple Silicon or Intel.
 | ⌘, | Settings |
 
 ⌘-click or middle-click a link to open it in a background tab (add ⇧ to switch to it). Right-click a tab to pin, duplicate, copy its link or close others.
+
+### The home page
+
+Click the pencil in the bottom-right corner to add your favourite sites (drag to reorder) and to turn on the weather widget.
+Weather comes from [Open-Meteo](https://open-meteo.com), free and without an account; only the city you choose is sent, and only while the widget is on.
+
+### Updates
+
+Volant checks GitHub for a newer build at launch and every few hours, or when you choose **Volant → Check for Updates…**.
+Updating downloads the new app, checks its signature, swaps it in when Volant quits, and reopens it. If Volant can't write to the folder it's in, it opens the download page instead.
 
 ### Blocking
 

@@ -15,7 +15,9 @@ mod menu;
 mod pages;
 mod theme;
 mod ui;
+mod updater;
 mod views;
+mod weather;
 mod web;
 
 use objc2::rc::Retained;
@@ -39,6 +41,7 @@ pub struct Paths {
     pub settings: PathBuf,
     pub session: PathBuf,
     pub history: PathBuf,
+    pub favorites: PathBuf,
     pub lists: PathBuf,
     pub downloads: PathBuf,
 }
@@ -52,6 +55,7 @@ impl Paths {
             settings: data.join("settings.txt"),
             session: data.join("session.txt"),
             history: data.join("history.log"),
+            favorites: data.join("favorites.txt"),
             lists: data.join("lists"),
             downloads: home.join("Downloads"),
             data,
@@ -77,6 +81,9 @@ pub struct Browser {
     pub webs: HashMap<TabId, web::WebTab>,
     pub history: History,
     pub settings: Settings,
+    pub favorites: volant_core::store::Favorites,
+    pub weather: weather::Cache,
+    pub update: updater::State,
     pub paths: Paths,
     pub config: Retained<WKWebViewConfiguration>,
     pub content: Retained<WKUserContentController>,
@@ -185,6 +192,7 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
     let paths = Paths::new();
     let settings = Settings::load(&paths.settings);
     let history = History::open(&paths.history);
+    let favorites = volant_core::store::Favorites::load(&paths.favorites);
     theme::apply_appearance(settings.appearance, mtm);
 
     let web_delegate = web::WebDelegate::new(mtm);
@@ -199,6 +207,9 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
         webs: HashMap::new(),
         history,
         settings,
+        favorites,
+        weather: Default::default(),
+        update: Default::default(),
         paths,
         config,
         content,
@@ -231,6 +242,7 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
             blocking::init(b);
             ui::layout(b);
             delegate::start_timers(b);
+            updater::schedule(b);
             if std::env::args().any(|a| a == "--smoke-test") {
                 delegate::smoke_test(b);
             }

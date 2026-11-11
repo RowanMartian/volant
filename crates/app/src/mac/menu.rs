@@ -39,13 +39,14 @@ pub enum Cmd {
     Welcome,
     Source,
     Reader,
+    CheckUpdates,
     Tab1 = 100,
 }
 
 const CMDS: &[Cmd] = &[
     Cmd::Settings, Cmd::MakeDefault, Cmd::NewTab, Cmd::OpenLocation, Cmd::ReopenTab, Cmd::CloseTab, Cmd::Print, Cmd::Find, Cmd::FindNext,
     Cmd::FindPrev, Cmd::CopyUrl, Cmd::ToggleSidebar, Cmd::Reload, Cmd::HardReload, Cmd::Stop, Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomReset,
-    Cmd::Back, Cmd::Forward, Cmd::Home, Cmd::History, Cmd::PinTab, Cmd::NextTab, Cmd::PrevTab, Cmd::Welcome, Cmd::Source, Cmd::Reader,
+    Cmd::Back, Cmd::Forward, Cmd::Home, Cmd::History, Cmd::PinTab, Cmd::NextTab, Cmd::PrevTab, Cmd::Welcome, Cmd::Source, Cmd::Reader, Cmd::CheckUpdates,
 ];
 
 const CMD: u8 = 1;
@@ -133,6 +134,7 @@ pub fn install(b: &Browser) {
 
     Builder::new(b, "Volant")
         .std("About Volant", sel!(orderFrontStandardAboutPanel:), "", 0)
+        .cmd("Check for Updates…", "", 0, Cmd::CheckUpdates)
         .sep()
         .cmd("Settings…", ",", CMD, Cmd::Settings)
         .cmd("Make Volant Your Default Browser", "", 0, Cmd::MakeDefault)
@@ -284,6 +286,7 @@ pub fn run(b: &mut Browser, tag: isize) {
             actions::open_tab(b, "https://github.com/RowanMartian/volant", true);
         }
         Cmd::Reader => actions::toggle_reader(b),
+        Cmd::CheckUpdates => super::updater::check(b, true),
         Cmd::Tab1 => {}
     }
 }

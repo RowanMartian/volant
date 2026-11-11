@@ -64,8 +64,12 @@ pub struct Settings {
     pub suspend_minutes: u32,
     /// When the strict lists were last downloaded.
     pub lists_updated: u64,
-    /// Sites removed from the new tab page.
-    pub hidden: Vec<String>,
+    /// The weather widget on the new tab page, and where it's for.
+    pub weather: bool,
+    pub weather_place: String,
+    pub weather_at: Option<(f64, f64)>,
+    /// "c" or "f".
+    pub weather_unit: String,
     /// Reader text size in points, and "serif" or "sans".
     pub reader_size: u32,
     pub reader_font: String,
@@ -82,7 +86,10 @@ impl Default for Settings {
             sidebar: true,
             suspend_minutes: 20,
             lists_updated: 0,
-            hidden: Vec::new(),
+            weather: false,
+            weather_place: String::new(),
+            weather_at: None,
+            weather_unit: "c".into(),
             reader_size: 20,
             reader_font: "serif".into(),
         }
@@ -115,7 +122,12 @@ impl Settings {
                 "lists_updated" => s.lists_updated = v.parse().unwrap_or(0),
                 "reader_size" => s.reader_size = v.parse::<u32>().map(|n| n.clamp(14, 30)).unwrap_or(s.reader_size),
                 "reader_font" => s.reader_font = if v == "sans" { "sans".into() } else { "serif".into() },
-                "hidden" => s.hidden = v.split(',').map(str::trim).filter(|h| !h.is_empty()).map(String::from).collect(),
+                "weather" => s.weather = v == "1",
+                "weather_place" => s.weather_place = v.to_string(),
+                "weather_at" => {
+                    s.weather_at = v.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))).filter(|(a, b)| a.abs() <= 90.0 && b.abs() <= 180.0)
+                }
+                "weather_unit" => s.weather_unit = if v == "f" { "f".into() } else { "c".into() },
                 _ => {}
             }
         }
@@ -125,7 +137,7 @@ impl Settings {
     pub fn serialize(&self) -> String {
         let b = |x: bool| if x { "1" } else { "0" };
         format!(
-            "engine={}\nblocking={}\nappearance={}\nonboarded={}\nrestore_session={}\nsidebar={}\nsuspend_minutes={}\nlists_updated={}\nhidden={}\nreader_size={}\nreader_font={}\n",
+            "engine={}\nblocking={}\nappearance={}\nonboarded={}\nrestore_session={}\nsidebar={}\nsuspend_minutes={}\nlists_updated={}\nreader_size={}\nreader_font={}\nweather={}\nweather_place={}\nweather_at={}\nweather_unit={}\n",
             self.engine,
             self.blocking.as_str(),
             self.appearance.as_str(),
@@ -134,9 +146,12 @@ impl Settings {
             b(self.sidebar),
             self.suspend_minutes,
             self.lists_updated,
-            self.hidden.join(","),
             self.reader_size,
-            self.reader_font
+            self.reader_font,
+            b(self.weather),
+            self.weather_place,
+            self.weather_at.map(|(a, o)| format!("{a},{o}")).unwrap_or_default(),
+            self.weather_unit
         )
     }
 
@@ -153,7 +168,72 @@ impl Settings {
         let before = self.clone();
         *self = Self::parse(&format!("{}{key}={value}\n", self.serialize()));
         *self != before
-            || matches!(key, "engine" | "blocking" | "appearance" | "onboarded" | "restore_session" | "sidebar" | "suspend_minutes" | "reader_size" | "reader_font")
+            || matches!(key, "engine" | "blocking" | "appearance" | "onboarded" | "restore_session" | "sidebar" | "suspend_minutes" | "reader_size" | "reader_font" | "weather" | "weather_place" | "weather_at" | "weather_unit")
+    }
+}
+
+/// A site pinned to the new tab page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Favorite {
+    pub url: String,
+    pub title: String,
+}
+
+/// The new tab page's favourite sites, in the order you arranged them.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Favorites {
+    pub list: Vec<Favorite>,
+}
+
+pub const MAX_FAVORITES: usize = 24;
+
+impl Favorites {
+    pub fn parse(text: &str) -> Self {
+        let list = text
+            .lines()
+            .filter_map(|l| l.split_once('\t').map(|(u, t)| (u, t)).or(Some((l, ""))))
+            .filter(|(u, _)| u.starts_with("http://") || u.starts_with("https://"))
+            .take(MAX_FAVORITES)
+            .map(|(u, t)| Favorite { url: u.to_string(), title: t.to_string() })
+            .collect();
+        Self { list }
+    }
+
+    pub fn serialize(&self) -> String {
+        self.list.iter().map(|f| format!("{}\t{}\n", clean(&f.url), clean(&f.title))).collect()
+    }
+
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path).map(|t| Self::parse(&t)).unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) {
+        let _ = write_atomic(path, &self.serialize());
+    }
+
+    /// Adds a site (typed as `example.com` or a full address). Returns false if it isn't one, it's there already, or the list is full.
+    pub fn add(&mut self, typed: &str, title: &str) -> bool {
+        let Some(url) = crate::omnibox::as_url(typed).filter(|u| u.starts_with("http")) else { return false };
+        let key = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+        if self.list.len() >= MAX_FAVORITES || self.list.iter().any(|f| key(&f.url) == key(&url)) {
+            return false;
+        }
+        let title = clean(title.trim());
+        let title = if title.is_empty() { crate::omnibox::host(&url).to_string() } else { title };
+        self.list.push(Favorite { url, title });
+        true
+    }
+
+    pub fn remove(&mut self, url: &str) {
+        self.list.retain(|f| f.url != url);
+    }
+
+    /// Moves the favourite at `from` to position `to`.
+    pub fn reorder(&mut self, from: usize, to: usize) {
+        if from < self.list.len() {
+            let f = self.list.remove(from);
+            self.list.insert(to.min(self.list.len()), f);
+        }
     }
 }
 
@@ -228,10 +308,30 @@ mod tests {
         let t = Settings::parse(&s.serialize());
         assert_eq!(t, s);
         assert_eq!(t.engine, "kagi");
-        s.hidden = vec!["a.com".into(), "b.org".into()];
-        assert_eq!(Settings::parse(&s.serialize()).hidden, s.hidden);
+        assert!(s.set("weather_at", "43.65,-79.38"));
+        assert!(s.set("weather_place", "Toronto, Ontario"));
+        let t = Settings::parse(&s.serialize());
+        assert_eq!((t.weather_at, t.weather_place.as_str()), (Some((43.65, -79.38)), "Toronto, Ontario"));
+        s.set("weather_at", "999,1");
+        assert_eq!(s.weather_at, None, "out-of-range coordinates are dropped");
         assert!(!s.set("nonsense", "1"));
     }
+    #[test]
+    fn favorites() {
+        let mut f = Favorites::default();
+        assert!(f.add("github.com", ""));
+        assert!(f.add("https://news.ycombinator.com/", "HN"));
+        assert!(!f.add("github.com/", ""), "no duplicates");
+        assert!(!f.add("not a site", ""));
+        assert_eq!(f.list[0].title, "github.com");
+        f.reorder(1, 0);
+        assert_eq!(f.list[0].title, "HN");
+        let g = Favorites::parse(&f.serialize());
+        assert_eq!(g, f);
+        f.remove("https://github.com");
+        assert_eq!(f.list.len(), 1);
+    }
+
     #[test]
     fn session_round_trip() {
         let s = Session {

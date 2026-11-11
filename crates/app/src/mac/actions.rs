@@ -35,6 +35,12 @@ pub fn hit(kind: Kind, data: u64, click: Click) {
         (Kind::Scrim, _) => command::close(b),
         (Kind::Downloads, _) => reveal_download(b),
         (Kind::Reader, _) => toggle_reader(b),
+        (Kind::Update, _) => {
+            if !b.update.installing {
+                super::later(super::updater::offer);
+            }
+        }
+        (Kind::ShowSidebar, _) => toggle_sidebar(b),
         (Kind::FindPrev, _) => find::step(b, true),
         (Kind::FindNext, _) => find::step(b, false),
         (Kind::FindClose, _) => find::close(b),
@@ -143,13 +149,20 @@ pub fn open_tab(b: &mut Browser, url: &str, front: bool) -> TabId {
     id
 }
 
-/// ⌘T: a fresh tab with the command bar open on it.
+/// ⌘T: a fresh tab, its search field ready to type in.
 pub fn new_tab(b: &mut Browser) {
-    let reuse = b.tabs.active_tab().filter(|t| t.url == NEWTAB).map(|t| t.id);
-    if reuse.is_none() {
-        open_tab(b, NEWTAB, true);
+    command::close(b);
+    let current = b.tabs.active_tab().filter(|t| t.url == NEWTAB).map(|t| t.id);
+    match current.and_then(|id| b.webs.get(&id)) {
+        // Already on a new tab: just put the cursor in its search field.
+        Some(w) => {
+            b.window.makeFirstResponder(Some(&w.web));
+            unsafe { w.web.evaluateJavaScript_completionHandler(&ns("window.volantFocus && volantFocus()"), None) };
+        }
+        None => {
+            open_tab(b, NEWTAB, true);
+        }
     }
-    command::open(b, Mode::Current, "");
 }
 
 pub fn open_or_switch(b: &mut Browser, url: &str) {

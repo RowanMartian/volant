@@ -92,9 +92,55 @@ pub fn array<I: IntoIterator<Item = String>>(items: I) -> String {
     o
 }
 
+/// Every string value stored under `key` anywhere in `json`, in order. Enough
+/// for picking a few fields out of an API response without a full parser.
+pub fn strings_for(json: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\"");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(p) = json[from..].find(&needle).map(|p| p + from) {
+        from = p + needle.len();
+        let rest = json[from..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else { continue };
+        let rest = rest.trim_start();
+        let Some(body) = rest.strip_prefix('"') else { continue };
+        let mut v = String::new();
+        let mut chars = body.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => break,
+                '\\' => match chars.next() {
+                    Some('n') => v.push('\n'),
+                    Some('t') => v.push('\t'),
+                    Some('u') => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        if let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                            v.push(c);
+                        }
+                    }
+                    Some(c) => v.push(c),
+                    None => break,
+                },
+                c => v.push(c),
+            }
+        }
+        out.push(v);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reads_fields() {
+        let j = r#"{"target_commitish": "abc123", "assets": [{"name":"Volant.dmg","browser_download_url":"https://x/Volant.dmg"},{"browser_download_url" : "https://x/Volant-mac.zip"}], "body":"a \"q\" \u00e9"}"#;
+        assert_eq!(strings_for(j, "target_commitish"), ["abc123"]);
+        assert_eq!(strings_for(j, "browser_download_url"), ["https://x/Volant.dmg", "https://x/Volant-mac.zip"]);
+        assert_eq!(strings_for(j, "body"), ["a \"q\" é"]);
+        assert!(strings_for(j, "missing").is_empty());
+    }
+
     #[test]
     fn writes() {
         let j = Obj::new().str("a", "x\"<y\n").num("n", 3).bool("b", true).raw("l", &array(vec!["1".into(), "2".into()])).done();

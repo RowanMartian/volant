@@ -79,6 +79,8 @@ h2{font-size:12px;font-weight:600;color:var(--text3);margin:26px 0 8px 14px}
     <div class="about"><div class="logo" id="logo2"></div>
       <div class="tx"><b>Volant</b><div class="muted" id="version"></div></div>
       <a class="btn" href="https://github.com/RowanMartian/volant">Source Code</a></div>
+    <div class="row"><div class="tx"><b>Updates</b><small id="upd-text"></small></div>
+      <button class="btn" id="upd-btn"></button></div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -138,6 +140,25 @@ function markDefault(yes) {
 markDefault(!!V.isDefault);
 window.volantDefaultChanged = markDefault;
 $('#make-default').onclick = () => volant.send('makeDefault');
+const UPD = {
+  '': ['Volant checks for new builds on its own', 'Check Now', 'checkUpdates'],
+  checking: ['Checking…', 'Check Now', ''],
+  current: ['You have the latest build', 'Check Now', 'checkUpdates'],
+  available: ['A newer build is ready', 'Update and Restart', 'installUpdate'],
+  installing: ['Downloading the update…', 'Updating…', ''],
+  error: ['Couldn’t reach GitHub. Try again later.', 'Check Now', 'checkUpdates'],
+  dev: ['Development build: updates come with GitHub builds', 'Check Now', 'checkUpdates'],
+};
+function showUpdate(state) {
+  const [text, label, cmd] = UPD[state] || UPD[''];
+  $('#upd-text').textContent = text;
+  $('#upd-btn').textContent = label;
+  $('#upd-btn').disabled = !cmd;
+  $('#upd-btn').classList.toggle('primary', state === 'available');
+  $('#upd-btn').onclick = () => cmd && volant.send(cmd);
+}
+window.volantUpdate = showUpdate;
+showUpdate(V.update || '');
 $('#version').textContent = `Version ${V.version || ''}${V.commit ? ' (' + V.commit + ')' : ''}`;
 </script>
 </body>

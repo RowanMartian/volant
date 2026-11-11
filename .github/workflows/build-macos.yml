@@ -31,7 +31,9 @@ jobs:
 
       - name: Build Volant.app
         env:
+          # Lets the app's updater compare itself with this repo's latest release.
           VOLANT_COMMIT: ${{ github.sha }}
+          VOLANT_REPO: ${{ github.repository }}
         run: bash scripts/bundle-macos.sh
 
       - name: Smoke test (launch, browse, screenshot, quit)
