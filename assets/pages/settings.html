@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings</title>
+<link rel="stylesheet" href="volant://app/style.css">
+<style>
+body{padding:56px 24px 64px}
+.wrap{width:min(620px,100%);margin:0 auto}
+.top{display:flex;align-items:center;gap:14px;margin-bottom:30px}
+.top .logo{width:40px;height:40px}
+h1{font-size:24px;font-weight:700;letter-spacing:-.02em}
+h2{font-size:12px;font-weight:600;color:var(--text3);margin:26px 0 8px 14px}
+.group{background:var(--fill-soft);border-radius:var(--r-lg);padding:4px}
+.row{display:flex;align-items:center;gap:16px;padding:12px 14px;min-height:54px;border-radius:var(--r-md)}
+.row + .row{margin-top:2px}
+.row .tx{flex:1;min-width:0}
+.row b{display:block;font-weight:550;font-size:13px}
+.row small{display:block;color:var(--text2);font-size:12px;margin-top:1px}
+.row .field{background:var(--bg);width:auto}
+.seg{display:flex;background:var(--fill);border-radius:9px;padding:2px;gap:2px;flex:none}
+.seg button{height:28px;padding:0 12px;border-radius:7px;color:var(--text2);font-weight:500}
+.seg button:hover{color:var(--text)}
+.seg button.on{background:var(--bg);color:var(--text)}
+@media (prefers-color-scheme: dark){.seg button.on{background:var(--fill-hover)}}
+.status{display:flex;align-items:center;gap:8px;color:var(--text2);font-size:12px;margin-top:3px}
+.status .ok{color:var(--ok)}
+.about{display:flex;align-items:center;gap:14px;padding:16px 14px}
+.about .logo{width:48px;height:48px}
+.about .tx{flex:1}
+.about b{font-size:15px;font-weight:650}
+.toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:9px 16px;border-radius:999px;font-weight:500;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.on{opacity:1}
+</style>
+</head>
+<body>
+<script id="volant-data" type="application/json">__VOLANT_DATA__</script>
+<script>window.VOLANT_SAMPLE = { engines: [['duckduckgo','DuckDuckGo'],['google','Google'],['brave','Brave Search'],['kagi','Kagi'],['bing','Bing'],['ecosia','Ecosia']], settings: { engine: 'duckduckgo', blocking: 'strict', appearance: 'system', restore_session: true, suspend_minutes: 20 }, rules: 119122, listsUpdated: Date.now()/1000 - 86400*2, isDefault: false, version: '0.1.0', commit: 'abc1234', dataDir: '~/Library/Application Support/Volant', historyCount: 1832 };</script>
+<script src="volant://app/volant.js"></script>
+
+<div class="wrap">
+  <div class="top"><div class="logo" id="logo"></div><h1>Settings</h1></div>
+
+  <h2>GENERAL</h2>
+  <div class="group">
+    <div class="row"><div class="tx"><b>Search engine</b><small>Used for anything that isn't an address</small></div>
+      <label class="select"><select class="field" id="engine"></select></label></div>
+    <div class="row"><div class="tx"><b>Appearance</b></div>
+      <div class="seg" data-key="appearance"><button data-v="system">Auto</button><button data-v="light">Light</button><button data-v="dark">Dark</button></div></div>
+    <div class="row"><div class="tx"><b>Reopen tabs at launch</b><small>Pick up where you left off</small></div>
+      <label class="switch"><input type="checkbox" id="restore"><i></i></label></div>
+    <div class="row"><div class="tx"><b>Sleep background tabs</b><small>Frees memory from tabs you haven't looked at in a while. They reload when you return.</small></div>
+      <label class="select" style="min-width:150px"><select class="field" id="suspend">
+        <option value="5">After 5 minutes</option><option value="10">After 10 minutes</option><option value="20">After 20 minutes</option>
+        <option value="60">After 1 hour</option><option value="0">Never</option></select></label></div>
+  </div>
+
+  <h2>PRIVACY</h2>
+  <div class="group">
+    <div class="row"><div class="tx"><b>Block ads and trackers</b><div class="status" id="block-status"></div></div>
+      <div class="seg" data-key="blocking"><button data-v="off">Off</button><button data-v="standard">Standard</button><button data-v="strict">Strict</button></div></div>
+    <div class="row" id="lists-row"><div class="tx"><b>Filter lists</b><small>EasyList and EasyPrivacy, downloaded from easylist.to and compiled on this Mac</small></div>
+      <button class="btn" id="update-lists">Update Now</button></div>
+    <div class="row"><div class="tx"><b>Browsing history</b><small id="hist-count"></small></div>
+      <button class="btn danger" id="clear-history">Clear History…</button></div>
+    <div class="row"><div class="tx"><b>Cookies and website data</b><small>Signs you out of websites</small></div>
+      <button class="btn danger" id="clear-data">Clear Data…</button></div>
+  </div>
+
+  <h2>DEFAULT BROWSER</h2>
+  <div class="group">
+    <div class="row"><div class="tx"><b id="def-title"></b><small>Links from other apps open in your default browser</small></div>
+      <button class="btn primary" id="make-default">Make Default</button></div>
+  </div>
+
+  <h2>ABOUT</h2>
+  <div class="group">
+    <div class="about"><div class="logo" id="logo2"></div>
+      <div class="tx"><b>Volant</b><div class="muted" id="version"></div></div>
+      <a class="btn" href="https://github.com/RowanMartian/volant">Source Code</a></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+$('#logo').innerHTML = logo();
+$('#logo2').innerHTML = logo();
+const S = V.settings || {};
+function toast(t) {
+  const el = $('#toast');
+  el.textContent = t; el.classList.add('on');
+  clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), 1800);
+}
+function ago(ts) {
+  if (!ts) return 'never';
+  const d = Math.floor((Date.now() / 1000 - ts) / 86400);
+  return d <= 0 ? 'today' : d === 1 ? 'yesterday' : `${d} days ago`;
+}
+
+$('#engine').innerHTML = (V.engines || []).map(([id, name]) => `<option value="${esc(id)}"${id === S.engine ? ' selected' : ''}>${esc(name)}</option>`).join('');
+$('#engine').onchange = (e) => { volant.send('set', 'engine=' + e.target.value); toast('Search engine changed'); };
+$('#restore').checked = S.restore_session !== false;
+$('#restore').onchange = (e) => volant.send('set', 'restore_session=' + (e.target.checked ? 1 : 0));
+$('#suspend').value = String(S.suspend_minutes ?? 20);
+$('#suspend').onchange = (e) => volant.send('set', 'suspend_minutes=' + e.target.value);
+
+function blockStatus(level) {
+  const el = $('#block-status');
+  $('#lists-row').hidden = level !== 'strict';
+  if (level === 'off') el.innerHTML = 'Everything loads';
+  else if (V.blockError) el.innerHTML = `<span style="color:var(--danger)">${esc(V.blockError)}</span>`;
+  else if (V.rules) el.innerHTML = `<span class="ok">●</span> ${Number(V.rules).toLocaleString()} rules active${level === 'strict' ? ' · lists updated ' + ago(V.listsUpdated) : ''}`;
+  else el.innerHTML = 'Compiling rules…';
+}
+$$('.seg').forEach((seg) => {
+  const key = seg.dataset.key;
+  const set = (v) => $$('button', seg).forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  set(S[key] || (key === 'appearance' ? 'system' : 'standard'));
+  $$('button', seg).forEach((b) => b.onclick = () => {
+    set(b.dataset.v);
+    volant.send('set', key + '=' + b.dataset.v);
+    if (key === 'blocking') { V.rules = 0; blockStatus(b.dataset.v); }
+  });
+});
+blockStatus(S.blocking || 'standard');
+window.volantRules = (rules, err) => { V.rules = rules; V.blockError = err || ''; blockStatus($('.seg[data-key=blocking] .on').dataset.v); };
+$('#update-lists').onclick = () => { volant.send('updateLists'); V.rules = 0; blockStatus('strict'); };
+
+$('#hist-count').textContent = V.historyCount ? `${Number(V.historyCount).toLocaleString()} pages remembered` : 'Nothing remembered yet';
+$('#clear-history').onclick = () => { if (confirm('Clear all browsing history?')) { volant.send('clearHistory'); $('#hist-count').textContent = 'Nothing remembered yet'; toast('History cleared'); } };
+$('#clear-data').onclick = () => { if (confirm('Remove all cookies and website data? You will be signed out of websites.')) { volant.send('clearData'); toast('Website data cleared'); } };
+
+function markDefault(yes) {
+  $('#def-title').textContent = yes ? 'Volant is your default browser' : 'Volant is not your default browser';
+  $('#make-default').hidden = yes;
+}
+markDefault(!!V.isDefault);
+window.volantDefaultChanged = markDefault;
+$('#make-default').onclick = () => volant.send('makeDefault');
+$('#version').textContent = `Version ${V.version || ''}${V.commit ? ' (' + V.commit + ')' : ''}`;
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+[package]
+name = "volant-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-independent engine pieces of the Volant browser"
+
+[dependencies]

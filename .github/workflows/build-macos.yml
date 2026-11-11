@@ -1,0 +1,68 @@
+name: Build Mac app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test the engine pieces
+        run: cargo test --locked -p volant-core
+
+      - name: Build Volant.app
+        env:
+          VOLANT_COMMIT: ${{ github.sha }}
+        run: bash scripts/bundle-macos.sh
+
+      - name: Smoke test (launch, browse, screenshot, quit)
+        run: |
+          export VOLANT_DATA_DIR="$RUNNER_TEMP/volant-data" VOLANT_SMOKE_DIR="$PWD/smoke"
+          mkdir -p "$VOLANT_SMOKE_DIR"
+          START=$(date +%s)
+          ( dist/Volant.app/Contents/MacOS/Volant --smoke-test > smoke/log.txt 2>&1; echo "exit $?" >> smoke/log.txt ) &
+          PID=$!
+          for i in $(seq 1 90); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          kill -0 $PID 2>/dev/null && { echo "still running after 90s" >> smoke/log.txt; pkill -f "Volant --smoke-test" || true; }
+          echo "ran for $(( $(date +%s) - START ))s" >> smoke/log.txt
+          cat smoke/log.txt smoke/report.txt 2>/dev/null || true
+          ls -la smoke
+          grep -q "exit 0" smoke/log.txt
+
+      - name: Keep the smoke test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test
+          path: smoke
+
+      - name: Keep a copy with this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Volant-mac
+          path: dist/Volant.dmg
+
+      - name: Publish to the "Latest build" release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/Volant.dmg dist/Volant-mac.zip \
+            --title "Volant — latest build" \
+            --target "$GITHUB_SHA" \
+            --notes "Built automatically from commit ${GITHUB_SHA::7}. Download **Volant.dmg**, open it, and drag Volant into Applications."

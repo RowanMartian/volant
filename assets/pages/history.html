@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>History</title>
+<link rel="stylesheet" href="volant://app/style.css">
+<style>
+body{padding:56px 24px 64px}
+.wrap{width:min(720px,100%);margin:0 auto}
+.top{display:flex;align-items:center;gap:12px;margin-bottom:22px}
+h1{font-size:24px;font-weight:700;letter-spacing:-.02em;flex:1}
+.search{width:240px}
+h2{font-size:12px;font-weight:600;color:var(--text3);margin:22px 0 6px 12px}
+.item{display:flex;align-items:center;gap:12px;height:44px;padding:0 8px 0 12px;border-radius:var(--r-sm);color:var(--text);text-decoration:none!important}
+.item:hover{background:var(--fill-soft)}
+.item .tx{flex:1;min-width:0;display:flex;gap:10px;align-items:baseline}
+.item .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;max-width:60%}
+.item .h{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text3);font-size:12px;flex:1}
+.item time{color:var(--text3);font-size:12px;font-variant-numeric:tabular-nums}
+.item .x{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;color:var(--text3);visibility:hidden;font-size:16px}
+.item:hover .x{visibility:visible}
+.item .x:hover{background:var(--fill);color:var(--text)}
+.empty{color:var(--text3);text-align:center;padding:80px 0}
+</style>
+</head>
+<body>
+<script id="volant-data" type="application/json">__VOLANT_DATA__</script>
+<script>window.VOLANT_SAMPLE = { history: [
+  ['https://github.com/RowanMartian/volant','RowanMartian/volant: A featherweight browser',Date.now()/1000-300],
+  ['https://doc.rust-lang.org/book/','The Rust Programming Language',Date.now()/1000-4000],
+  ['https://news.ycombinator.com/','Hacker News',Date.now()/1000-90000],
+  ['https://webkit.org/blog/','WebKit Blog',Date.now()/1000-200000]] };</script>
+<script src="volant://app/volant.js"></script>
+
+<div class="wrap">
+  <div class="top"><h1>History</h1><input class="field search" id="q" type="search" placeholder="Search history" autocomplete="off" spellcheck="false"></div>
+  <div id="list"></div>
+</div>
+
+<script>
+let items = V.history || [];
+const dayKey = (ts) => new Date(ts * 1000).toDateString();
+function dayLabel(ts) {
+  const d = new Date(ts * 1000), today = new Date();
+  const y = new Date(); y.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return 'TODAY';
+  if (d.toDateString() === y.toDateString()) return 'YESTERDAY';
+  return d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase();
+}
+const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
+function render() {
+  const words = $('#q').value.toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = items.filter(([u, t]) => words.every((w) => u.toLowerCase().includes(w) || (t || '').toLowerCase().includes(w)));
+  if (!shown.length) { $('#list').innerHTML = `<div class="empty">${items.length ? 'No matches' : 'Pages you visit will appear here.'}</div>`; return; }
+  let html = '', last = '';
+  for (const [u, t, ts] of shown.slice(0, 1500)) {
+    const k = dayKey(ts);
+    if (k !== last) { html += `<h2>${dayLabel(ts)}</h2>`; last = k; }
+    const h = host(u);
+    html += `<a class="item" href="${esc(u)}">${siteIcon(h, u, 22)}<span class="tx"><span class="t">${esc(t || h)}</span><span class="h">${esc(h)}</span></span>
+      <time>${new Date(ts * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time>
+      <button class="x" data-url="${esc(u)}" title="Remove">×</button></a>`;
+  }
+  $('#list').innerHTML = html;
+}
+$('#list').addEventListener('click', (e) => {
+  const x = e.target.closest('.x');
+  if (!x) return;
+  e.preventDefault();
+  volant.send('removeHistory', x.dataset.url);
+  items = items.filter(([u]) => u !== x.dataset.url);
+  render();
+});
+$('#q').oninput = render;
+render();
+$('#q').focus();
+</script>
+</body>
+</html>

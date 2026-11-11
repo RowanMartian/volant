@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Can't open page</title>
+<link rel="stylesheet" href="volant://app/style.css">
+<style>
+body{min-height:100vh;display:grid;place-items:center;padding:24px}
+.box{width:min(440px,100%);text-align:center}
+.ic{width:64px;height:64px;color:var(--text3);margin:0 auto 18px}
+.ic svg{width:100%;height:100%;display:block}
+h1{font-size:22px;font-weight:700;letter-spacing:-.015em}
+p{color:var(--text2);margin:8px 0 0;line-height:1.5;font-size:14px}
+.detail{display:inline-block;margin-top:16px;background:var(--fill-soft);border-radius:var(--r-sm);padding:6px 12px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text2);-webkit-user-select:text;user-select:text;max-width:100%;overflow-wrap:anywhere}
+.actions{margin-top:26px;display:flex;gap:8px;justify-content:center}
+</style>
+</head>
+<body>
+<script id="volant-data" type="application/json">__VOLANT_DATA__</script>
+<script>window.VOLANT_SAMPLE = { url: 'https://exmaple.cmo/', host: 'exmaple.cmo', message: 'A server with the specified hostname could not be found.', code: -1003 };</script>
+<script src="volant://app/volant.js"></script>
+<div class="box">
+  <div class="ic" id="ic"></div>
+  <h1 id="title">Can't reach this site</h1>
+  <p id="msg"></p>
+  <div class="detail" id="detail"></div>
+  <div class="actions"><button class="btn primary" id="retry">Try Again</button></div>
+</div>
+<script>
+$('#ic').innerHTML = logo();
+const HINTS = {
+  '-1003': ['Can’t find this site', 'Check the address for typos, or search for it instead.'],
+  '-1009': ['You’re offline', 'Check your Wi-Fi or network connection, then try again.'],
+  '-1001': ['This site is taking too long', 'The server didn’t answer in time.'],
+  '-1004': ['Can’t connect to this site', 'The server refused the connection or is down.'],
+  '-1200': ['Can’t open this page securely', 'The site’s secure connection couldn’t be set up.'],
+  '-1202': ['This site’s certificate isn’t trusted', 'Someone could be pretending to be this site. Volant didn’t open it.'],
+};
+const [t, m] = HINTS[String(V.code)] || ['Can’t open this page', V.message || ''];
+document.title = t;
+$('#title').textContent = t;
+$('#msg').textContent = m;
+$('#detail').textContent = V.host ? `${V.host} · ${V.message || ''}` : (V.message || '');
+$('#retry').onclick = () => volant.send('open', V.url);
+$('#retry').hidden = !V.url;
+</script>
+</body>
+</html>

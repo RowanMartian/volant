@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome to Volant</title>
+<link rel="stylesheet" href="volant://app/style.css">
+<style>
+body{display:grid;min-height:100vh;place-items:center;padding:40px 24px 56px;background:var(--bg)}
+.wrap{width:min(460px,100%)}
+.dots{display:flex;gap:6px;justify-content:center;margin-bottom:36px}
+.dots i{width:6px;height:6px;border-radius:3px;background:var(--fill-hover);transition:width .25s,background .25s}
+.dots i.on{width:20px;background:var(--accent)}
+.step{display:none;animation:in .35s ease both}
+.step.on{display:block}
+@keyframes in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.hero{text-align:center}
+.hero .logo{margin:0 auto 18px;width:112px;height:112px}
+.hero .logo svg{animation:arrive .9s cubic-bezier(.2,.8,.2,1) both}
+.hero .logo svg use{animation:fly 1.1s .15s cubic-bezier(.2,.8,.2,1) both}
+@keyframes arrive{from{transform:scale(.92);opacity:0}to{transform:none;opacity:1}}
+@keyframes fly{from{transform:translateX(-60px);opacity:0}to{transform:none;opacity:1}}
+h1{font-size:30px;font-weight:700;letter-spacing:-.02em;line-height:1.15}
+h2{font-size:22px;font-weight:700;letter-spacing:-.015em}
+.lead{font-size:15px;color:var(--text2);margin-top:8px;line-height:1.5}
+.head{margin-bottom:22px}
+.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:30px 0}
+.fact{background:var(--fill-soft);border-radius:var(--r-md);padding:14px 12px;text-align:center}
+.fact b{display:block;font-size:20px;font-weight:700;letter-spacing:-.02em}
+.fact small{color:var(--text2);font-size:11.5px}
+.actions{display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:26px}
+.actions .grow{flex:1}
+.hero .actions{justify-content:center}
+.keys{display:grid;gap:6px;margin-top:4px}
+.key{display:flex;align-items:center;justify-content:space-between;background:var(--fill-soft);border-radius:var(--r-sm);padding:9px 12px}
+.key span:last-child{display:flex;gap:4px}
+.default-card{background:var(--fill-soft);border-radius:var(--r-lg);padding:24px;text-align:center}
+.default-card .logo{margin:0 auto 12px;width:56px;height:56px}
+.default-card p{color:var(--text2);margin:6px auto 18px;max-width:320px}
+.done-mark{color:var(--ok);font-weight:600;display:inline-flex;gap:6px;align-items:center}
+</style>
+</head>
+<body>
+<script id="volant-data" type="application/json">__VOLANT_DATA__</script>
+<script>window.VOLANT_SAMPLE = { engines: [['duckduckgo','DuckDuckGo','Private search, no tracking'],['google','Google',''],['brave','Brave Search',''],['kagi','Kagi',''],['bing','Bing',''],['ecosia','Ecosia','']], settings: { engine: 'duckduckgo', blocking: 'standard' }, isDefault: false, version: '0.1.0' };</script>
+<script src="volant://app/volant.js"></script>
+
+<div class="wrap">
+  <div class="dots" id="dots"></div>
+
+  <section class="step hero" data-step="hello">
+    <div class="logo" id="hero-logo"></div>
+    <h1>Welcome to Volant</h1>
+    <p class="lead">A featherweight browser for your Mac.<br>Native, private, and out of your way.</p>
+    <div class="facts">
+      <div class="fact"><b id="f-size">~2 MB</b><small>to download</small></div>
+      <div class="fact"><b>0</b><small>trackers by default</small></div>
+      <div class="fact"><b>100%</b><small>open source</small></div>
+    </div>
+    <div class="actions"><button class="btn primary big" data-next>Get started</button></div>
+  </section>
+
+  <section class="step" data-step="search">
+    <div class="head"><h2>Choose a search engine</h2><p class="lead">Used when what you type isn't an address. You can change it in Settings at any time.</p></div>
+    <div class="choices" id="engines"></div>
+    <div class="actions"><button class="btn ghost" data-back>Back</button><span class="grow"></span><button class="btn primary" data-next>Continue</button></div>
+  </section>
+
+  <section class="step" data-step="blocking">
+    <div class="head"><h2>Block ads and trackers</h2><p class="lead">Blocking runs inside WebKit as compiled rules, so pages load faster, not slower.</p></div>
+    <div class="choices" id="blocking"></div>
+    <div class="actions"><button class="btn ghost" data-back>Back</button><span class="grow"></span><button class="btn primary" data-next>Continue</button></div>
+  </section>
+
+  <section class="step" data-step="default">
+    <div class="head"><h2>Make Volant your browser</h2><p class="lead">Links you click in Mail, Messages and other apps will open here.</p></div>
+    <div class="default-card">
+      <div class="logo" id="def-logo"></div>
+      <b>Set Volant as the default browser</b>
+      <p>macOS asks you to confirm. You can switch back in System Settings → Desktop &amp; Dock.</p>
+      <button class="btn primary" id="set-default">Use Volant</button>
+      <span class="done-mark" id="is-default" hidden>✓ Volant is your default browser</span>
+    </div>
+    <div class="actions"><button class="btn ghost" data-back>Back</button><span class="grow"></span><button class="btn" data-next id="default-next">Not now</button></div>
+  </section>
+
+  <section class="step" data-step="ready">
+    <div class="head"><h2>You're ready to fly</h2><p class="lead">A few keys that make Volant quick:</p></div>
+    <div class="keys" id="keys"></div>
+    <div class="actions"><button class="btn ghost" data-back>Back</button><span class="grow"></span><button class="btn primary big" id="finish">Start browsing</button></div>
+  </section>
+</div>
+
+<script>
+const ENGINE_NOTES = { duckduckgo: 'Private search, no tracking', google: 'The most popular search engine', brave: 'Independent index, private', kagi: 'Paid, ad-free search', bing: 'Search by Microsoft', ecosia: 'Plants trees with ad revenue' };
+const LEVELS = [
+  ['standard', 'Standard', 'Blocks the big ad networks and trackers. Breaks nothing.', 'Recommended'],
+  ['strict', 'Strict', 'Adds EasyList and EasyPrivacy: over 100,000 rules, compiled on your Mac.', ''],
+  ['off', 'Off', 'Load everything pages ask for.', ''],
+];
+const KEYS = [
+  ['Open a site or search', '⌘ T'], ['Edit the address', '⌘ L'], ['Show or hide the sidebar', '⌘ S'],
+  ['Pin the current tab', '⌘ D'], ['Reopen a closed tab', '⇧ ⌘ T'], ['Find on the page', '⌘ F'],
+];
+const steps = $$('.step');
+let at = 0;
+$('#dots').innerHTML = steps.map(() => '<i></i>').join('');
+function show(i) {
+  at = Math.max(0, Math.min(steps.length - 1, i));
+  steps.forEach((s, j) => s.classList.toggle('on', j === at));
+  $$('#dots i').forEach((d, j) => d.classList.toggle('on', j === at));
+}
+$$('[data-next]').forEach((b) => b.onclick = () => show(at + 1));
+$$('[data-back]').forEach((b) => b.onclick = () => show(at - 1));
+$('#hero-logo').innerHTML = logo();
+$('#def-logo').innerHTML = logo();
+if (V.binaryMB) $('#f-size').textContent = V.binaryMB;
+
+function choices(el, items, current, key) {
+  el.innerHTML = items.map(([id, name, note, tag]) => `
+    <button class="choice${id === current ? ' on' : ''}" data-id="${esc(id)}">
+      <span class="ic">${esc(name[0])}</span>
+      <span class="tx"><b>${esc(name)}${tag ? `<span class="tag">${esc(tag)}</span>` : ''}</b>${note ? `<small>${esc(note)}</small>` : ''}</span>
+      <span class="dot"></span>
+    </button>`).join('');
+  $$('.choice', el).forEach((c) => c.onclick = () => {
+    $$('.choice', el).forEach((x) => x.classList.toggle('on', x === c));
+    volant.send('set', key + '=' + c.dataset.id);
+  });
+}
+choices($('#engines'), (V.engines || []).map(([id, name]) => [id, name, ENGINE_NOTES[id] || '']), (V.settings || {}).engine, 'engine');
+choices($('#blocking'), LEVELS, (V.settings || {}).blocking || 'standard', 'blocking');
+$('#keys').innerHTML = KEYS.map(([l, k]) => `<div class="key"><span>${esc(l)}</span><span>${shortcutKeys(k)}</span></div>`).join('');
+
+function markDefault(yes) {
+  $('#set-default').hidden = yes;
+  $('#is-default').hidden = !yes;
+  $('#default-next').textContent = yes ? 'Continue' : 'Not now';
+  $('#default-next').classList.toggle('primary', yes);
+}
+markDefault(!!V.isDefault);
+$('#set-default').onclick = () => volant.send('makeDefault');
+window.volantDefaultChanged = markDefault;
+$('#finish').onclick = () => volant.send('onboarded');
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight' && at < steps.length - 1) show(at + 1);
+  if (e.key === 'ArrowLeft') show(at - 1);
+  if (e.key === 'Enter' && !e.target.closest('button')) (steps[at].querySelector('[data-next], #finish') || {}).click?.();
+});
+show(0);
+</script>
+</body>
+</html>
