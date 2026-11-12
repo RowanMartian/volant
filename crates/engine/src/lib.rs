@@ -24,6 +24,7 @@ pub mod svg;
 
 pub use fonts::{ApproxFonts, Font, Fonts};
 pub use layout::{After, Images, Item, Link, NoImages, Page};
+pub use css::Env;
 pub use style::{Color, Family};
 
 /// The `<style>` sheets in a document, in order.
@@ -35,13 +36,17 @@ pub fn style_sheets(dom: &volant_core::html::Dom) -> Vec<String> {
 /// (applied last, like a user stylesheet), and lays it out `width` px wide,
 /// sizing images from `images` where they're known.
 pub fn render(html: &str, extra_css: &str, width: f32, fonts: &dyn Fonts, images: &dyn Images) -> Page {
+    render_in(html, &[extra_css.to_string()], css::Env { width, dark: false }, fonts, images)
+}
+
+/// Like [`render`], with any number of extra style sheets (a page's linked
+/// sheets, in order) and the viewport's `@media` facts (width, dark mode).
+pub fn render_in(html: &str, sheets: &[String], env: css::Env, fonts: &dyn Fonts, images: &dyn Images) -> Page {
     let dom = volant_core::html::parse(html);
-    let mut sheets = style_sheets(&dom);
-    if !extra_css.is_empty() {
-        sheets.push(extra_css.to_string());
-    }
-    let styles = style::compute(&dom, &sheets);
-    layout::layout(&dom, &styles, width, fonts, images)
+    let mut all = style_sheets(&dom);
+    all.extend(sheets.iter().filter(|s| !s.is_empty()).cloned());
+    let styled = style::compute(&dom, &all, &env);
+    layout::layout(&dom, &styled, env.width, fonts, images)
 }
 
 #[cfg(test)]

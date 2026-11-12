@@ -52,8 +52,12 @@ assets/       Volant's own pages (volant://) and the scripts the blocker injects
 ## Volant's own engine
 
 `crates/engine` is a web engine written from scratch, growing in chunks; WebKit still renders web pages.
-Today: CSS parsing (selectors with descendant/child/sibling combinators, attribute operators, structural pseudo-classes,
-`!important`, screen `@media`), the cascade with a user-agent sheet, inheritance and `em`/`rem`/`%` units; block layout
+Today: CSS parsing (selectors with descendant/child/sibling combinators, attribute operators, `:nth-*`, `:not()`,
+`:is()`, `::before`/`::after` with `content`, `!important`, `@media` width/colour-scheme queries, `@supports`), custom
+properties and `var()`, `calc()`/`min()`/`max()`/`clamp()`, the cascade with a user-agent sheet and a rule index
+(by id, class and tag), inheritance and `em`/`rem`/`%` units; flexbox (direction, wrap, grow/shrink/basis, justify,
+align, gaps, auto margins, order) and grid (track lists, `fr`, `repeat()`, auto-fill, areas, spans, explicit columns);
+`position` relative/absolute/fixed against positioned ancestors, and the visually-hidden pattern; block layout
 (margins with sibling collapsing, padding, borders, `width`/`max-width`, auto-margin centring) and inline layout
 (whitespace collapsing, `pre`/`pre-wrap`/`nowrap`, wrapping with long-word breaking, baselines from font metrics,
 `vertical-align`, `text-align`, list markers, links) with real inline boxes (padding, backgrounds, radius); images as
@@ -66,7 +70,9 @@ line and paragraph breaks (`engine_view.rs`). `volant-tools render page.html out
 [--reader URL]` draws to SVG anywhere.
 
 It's used for an opt-in Reader (Settings → Experimental): the extracted article is laid out by the engine and drawn
-natively over the Reader page. Next chunks: flexbox and more of CSS (enough for simple sites outside Reader), then JavaScript.
+natively over the Reader page. View → Simple Page (⌥⌘E) draws any page with the engine: the page's HTML and style
+sheets are taken from WebKit after its scripts ran (cross-origin sheets fetched with Volant's HTTP), laid out
+natively, with images, links, Find, selection and copy; navigating returns to WebKit. Next: JavaScript (`crates/js`).
 
 ## Blocking engine
 

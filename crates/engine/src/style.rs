@@ -2,7 +2,9 @@
 //! agent sheet, author sheets, inline `style`, `!important`, specificity,
 //! order), inheritance, and turning property values into numbers.
 
-use crate::css::{self, AttrOp, Combinator, Compound, Decl, Pseudo, Rule};
+use crate::css::{self, AttrOp, Combinator, Compound, Decl, Env, Pseudo, PseudoElement, Rule};
+use std::collections::HashMap;
+use std::rc::Rc;
 use volant_core::html::{Data, Dom, NodeId};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,6 +28,8 @@ pub enum Len {
     Px(f32),
     /// Percent of the containing block's width.
     Pct(f32),
+    /// `calc()` of px and %: px + pct% of the containing block.
+    Mix(f32, f32),
     Auto,
 }
 
@@ -34,9 +38,45 @@ impl Len {
         match self {
             Len::Px(v) => v,
             Len::Pct(p) => of * p / 100.0,
+            Len::Mix(px, p) => px + of * p / 100.0,
             Len::Auto => 0.0,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Justify {
+    Start,
+    Center,
+    End,
+    Between,
+    Around,
+    Evenly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignItems {
+    Stretch,
+    Start,
+    Center,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+}
+
+/// One `grid-template-columns` track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Track {
+    Len(Len),
+    Fr(f32),
+    /// `repeat(auto-fill | auto-fit, minmax(min, 1fr))`: as many as fit, at least `min` px wide.
+    AutoFill(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +85,8 @@ pub enum Display {
     Inline,
     ListItem,
     None,
+    Flex,
+    Grid,
     Table,
     TableRowGroup,
     TableRow,
@@ -151,6 +193,41 @@ pub struct Style {
     pub shift: f32,
     /// `border-radius`, in px.
     pub radius: f32,
+    /// `box-sizing: border-box`: width and height include padding and borders.
+    pub border_box: bool,
+    pub min_width: Len,
+    pub min_height: Len,
+    /// Custom properties (`--name`), inherited.
+    pub vars: Rc<HashMap<String, String>>,
+    // Flexbox and grid containers.
+    pub column: bool,
+    pub reverse: bool,
+    pub wrap: bool,
+    pub justify: Justify,
+    pub align_items: AlignItems,
+    pub row_gap: f32,
+    pub column_gap: f32,
+    pub columns: Vec<Track>,
+    // Flex and grid items.
+    pub grow: f32,
+    pub shrink: f32,
+    pub basis: Len,
+    pub order: i32,
+    pub align_self: Option<AlignItems>,
+    pub column_span: usize,
+    /// `content` of a `::before` / `::after`.
+    pub content: Option<String>,
+    pub position: Position,
+    /// top, right, bottom, left
+    pub inset: [Len; 4],
+    /// Clipped away entirely (`clip: rect(...)`, `clip-path: inset(50%)`): the
+    /// "visually hidden" pattern.
+    pub clipped: bool,
+    /// `grid-template-areas`, row by row.
+    pub areas: Vec<Vec<String>>,
+    pub grid_area: Option<String>,
+    /// `grid-column: start / end` (1-based lines; negative counts from the end; 0 = auto).
+    pub grid_column: Option<(i32, i32)>,
 }
 
 impl Default for Style {
@@ -183,6 +260,31 @@ impl Default for Style {
             valign: VAlign::Baseline,
             shift: 0.0,
             radius: 0.0,
+            border_box: false,
+            min_width: Len::Auto,
+            min_height: Len::Auto,
+            vars: Rc::new(HashMap::new()),
+            column: false,
+            reverse: false,
+            wrap: false,
+            justify: Justify::Start,
+            align_items: AlignItems::Stretch,
+            row_gap: 0.0,
+            column_gap: 0.0,
+            columns: Vec::new(),
+            grow: 0.0,
+            shrink: 1.0,
+            basis: Len::Auto,
+            order: 0,
+            align_self: None,
+            column_span: 1,
+            content: None,
+            position: Position::Static,
+            inset: [Len::Auto; 4],
+            clipped: false,
+            areas: Vec::new(),
+            grid_area: None,
+            grid_column: None,
         }
     }
 }
@@ -201,7 +303,8 @@ th { font-weight: bold; text-align: center }
 caption { display: table-caption; text-align: center }
 colgroup, col { display: none }
 head, script, style, title, meta, link, base, template, noscript, area, datalist, param, source, track, [hidden],
-svg, iframe, object, embed, audio, input, button, select, textarea, map { display: none }
+svg, iframe, object, embed, audio, input, select, textarea, map, dialog:not([open]) { display: none }
+button { padding: 1px 6px; background: #e9e9ed; border-radius: 4px }
 sup { vertical-align: super }
 sub { vertical-align: sub }
 body { margin: 8px }
@@ -294,6 +397,27 @@ pub fn parse_color(v: &str) -> Option<Color> {
 /// A length in px (or %/auto), with `em` relative to `em` and `rem` to `rem`.
 pub fn parse_len(v: &str, em: f32, rem: f32) -> Option<Len> {
     let v = v.trim().to_ascii_lowercase();
+    for f in ["calc(", "-webkit-calc("] {
+        if let Some(inner) = v.strip_prefix(f).and_then(|r| r.strip_suffix(')')) {
+            let (px, pct) = calc(inner, em, rem)?;
+            return Some(if pct == 0.0 { Len::Px(px) } else if px == 0.0 { Len::Pct(pct) } else { Len::Mix(px, pct) });
+        }
+    }
+    // min()/max()/clamp() of mixed units: the preferred value is a fair stand-in.
+    if let Some(inner) = v.strip_prefix("clamp(").and_then(|r| r.strip_suffix(')')) {
+        let parts = split_args(inner);
+        return parts.get(1).and_then(|p| parse_len(p, em, rem));
+    }
+    for f in ["min(", "max("] {
+        if let Some(inner) = v.strip_prefix(f).and_then(|r| r.strip_suffix(')')) {
+            let vals: Vec<Len> = split_args(inner).iter().filter_map(|p| parse_len(p, em, rem)).collect();
+            let all_px: Option<Vec<f32>> = vals.iter().map(|l| if let Len::Px(p) = l { Some(*p) } else { None }).collect();
+            return match all_px {
+                Some(px) if !px.is_empty() => Some(Len::Px(if f == "min(" { px.iter().cloned().fold(f32::MAX, f32::min) } else { px.iter().cloned().fold(f32::MIN, f32::max) })),
+                _ => vals.into_iter().next(),
+            };
+        }
+    }
     if v == "auto" {
         return Some(Len::Auto);
     }
@@ -317,6 +441,213 @@ pub fn parse_len(v: &str, em: f32, rem: f32) -> Option<Len> {
         "" => return None, // unitless non-zero lengths are invalid
         _ => return None,
     })
+}
+
+/// Splits function arguments on top-level commas.
+fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0;
+    let mut cur = String::new();
+    for c in s.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut cur).trim().to_string());
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// `calc()`: sums and differences of lengths, scaled by plain numbers; as (px, %).
+fn calc(expr: &str, em: f32, rem: f32) -> Option<(f32, f32)> {
+    /// (px, %, is a plain number)
+    type V = (f32, f32, bool);
+    struct P<'a> {
+        s: &'a [u8],
+        i: usize,
+        em: f32,
+        rem: f32,
+    }
+    impl P<'_> {
+        fn ws(&mut self) {
+            while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
+                self.i += 1;
+            }
+        }
+        fn sum(&mut self) -> Option<V> {
+            let mut v = self.product()?;
+            loop {
+                self.ws();
+                let op = match self.s.get(self.i) {
+                    Some(b'+') => 1.0,
+                    Some(b'-') => -1.0,
+                    _ => return Some(v),
+                };
+                self.i += 1;
+                let r = self.product()?;
+                v = (v.0 + op * r.0, v.1 + op * r.1, v.2 && r.2);
+            }
+        }
+        fn product(&mut self) -> Option<V> {
+            let mut v = self.unit()?;
+            loop {
+                self.ws();
+                let op = match self.s.get(self.i) {
+                    Some(b'*') => b'*',
+                    Some(b'/') => b'/',
+                    _ => return Some(v),
+                };
+                self.i += 1;
+                let r = self.unit()?;
+                v = match (op, v.2, r.2) {
+                    (b'*', true, _) => (r.0 * v.0, r.1 * v.0, r.2),
+                    (b'*', false, true) => (v.0 * r.0, v.1 * r.0, false),
+                    (b'/', _, true) if r.0 != 0.0 => (v.0 / r.0, v.1 / r.0, v.2),
+                    _ => return None,
+                };
+            }
+        }
+        fn unit(&mut self) -> Option<V> {
+            self.ws();
+            if self.s.get(self.i) == Some(&b'(') {
+                self.i += 1;
+                let v = self.sum()?;
+                self.ws();
+                if self.s.get(self.i) != Some(&b')') {
+                    return None;
+                }
+                self.i += 1;
+                return Some(v);
+            }
+            let start = self.i;
+            if matches!(self.s.get(self.i), Some(b'+' | b'-')) {
+                self.i += 1;
+            }
+            while self.i < self.s.len() && (self.s[self.i].is_ascii_digit() || self.s[self.i] == b'.') {
+                self.i += 1;
+            }
+            let num: f32 = std::str::from_utf8(&self.s[start..self.i]).ok()?.parse().ok()?;
+            let ustart = self.i;
+            while self.i < self.s.len() && (self.s[self.i].is_ascii_alphabetic() || self.s[self.i] == b'%') {
+                self.i += 1;
+            }
+            let unit = std::str::from_utf8(&self.s[ustart..self.i]).ok()?;
+            if unit.is_empty() {
+                return Some((num, 0.0, true));
+            }
+            match parse_len(&format!("{num}{unit}"), self.em, self.rem)? {
+                Len::Px(p) => Some((p, 0.0, false)),
+                Len::Pct(p) => Some((0.0, p, false)),
+                _ => None,
+            }
+        }
+    }
+    let mut p = P { s: expr.as_bytes(), i: 0, em, rem };
+    let v = p.sum()?;
+    p.ws();
+    (p.i == p.s.len()).then_some((v.0, v.1))
+}
+
+/// Replaces `var(--name, fallback)` with the custom property's value; `None`
+/// if one is missing and has no fallback (the declaration is then ignored).
+pub fn substitute(value: &str, vars: &HashMap<String, String>, depth: u32) -> Option<String> {
+    if depth > 16 {
+        return None;
+    }
+    let Some(at) = value.find("var(") else { return Some(value.to_string()) };
+    let rest = &value[at + 4..];
+    let mut level = 1;
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => level += 1,
+            ')' => {
+                level -= 1;
+                if level == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let inner = &rest[..end];
+    let (name, fallback) = match inner.split_once(',') {
+        Some((n, f)) => (n.trim(), Some(f.trim())),
+        None => (inner.trim(), None),
+    };
+    let found = match vars.get(name) {
+        Some(v) => substitute(v, vars, depth + 1)?,
+        None => substitute(fallback?, vars, depth + 1)?,
+    };
+    let tail = substitute(&rest[end + 1..], vars, depth + 1)?;
+    Some(format!("{}{}{}", &value[..at], found, tail))
+}
+
+/// `content: "→ " attr(title) open-quote` → the text (icon-font glyphs dropped).
+fn content_text(v: &str, attrs: &[(Box<str>, String)]) -> Option<String> {
+    let v = v.trim();
+    if v == "none" || v == "normal" || v.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    let chars: Vec<char> = v.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' || c == '\'' {
+            let q = c;
+            i += 1;
+            while i < chars.len() && chars[i] != q {
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    // \201C style escapes.
+                    let hex: String = chars[i + 1..].iter().take_while(|c| c.is_ascii_hexdigit()).take(6).collect();
+                    if !hex.is_empty() {
+                        if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                            out.push(ch);
+                        }
+                        i += 1 + hex.len();
+                        if chars.get(i) == Some(&' ') {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    out.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                out.push(chars[i]);
+                i += 1;
+            }
+            i += 1;
+        } else if v[v.char_indices().nth(i).map(|x| x.0).unwrap_or(0)..].starts_with("attr(") {
+            let rest: String = chars[i + 5..].iter().collect();
+            let end = rest.find(')')?;
+            let name = rest[..end].trim();
+            out.push_str(attr(attrs, name).unwrap_or(""));
+            i += 5 + end + 1;
+        } else if v[v.char_indices().nth(i).map(|x| x.0).unwrap_or(0)..].starts_with("open-quote") {
+            out.push('“');
+            i += 10;
+        } else if v[v.char_indices().nth(i).map(|x| x.0).unwrap_or(0)..].starts_with("close-quote") {
+            out.push('”');
+            i += 11;
+        } else {
+            i += 1;
+        }
+    }
+    // Icon fonts put their glyphs in the Private Use Area; without the font they're boxes.
+    let out: String = out.chars().filter(|c| !('\u{e000}'..='\u{f8ff}').contains(c)).collect();
+    (!out.is_empty()).then_some(out)
 }
 
 fn family_of(v: &str) -> Option<Family> {
@@ -378,6 +709,7 @@ fn line_height(v: &str, size: f32, rem: f32) -> Option<f32> {
     match parse_len(v, size, rem)? {
         Len::Px(p) => Some(p),
         Len::Pct(p) => Some(size * p / 100.0),
+        Len::Mix(px, p) => Some(px + size * p / 100.0),
         Len::Auto => None,
     }
 }
@@ -436,6 +768,71 @@ fn split_spaces(v: &str) -> Vec<String> {
     out
 }
 
+/// The quoted rows of `grid-template-areas`.
+fn area_rows(v: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    let mut rest = v;
+    while let Some(start) = rest.find(['"', '\'']) {
+        let q = rest[start..].chars().next().unwrap_or('"');
+        let after = &rest[start + 1..];
+        let Some(end) = after.find(q) else { break };
+        out.push(after[..end].split_whitespace().map(String::from).collect());
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// `grid-template-columns` → tracks (line names dropped, `repeat()` expanded).
+fn tracks(v: &str, em: f32, rem: f32) -> Vec<Track> {
+    let one = |t: &str| -> Option<Track> {
+        let t = t.trim().to_ascii_lowercase();
+        if let Some(fr) = t.strip_suffix("fr") {
+            return fr.parse().ok().map(Track::Fr);
+        }
+        if let Some(inner) = t.strip_prefix("minmax(").and_then(|r| r.strip_suffix(')')) {
+            let args = split_args(inner);
+            let max = args.get(1)?.to_string();
+            if max.ends_with("fr") {
+                return max.trim_end_matches("fr").parse().ok().map(Track::Fr);
+            }
+            return parse_len(&max, em, rem).map(Track::Len).or_else(|| parse_len(args.first()?, em, rem).map(Track::Len));
+        }
+        if t.starts_with("fit-content") || t == "auto" || t == "min-content" || t == "max-content" {
+            return Some(Track::Fr(1.0));
+        }
+        parse_len(&t, em, rem).map(Track::Len)
+    };
+    let mut out = Vec::new();
+    for part in split_spaces(v) {
+        if part.starts_with('[') {
+            continue;
+        }
+        if let Some(inner) = part.strip_prefix("repeat(").and_then(|r| r.strip_suffix(')')) {
+            let args = split_args(inner);
+            let (Some(count), Some(what)) = (args.first(), args.get(1)) else { continue };
+            if count == "auto-fill" || count == "auto-fit" {
+                let min = what
+                    .strip_prefix("minmax(")
+                    .and_then(|r| r.strip_suffix(')'))
+                    .and_then(|r| split_args(r).first().cloned())
+                    .unwrap_or_else(|| what.clone());
+                if let Some(Len::Px(px)) = parse_len(&min, em, rem) {
+                    out.push(Track::AutoFill(px));
+                }
+                continue;
+            }
+            let n: usize = count.parse().unwrap_or(1).clamp(1, 64);
+            let inner_tracks: Vec<Track> = split_spaces(what).iter().filter(|t| !t.starts_with('[')).filter_map(|t| one(t)).collect();
+            for _ in 0..n {
+                out.extend(inner_tracks.iter().copied());
+            }
+        } else if let Some(t) = one(&part) {
+            out.push(t);
+        }
+    }
+    out
+}
+
 /// Expands 1–4 values to top, right, bottom, left.
 fn four<T: Copy>(v: &[T]) -> Option<[T; 4]> {
     Some(match v.len() {
@@ -463,8 +860,10 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         "display" => {
             s.display = match lower.as_str() {
                 "none" | "table-column" | "table-column-group" => Display::None,
-                "inline" | "inline-block" | "inline-flex" | "inline-grid" | "contents" => Display::Inline,
+                "inline" | "inline-block" | "contents" => Display::Inline,
                 "list-item" => Display::ListItem,
+                "flex" | "inline-flex" | "-webkit-box" | "-webkit-flex" => Display::Flex,
+                "grid" | "inline-grid" => Display::Grid,
                 "table" | "inline-table" => Display::Table,
                 "table-row-group" | "table-header-group" | "table-footer-group" => Display::TableRowGroup,
                 "table-row" => Display::TableRow,
@@ -588,6 +987,157 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
             s.strike = lower.contains("line-through");
         }
         "visibility" => s.hidden = lower == "hidden" || lower == "collapse",
+        "box-sizing" => s.border_box = lower == "border-box",
+        "min-width" => {
+            if let Some(l) = len(v) {
+                s.min_width = l
+            }
+        }
+        "min-height" => {
+            if let Some(l) = len(v) {
+                s.min_height = l
+            }
+        }
+        "flex-direction" => {
+            s.column = lower.starts_with("column");
+            s.reverse = lower.ends_with("reverse");
+        }
+        "flex-wrap" => s.wrap = lower.starts_with("wrap"),
+        "flex-flow" => {
+            for p in lower.split_whitespace() {
+                match p {
+                    "row" | "row-reverse" | "column" | "column-reverse" => {
+                        s.column = p.starts_with("column");
+                        s.reverse = p.ends_with("reverse");
+                    }
+                    "wrap" | "wrap-reverse" => s.wrap = true,
+                    "nowrap" => s.wrap = false,
+                    _ => {}
+                }
+            }
+        }
+        "justify-content" => {
+            s.justify = match lower.trim_start_matches("safe ").trim_start_matches("unsafe ") {
+                "center" => Justify::Center,
+                "flex-end" | "end" | "right" => Justify::End,
+                "space-between" => Justify::Between,
+                "space-around" => Justify::Around,
+                "space-evenly" => Justify::Evenly,
+                _ => Justify::Start,
+            }
+        }
+        "align-items" | "align-self" => {
+            let a = match lower.as_str() {
+                "center" => Some(AlignItems::Center),
+                "flex-start" | "start" | "self-start" | "baseline" | "first baseline" => Some(AlignItems::Start),
+                "flex-end" | "end" | "self-end" => Some(AlignItems::End),
+                "stretch" | "normal" => Some(AlignItems::Stretch),
+                _ => None,
+            };
+            if let Some(a) = a {
+                if d.name == "align-items" {
+                    s.align_items = a;
+                } else {
+                    s.align_self = Some(a);
+                }
+            }
+        }
+        "gap" | "grid-gap" => {
+            let parts = split_spaces(v);
+            let r = parts.first().and_then(|p| len(p)).map(|l| l.resolve(0.0));
+            let c = parts.get(1).and_then(|p| len(p)).map(|l| l.resolve(0.0)).or(r);
+            if let (Some(r), Some(c)) = (r, c) {
+                s.row_gap = r;
+                s.column_gap = c;
+            }
+        }
+        "row-gap" | "grid-row-gap" => {
+            if let Some(l) = len(v) {
+                s.row_gap = l.resolve(0.0)
+            }
+        }
+        "column-gap" | "grid-column-gap" => {
+            if let Some(l) = len(v) {
+                s.column_gap = l.resolve(0.0)
+            }
+        }
+        "flex-grow" => s.grow = v.parse().unwrap_or(s.grow),
+        "flex-shrink" => s.shrink = v.parse().unwrap_or(s.shrink),
+        "flex-basis" => {
+            if let Some(l) = len(v).or((lower == "content").then_some(Len::Auto)) {
+                s.basis = l
+            }
+        }
+        "flex" => {
+            // none | auto | <grow> [<shrink>] [<basis>]
+            match lower.as_str() {
+                "none" => (s.grow, s.shrink, s.basis) = (0.0, 0.0, Len::Auto),
+                "auto" => (s.grow, s.shrink, s.basis) = (1.0, 1.0, Len::Auto),
+                "initial" => (s.grow, s.shrink, s.basis) = (0.0, 1.0, Len::Auto),
+                _ => {
+                    let parts = split_spaces(v);
+                    let nums: Vec<f32> = parts.iter().map_while(|p| p.parse::<f32>().ok()).collect();
+                    s.grow = nums.first().copied().unwrap_or(1.0);
+                    s.shrink = nums.get(1).copied().unwrap_or(1.0);
+                    s.basis = parts.get(nums.len()).and_then(|p| len(p)).unwrap_or(if nums.is_empty() { Len::Auto } else { Len::Px(0.0) });
+                    if nums.is_empty() && parts.len() == 1 {
+                        s.grow = 1.0;
+                    }
+                }
+            }
+        }
+        "order" => s.order = v.parse().unwrap_or(0),
+        "grid-template-columns" => s.columns = tracks(v, em, rem),
+        "grid-template-areas" => s.areas = area_rows(v),
+        "grid-template" => {
+            // rows / columns, with area strings among the rows.
+            if let Some((rows, cols)) = v.rsplit_once('/') {
+                s.columns = tracks(cols, em, rem);
+                s.areas = area_rows(rows);
+            } else {
+                s.areas = area_rows(v);
+            }
+        }
+        "grid-area" => {
+            let name = v.split('/').next().unwrap_or("").trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') && !name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
+                s.grid_area = Some(name.to_string());
+            }
+        }
+        "grid-column" | "grid-column-end" | "grid-column-start" => {
+            if let Some(n) = lower.split("span").nth(1).and_then(|n| n.trim().split(|c: char| !c.is_ascii_digit()).next()?.parse::<usize>().ok()) {
+                s.column_span = n.clamp(1, 64);
+            } else if d.name == "grid-column" {
+                let mut parts = lower.split('/').map(|p| p.trim().parse::<i32>().ok());
+                if let Some(Some(a)) = parts.next() {
+                    let b = parts.next().flatten().unwrap_or(0);
+                    s.grid_column = Some((a, b));
+                }
+            }
+        }
+        "position" => {
+            s.position = match lower.as_str() {
+                "relative" | "sticky" | "-webkit-sticky" => Position::Relative,
+                "absolute" => Position::Absolute,
+                "fixed" => Position::Fixed,
+                _ => Position::Static,
+            }
+        }
+        "top" | "right" | "bottom" | "left" => {
+            let i = ["top", "right", "bottom", "left"].iter().position(|x| *x == d.name).unwrap_or(0);
+            if let Some(l) = len(v) {
+                s.inset[i] = l;
+            }
+        }
+        "inset" => {
+            let vals: Option<Vec<Len>> = split_spaces(v).iter().map(|p| len(p)).collect();
+            if let Some(f) = vals.as_deref().and_then(four) {
+                s.inset = f;
+            }
+        }
+        "clip" => s.clipped = lower.starts_with("rect"),
+        "clip-path" => s.clipped = lower.starts_with("inset(50%") || lower.starts_with("inset(100%") || lower.starts_with("circle(0"),
+        "content" => s.content = Some(v.to_string()),
         "float" => {
             s.float = match lower.as_str() {
                 "left" | "inline-start" => Float::Left,
@@ -701,7 +1251,7 @@ fn inherit_one(s: &mut Style, name: &str, p: &Style) {
 
 /// What an element starts with before its own rules: inherited properties
 /// from the parent, everything else at its initial value.
-fn inherited(p: &Style) -> Style {
+pub(crate) fn inherited(p: &Style) -> Style {
     Style {
         color: p.color,
         font_size: p.font_size,
@@ -714,6 +1264,7 @@ fn inherited(p: &Style) -> Style {
         list: p.list,
         transform: p.transform,
         hidden: p.hidden,
+        vars: p.vars.clone(),
         ..Style::default()
     }
 }
@@ -774,6 +1325,18 @@ fn matches_compound(dom: &Dom, id: NodeId, c: &Compound) -> bool {
     }
     for p in &c.pseudos {
         let ok = match p {
+            Pseudo::Nth(a, b, from_end, of_type) => {
+                let sibs = element_siblings(dom, id);
+                let same: Vec<NodeId> = if *of_type { sibs.into_iter().filter(|&x| dom.tag(x) == Some(tag)).collect() } else { sibs };
+                let at = same.iter().position(|&x| x == id).unwrap_or(0) as i32;
+                let pos = if *from_end { same.len() as i32 - at } else { at + 1 };
+                css::nth_matches(*a, *b, pos)
+            }
+            Pseudo::Not(list) => !list.iter().any(|c| matches_compound(dom, id, c)),
+            Pseudo::Never => false,
+            Pseudo::Checked => attr(attrs, "checked").is_some() || attr(attrs, "selected").is_some(),
+            Pseudo::Disabled => attr(attrs, "disabled").is_some(),
+            Pseudo::Enabled => attr(attrs, "disabled").is_none(),
             Pseudo::Root => tag == "html",
             Pseudo::Link => (tag == "a" || tag == "area") && attr(attrs, "href").is_some(),
             Pseudo::FirstChild => element_siblings(dom, id).first() == Some(&id),
@@ -835,14 +1398,54 @@ fn matches_from(dom: &Dom, id: NodeId, parts: &[(Compound, Combinator)], k: usiz
     }
 }
 
-/// Styles for every node of `dom` (text nodes get their parent's).
-pub fn compute(dom: &Dom, author_css: &[String]) -> Vec<Style> {
-    // Origin 0: user agent; 1: author sheets (in order), then inline styles.
-    let mut sheets: Vec<(u8, Vec<Rule>)> = vec![(0, css::parse_stylesheet(UA))];
-    for c in author_css {
-        sheets.push((1, css::parse_stylesheet(c)));
+/// Every node's style (text nodes get their parent's), plus the styles of
+/// `::before` / `::after` boxes, stored after the nodes' and found through
+/// `before` / `after`.
+pub struct Styled {
+    pub styles: Vec<Style>,
+    pub before: HashMap<NodeId, NodeId>,
+    pub after: HashMap<NodeId, NodeId>,
+}
+
+/// Where to look a rule's selector up: by the subject's id, a class, its tag, or anywhere.
+fn bucket(sel: &css::Selector) -> (u8, String) {
+    let c = &sel.parts[0].0;
+    if let Some(id) = &c.id {
+        (0, id.clone())
+    } else if let Some(cl) = c.classes.first() {
+        (1, cl.clone())
+    } else if let Some(t) = &c.tag {
+        (2, t.clone())
+    } else {
+        (3, String::new())
     }
+}
+
+/// (origin, order, rule, selector)
+type Entry = (u8, usize, usize, usize);
+
+pub fn compute(dom: &Dom, author_css: &[String], env: &Env) -> Styled {
+    // Origin 0: user agent; 1: author sheets (in order), then inline styles.
+    // Rules whose @media doesn't apply are dropped up front.
+    let mut rules: Vec<Rule> = Vec::new();
+    let mut origins: Vec<u8> = Vec::new();
+    for (origin, text) in std::iter::once((0u8, UA)).chain(author_css.iter().map(|c| (1u8, c.as_str()))) {
+        for r in css::parse_stylesheet(text) {
+            if r.media.iter().all(|m| css::media_applies(m, env)) {
+                rules.push(r);
+                origins.push(origin);
+            }
+        }
+    }
+    let mut index: HashMap<(u8, String), Vec<Entry>> = HashMap::new();
+    for (ri, r) in rules.iter().enumerate() {
+        for (si, sel) in r.selectors.iter().enumerate() {
+            index.entry(bucket(sel)).or_default().push((origins[ri], ri, ri, si));
+        }
+    }
+    let empty = Vec::new();
     let mut styles: Vec<Style> = Vec::with_capacity(dom.nodes.len());
+    let mut extra: Vec<(NodeId, PseudoElement, Style)> = Vec::new();
     let root_style = Style { display: Display::Block, ..Style::default() };
     let mut rem = 16.0;
     for id in 0..dom.nodes.len() as NodeId {
@@ -852,33 +1455,50 @@ pub fn compute(dom: &Dom, author_css: &[String]) -> Vec<Style> {
             styles.push(if id == 0 { root_style.clone() } else { parent });
             continue;
         };
-        let mut s = inherited(&parent);
-        // (important, origin, specificity, order) → declaration
-        let mut found: Vec<((bool, u8, (u16, u16, u16), usize), &Decl)> = Vec::new();
-        let mut order = 0usize;
-        for (origin, rules) in &sheets {
-            for r in rules {
-                order += 1;
-                let best = r.selectors.iter().filter(|sel| matches(dom, id, sel)).map(|sel| sel.specificity).max();
-                if let Some(spec) = best {
-                    for d in &r.decls {
-                        found.push(((d.important, *origin, spec, order), d));
-                    }
+        // Candidate rules: by id, each class, the tag, and the universal ones.
+        let mut cands: Vec<&Entry> = Vec::new();
+        if let Some(i) = attr(attrs, "id") {
+            cands.extend(index.get(&(0, i.to_string())).unwrap_or(&empty));
+        }
+        for cl in attr(attrs, "class").unwrap_or("").split_ascii_whitespace() {
+            cands.extend(index.get(&(1, cl.to_string())).unwrap_or(&empty));
+        }
+        cands.extend(index.get(&(2, tag.to_string())).unwrap_or(&empty));
+        cands.extend(index.get(&(3, String::new())).unwrap_or(&empty));
+        cands.sort_by_key(|e| (e.1, e.3));
+        cands.dedup();
+        // (important, origin, specificity, order) → declaration, for the element and its pseudo-elements
+        type Found<'a> = Vec<((bool, u8, (u16, u16, u16), usize), &'a Decl)>;
+        let (mut found, mut before, mut after): (Found, Found, Found) = (Vec::new(), Vec::new(), Vec::new());
+        // Group candidates by rule: a rule applies once, at its most specific matching selector.
+        let mut per_rule: Vec<(usize, Option<PseudoElement>, (u16, u16, u16))> = Vec::new();
+        for e in &cands {
+            let sel = &rules[e.2].selectors[e.3];
+            if matches(dom, id, sel) {
+                match per_rule.iter_mut().find(|(r, el, _)| *r == e.2 && *el == sel.element) {
+                    Some(x) => x.2 = x.2.max(sel.specificity),
+                    None => per_rule.push((e.2, sel.element, sel.specificity)),
                 }
             }
         }
+        for (ri, el, spec) in per_rule {
+            let target = match el {
+                None => &mut found,
+                Some(PseudoElement::Before) => &mut before,
+                Some(PseudoElement::After) => &mut after,
+            };
+            for d in &rules[ri].decls {
+                target.push(((d.important, origins[ri], spec, ri), d));
+            }
+        }
         let inline = attr(attrs, "style").map(css::parse_declarations).unwrap_or_default();
-        for d in &inline {
-            order += 1;
-            found.push(((d.important, 2, (u16::MAX, 0, 0), order), d));
+        for (k, d) in inline.iter().enumerate() {
+            found.push(((d.important, 2, (u16::MAX, 0, 0), usize::MAX - inline.len() + k), d));
         }
-        found.sort_by_key(|(k, _)| *k);
-        // font-size first, so em lengths in the same rule use the new size.
-        for (_, d) in found.iter().filter(|(_, d)| d.name == "font-size" || d.name == "font") {
-            apply(&mut s, d, &parent, rem);
-        }
-        for (_, d) in found.iter().filter(|(_, d)| d.name != "font-size" && d.name != "font") {
-            apply(&mut s, d, &parent, rem);
+        let mut s = inherited(&parent);
+        cascade(&mut s, &mut found, &parent, rem);
+        if s.clipped && matches!(s.position, Position::Absolute | Position::Fixed) {
+            s.display = Display::None; // visually hidden: for screen readers only
         }
         // HTML's presentational hints that still matter.
         if tag == "font" {
@@ -909,9 +1529,69 @@ pub fn compute(dom: &Dom, author_css: &[String]) -> Vec<Style> {
             // Superscripts don't make their line taller.
             s.line_height = s.line_height.min(parent.line_height);
         }
+        for (el, list) in [(PseudoElement::Before, &mut before), (PseudoElement::After, &mut after)] {
+            if list.is_empty() {
+                continue;
+            }
+            let mut p = inherited(&s);
+            p.display = Display::Inline;
+            cascade(&mut p, list, &s, rem);
+            if let Some(text) = p.content.as_deref().and_then(|c| content_text(c, attrs)) {
+                p.content = Some(text);
+                if p.display != Display::None {
+                    if p.display != Display::Inline {
+                        p.display = Display::Inline;
+                    }
+                    p.shift = if s.display == Display::Inline { s.shift } else { 0.0 };
+                    extra.push((id, el, p));
+                }
+            }
+        }
         styles.push(s);
     }
-    styles
+    // Pseudo-element styles go after the nodes'.
+    let mut out = Styled { styles, before: HashMap::new(), after: HashMap::new() };
+    for (id, el, st) in extra {
+        let k = out.styles.len() as NodeId;
+        out.styles.push(st);
+        match el {
+            PseudoElement::Before => out.before.insert(id, k),
+            PseudoElement::After => out.after.insert(id, k),
+        };
+    }
+    out
+}
+
+/// Applies matched declarations in cascade order: custom properties first,
+/// then the font size (so `em` in the same rule uses it), then the rest, each
+/// with `var()` substituted.
+fn cascade(s: &mut Style, found: &mut [((bool, u8, (u16, u16, u16), usize), &Decl)], parent: &Style, rem: f32) {
+    found.sort_by_key(|(k, _)| *k);
+    let mut vars: Option<HashMap<String, String>> = None;
+    for (_, d) in found.iter().filter(|(_, d)| d.name.starts_with("--")) {
+        vars.get_or_insert_with(|| (*s.vars).clone()).insert(d.name.clone(), d.value.clone());
+    }
+    if let Some(v) = vars {
+        s.vars = Rc::new(v);
+    }
+    let vars = s.vars.clone();
+    let resolved = |d: &Decl| -> Option<Decl> {
+        if d.value.contains("var(") {
+            Some(Decl { name: d.name.clone(), value: substitute(&d.value, &vars, 0)?, important: d.important })
+        } else {
+            Some(d.clone())
+        }
+    };
+    for (_, d) in found.iter().filter(|(_, d)| d.name == "font-size" || d.name == "font") {
+        if let Some(d) = resolved(d) {
+            apply(s, &d, parent, rem);
+        }
+    }
+    for (_, d) in found.iter().filter(|(_, d)| d.name != "font-size" && d.name != "font" && !d.name.starts_with("--")) {
+        if let Some(d) = resolved(d) {
+            apply(s, &d, parent, rem);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -921,9 +1601,9 @@ mod tests {
 
     fn style_of(html: &str, css: &str, tag: &str) -> Style {
         let dom = html::parse(html);
-        let styles = compute(&dom, &[css.to_string()]);
+        let styled = compute(&dom, &[css.to_string()], &Env::default());
         let id = dom.find(tag).unwrap();
-        styles[id as usize].clone()
+        styled.styles[id as usize].clone()
     }
 
     #[test]

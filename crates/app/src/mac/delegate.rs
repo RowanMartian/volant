@@ -358,7 +358,7 @@ pub fn smoke_test(b: &Browser) {
     let since_exec = super::SHOWN.with(|t| t.get()).unwrap_or_default();
     report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
     let (s1, s2, s3, s4, s5, s6, s7, s8) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone());
-    let (s9, s10, s11, s12, s13) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
+    let (s9, s10, s11, s12, s13, s14) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
     let (m1, m2) = (mem.clone(), mem);
     let rep = report.clone();
     let dir2 = dir.clone();
@@ -455,7 +455,11 @@ pub fn smoke_test(b: &Browser) {
         rep3.lock().unwrap().push_str(&format!("engine copy: {copied:?}\n"));
     }));
     step(51.0, Box::new(move |_b| s13("13-engine-select")));
-    step(51.5, Box::new(move |_b| {
+    // Simple Page: the whole Wikipedia page, drawn by Volant's own engine.
+    step(51.5, Box::new(actions::back));
+    step(55.0, Box::new(|b| super::engine_view::toggle_page(b)));
+    step(60.0, Box::new(move |_b| s14("14-simple-page")));
+    step(60.5, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

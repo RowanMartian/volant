@@ -11,6 +11,22 @@
 pub struct Rule {
     pub selectors: Vec<Selector>,
     pub decls: Vec<Decl>,
+    /// The `@media` conditions it sits inside (all must hold).
+    pub media: Vec<String>,
+}
+
+/// What `@media` queries are asked about.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Env {
+    /// Viewport width in px.
+    pub width: f32,
+    pub dark: bool,
+}
+
+impl Default for Env {
+    fn default() -> Self {
+        Env { width: 1024.0, dark: false }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,8 +62,18 @@ pub enum AttrOp {
     Dash(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pseudo {
+    /// `:nth-child(an+b)`, and the `-last-` / `-of-type` variants: (a, b, from the end, same type only).
+    Nth(i32, i32, bool, bool),
+    /// `:not(...)`: matches when none of these compounds do.
+    Not(Vec<Compound>),
+    /// A state a drawn page is never in (`:hover`, `:focus`, `:visited`...).
+    Never,
+    /// `:checked`, `:disabled`, `:enabled`, from the element's attributes.
+    Checked,
+    Disabled,
+    Enabled,
     FirstChild,
     LastChild,
     OnlyChild,
@@ -68,11 +94,20 @@ pub struct Compound {
     pub pseudos: Vec<Pseudo>,
 }
 
+/// `::before` and `::after`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoElement {
+    Before,
+    After,
+}
+
 /// A complex selector, read right to left: `parts[0]` is the subject, then
 /// each following part is related to the previous one by its combinator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selector {
     pub parts: Vec<(Compound, Combinator)>,
+    /// Styles the element's `::before` or `::after` instead of the element.
+    pub element: Option<PseudoElement>,
     /// (ids, classes/attributes/pseudo-classes, types)
     pub specificity: (u16, u16, u16),
 }
@@ -155,25 +190,66 @@ fn split_top(s: &str, sep: u8) -> Vec<&str> {
     out
 }
 
-/// Whether an `@media` query applies to a screen as the engine knows it.
-fn media_applies(query: &str) -> bool {
+/// Whether an `@media` query list applies: media types (`screen`, `all`,
+/// `print`), `and`, `not`, `only`, and the features `min-width`,
+/// `max-width`, `width`, `prefers-color-scheme`, `orientation`, `hover`,
+/// `pointer`, `prefers-reduced-motion`. Unknown features don't apply.
+pub fn media_applies(query: &str, env: &Env) -> bool {
     let q = query.to_ascii_lowercase();
-    let q = q.trim();
-    if q.is_empty() || q == "all" || q == "screen" || q == "only screen" {
-        return true;
+    q.split(',').any(|one| {
+        let one = one.trim();
+        let (negate, one) = match one.strip_prefix("not ") {
+            Some(rest) => (true, rest.trim()),
+            None => (false, one.strip_prefix("only ").unwrap_or(one).trim()),
+        };
+        let ok = one.split(" and ").map(str::trim).filter(|p| !p.is_empty()).all(|part| {
+            if let Some(feature) = part.strip_prefix('(').and_then(|p| p.strip_suffix(')')) {
+                feature_applies(feature.trim(), env)
+            } else {
+                matches!(part, "all" | "screen")
+            }
+        });
+        ok != negate
+    })
+}
+
+fn feature_applies(f: &str, env: &Env) -> bool {
+    let (name, value) = match f.split_once(':') {
+        Some((n, v)) => (n.trim(), v.trim()),
+        None => (f, ""),
+    };
+    let px = |v: &str| -> Option<f32> {
+        let v = v.trim();
+        if let Some(n) = v.strip_suffix("px") {
+            n.trim().parse().ok()
+        } else if let Some(n) = v.strip_suffix("rem").or_else(|| v.strip_suffix("em")) {
+            n.trim().parse::<f32>().ok().map(|n| n * 16.0)
+        } else {
+            v.parse().ok()
+        }
+    };
+    match name {
+        "min-width" => px(value).map(|w| env.width >= w).unwrap_or(false),
+        "max-width" => px(value).map(|w| env.width <= w).unwrap_or(false),
+        "width" => px(value).map(|w| (env.width - w).abs() < 0.5).unwrap_or(false),
+        "prefers-color-scheme" => (value == "dark") == env.dark,
+        "orientation" => value == "landscape",
+        "hover" | "any-hover" => value == "hover" || value.is_empty(),
+        "pointer" | "any-pointer" => value == "fine" || value.is_empty(),
+        "prefers-reduced-motion" => value == "no-preference",
+        "color" | "min-resolution" | "-webkit-min-device-pixel-ratio" | "min--moz-device-pixel-ratio" => true,
+        _ => false,
     }
-    // Feature queries (widths, colour scheme...) wait for a later chunk; print never applies.
-    false
 }
 
 pub fn parse_stylesheet(css: &str) -> Vec<Rule> {
     let css = strip_comments(css);
     let mut rules = Vec::new();
-    parse_rules(&css, &mut rules);
+    parse_rules(&css, &mut rules, &[]);
     rules
 }
 
-fn parse_rules(css: &str, rules: &mut Vec<Rule>) {
+fn parse_rules(css: &str, rules: &mut Vec<Rule>, media: &[String]) {
     let b = css.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -195,13 +271,17 @@ fn parse_rules(css: &str, rules: &mut Vec<Rule>) {
         let body = &css[at + 1..end.saturating_sub(1).max(at + 1)];
         if let Some(at_rule) = prelude.strip_prefix('@') {
             let (name, rest) = at_rule.split_once(|c: char| c.is_whitespace()).unwrap_or((at_rule, ""));
-            if name.eq_ignore_ascii_case("media") && media_applies(rest) {
-                parse_rules(body, rules);
+            if name.eq_ignore_ascii_case("media") {
+                let mut inner = media.to_vec();
+                inner.push(rest.trim().to_string());
+                parse_rules(body, rules, &inner);
+            } else if name.eq_ignore_ascii_case("supports") || name.eq_ignore_ascii_case("layer") || name.eq_ignore_ascii_case("document") {
+                parse_rules(body, rules, media);
             }
         } else {
             let selectors: Vec<Selector> = split_top(prelude, b',').into_iter().filter_map(parse_selector).collect();
             if !selectors.is_empty() {
-                rules.push(Rule { selectors, decls: parse_declarations(body) });
+                rules.push(Rule { selectors, decls: parse_declarations(body), media: media.to_vec() });
             }
         }
         i = end;
@@ -241,6 +321,7 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
     let mut compounds: Vec<(Compound, Combinator)> = Vec::new(); // left to right; combinator links to the next
     let mut cur = Compound::default();
     let mut has = false;
+    let mut element: Option<PseudoElement> = None;
     let mut i = 0;
     let read_ident = |i: &mut usize| -> String {
         let start = *i;
@@ -277,22 +358,106 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
                 has = true;
             }
             ':' => {
-                if s.get(i + 1) == Some(&':') {
-                    return None; // pseudo-elements (::before...) come later
-                }
-                i += 1;
+                let double = s.get(i + 1) == Some(&':');
+                i += if double { 2 } else { 1 };
                 let name = read_ident(&mut i).to_ascii_lowercase();
-                if s.get(i) == Some(&'(') {
-                    return None; // :not(), :nth-child()...
+                if element.is_some() {
+                    return None; // nothing may follow a pseudo-element
                 }
-                cur.pseudos.push(match name.as_str() {
-                    "first-child" => Pseudo::FirstChild,
-                    "last-child" => Pseudo::LastChild,
-                    "only-child" => Pseudo::OnlyChild,
-                    "root" => Pseudo::Root,
-                    "link" | "any-link" => Pseudo::Link,
-                    "empty" => Pseudo::Empty,
-                    // :visited never matches (privacy); :hover and friends aren't static.
+                if matches!(name.as_str(), "before" | "after") {
+                    element = Some(if name == "before" { PseudoElement::Before } else { PseudoElement::After });
+                    has = true;
+                    continue;
+                }
+                if double {
+                    return None; // ::marker, ::selection... come later
+                }
+                let arg = if s.get(i) == Some(&'(') {
+                    let mut depth = 0;
+                    let start = i + 1;
+                    while i < s.len() {
+                        match s[i] {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    let a: String = s[start..i.min(s.len())].iter().collect();
+                    i += 1;
+                    Some(a)
+                } else {
+                    None
+                };
+                cur.pseudos.push(match (name.as_str(), arg) {
+                    ("first-child", None) => Pseudo::FirstChild,
+                    ("last-child", None) => Pseudo::LastChild,
+                    ("only-child", None) => Pseudo::OnlyChild,
+                    ("first-of-type", None) => Pseudo::Nth(0, 1, false, true),
+                    ("last-of-type", None) => Pseudo::Nth(0, 1, true, true),
+                    ("root", None) => Pseudo::Root,
+                    ("link" | "any-link", None) => Pseudo::Link,
+                    ("empty", None) => Pseudo::Empty,
+                    ("nth-child", Some(a)) => {
+                        let (x, y) = parse_nth(&a)?;
+                        Pseudo::Nth(x, y, false, false)
+                    }
+                    ("nth-last-child", Some(a)) => {
+                        let (x, y) = parse_nth(&a)?;
+                        Pseudo::Nth(x, y, true, false)
+                    }
+                    ("nth-of-type", Some(a)) => {
+                        let (x, y) = parse_nth(&a)?;
+                        Pseudo::Nth(x, y, false, true)
+                    }
+                    ("nth-last-of-type", Some(a)) => {
+                        let (x, y) = parse_nth(&a)?;
+                        Pseudo::Nth(x, y, true, true)
+                    }
+                    ("not", Some(a)) => {
+                        let mut list = Vec::new();
+                        for part in split_top(&a, b',') {
+                            let inner = parse_selector(part)?;
+                            // Only simple and compound selectors inside :not() for now.
+                            if inner.parts.len() != 1 || inner.element.is_some() {
+                                return None;
+                            }
+                            list.push(inner.parts.into_iter().next()?.0);
+                        }
+                        Pseudo::Not(list)
+                    }
+                    ("is" | "where" | "matches", Some(a)) => {
+                        // A single compound inside :is()/:where() works like itself.
+                        let inner = parse_selector(&a)?;
+                        if inner.parts.len() != 1 || split_top(&a, b',').len() != 1 {
+                            return None;
+                        }
+                        let c = inner.parts.into_iter().next()?.0;
+                        if cur.tag.is_none() {
+                            cur.tag = c.tag;
+                        }
+                        cur.classes.extend(c.classes);
+                        cur.attrs.extend(c.attrs);
+                        cur.pseudos.extend(c.pseudos);
+                        if c.id.is_some() {
+                            cur.id = c.id;
+                        }
+                        has = true;
+                        continue;
+                    }
+                    // Interaction states: a snapshot of the page is in none of them
+                    // (and :visited never matches, for privacy).
+                    ("hover" | "focus" | "active" | "focus-visible" | "focus-within" | "visited" | "target" | "indeterminate" | "placeholder-shown" | "autofill" | "-webkit-autofill", None) => {
+                        Pseudo::Never
+                    }
+                    ("checked", None) => Pseudo::Checked,
+                    ("disabled", None) => Pseudo::Disabled,
+                    ("enabled", None) => Pseudo::Enabled,
                     _ => return None,
                 });
                 has = true;
@@ -339,11 +504,61 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
     }
     let mut spec = (0u16, 0u16, 0u16);
     for (c, _) in &parts {
-        spec.0 += c.id.is_some() as u16;
-        spec.1 += (c.classes.len() + c.attrs.len() + c.pseudos.len()) as u16;
-        spec.2 += c.tag.is_some() as u16;
+        let (a, b, cc) = compound_specificity(c);
+        spec = (spec.0 + a, spec.1 + b, spec.2 + cc);
     }
-    Some(Selector { parts, specificity: spec })
+    spec.2 += element.is_some() as u16;
+    Some(Selector { parts, element, specificity: spec })
+}
+
+fn compound_specificity(c: &Compound) -> (u16, u16, u16) {
+    let mut spec = (c.id.is_some() as u16, (c.classes.len() + c.attrs.len()) as u16, c.tag.is_some() as u16);
+    for p in &c.pseudos {
+        match p {
+            // :not() counts as its most specific argument.
+            Pseudo::Not(list) => {
+                let m = list.iter().map(compound_specificity).max().unwrap_or((0, 0, 0));
+                spec = (spec.0 + m.0, spec.1 + m.1, spec.2 + m.2);
+            }
+            _ => spec.1 += 1,
+        }
+    }
+    spec
+}
+
+/// `odd`, `even`, `3`, `2n+1`, `-n+3` → (a, b).
+fn parse_nth(arg: &str) -> Option<(i32, i32)> {
+    let a = arg.trim().to_ascii_lowercase().replace(' ', "");
+    if a.contains("of") {
+        return None;
+    }
+    match a.as_str() {
+        "odd" => return Some((2, 1)),
+        "even" => return Some((2, 0)),
+        _ => {}
+    }
+    match a.split_once('n') {
+        None => Some((0, a.parse().ok()?)),
+        Some((x, y)) => {
+            let x = match x {
+                "" | "+" => 1,
+                "-" => -1,
+                n => n.parse().ok()?,
+            };
+            let y = if y.is_empty() { 0 } else { y.parse().ok()? };
+            Some((x, y))
+        }
+    }
+}
+
+/// Whether position `pos` (1-based) is in `an+b`.
+pub fn nth_matches(a: i32, b: i32, pos: i32) -> bool {
+    if a == 0 {
+        pos == b
+    } else {
+        let d = pos - b;
+        d % a == 0 && d / a >= 0
+    }
 }
 
 fn parse_attr(inner: &str) -> Option<(String, AttrOp)> {
@@ -386,12 +601,14 @@ mod tests {
                    @font-face { font-family: X; src: url(a;b.woff) }\
                    a:hover { color: blue } a[href^='http'] { text-decoration: none }";
         let r = parse_stylesheet(css);
-        assert_eq!(r.len(), 4, "{r:#?}");
+        assert_eq!(r.len(), 6, "{r:#?}");
         assert_eq!(r[0].decls, vec![Decl { name: "margin".into(), value: "0".into(), important: false }, Decl { name: "color".into(), value: "#333".into(), important: false }]);
         assert_eq!(r[1].selectors.len(), 2);
         assert!(r[1].decls[0].important && r[1].decls[0].value == "bold 2em/1.2 Georgia, serif");
-        assert_eq!(r[2].decls[0].value, "red", "screen media applies, print doesn't");
-        assert_eq!(r[3].selectors[0].parts[0].0.attrs[0], ("href".into(), AttrOp::Prefix("http".into())));
+        assert_eq!(r[2].media, ["print"]);
+        assert_eq!(r[3].media, ["screen"]);
+        assert_eq!(r[4].selectors[0].parts[0].0.pseudos, [Pseudo::Never], "a:hover is kept but never matches");
+        assert_eq!(r[5].selectors[0].parts[0].0.attrs[0], ("href".into(), AttrOp::Prefix("http".into())));
     }
 
     #[test]
@@ -405,7 +622,18 @@ mod tests {
         assert_eq!(s.parts[2].1, Combinator::Child);
         assert_eq!(parse_selector("h1 + p").unwrap().parts[0].1, Combinator::Next);
         assert_eq!(parse_selector("*").unwrap().specificity, (0, 0, 0));
-        for bad in ["a:hover", "p::before", "li:nth-child(2)", "> p", "", "a b >"] {
+        let s = parse_selector("li:nth-child(2n+1):not(.x, #y)::before").unwrap();
+        assert_eq!(s.element, Some(PseudoElement::Before));
+        assert_eq!(s.parts[0].0.pseudos[0], Pseudo::Nth(2, 1, false, false));
+        assert_eq!(s.specificity, (1, 1, 2), "li + ::before, :nth-child, :not counts its #y");
+        assert_eq!(parse_nth("-n+3"), Some((-1, 3)));
+        assert!(nth_matches(2, 1, 5) && !nth_matches(2, 1, 4) && nth_matches(-1, 3, 2) && !nth_matches(-1, 3, 4) && nth_matches(0, 3, 3));
+        let env = Env { width: 800.0, dark: true };
+        for (q, want) in [("screen and (min-width: 600px)", true), ("(max-width: 40em)", false), ("print", false), ("(prefers-color-scheme: dark)", true), ("not print", true), ("screen, print", true), ("(min-width: 900px)", false)] {
+            assert_eq!(media_applies(q, &env), want, "{q}");
+        }
+        assert_eq!(parse_selector("a:hover").unwrap().parts[0].0.pseudos, [Pseudo::Never]);
+        for bad in ["p::marker", "li:has(p)", "> p", "", "a b >"] {
             assert!(parse_selector(bad).is_none() || bad == "a b >", "{bad}");
         }
     }

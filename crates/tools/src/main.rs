@@ -8,7 +8,7 @@
 //! volant-tools zip SRC_DIR OUT.zip             zip a folder, keeping it as the top level
 //! volant-tools unzip IN.zip DIR                unpack (as Volant's updater does)
 //! volant-tools sha256 FILE...                  SHA-256 of each file
-//! volant-tools render IN.html OUT.svg [--width N] [--reader URL] [--dark] [--sans]
+//! volant-tools render IN.html OUT.svg [--width N] [--reader URL] [--css FILE]... [--dark] [--sans]
 //!                                              draw a page with Volant's own engine
 //!                                              (--reader: as Reader view of URL; images
 //!                                              without a known size are drawn 3:2)
@@ -93,8 +93,16 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
                 None => (html, String::new()),
             };
+            let mut sheets = vec![css];
+            for (i, a) in args.iter().enumerate() {
+                if a == "--css" {
+                    let f = args.get(i + 1).ok_or("--css needs a file")?;
+                    sheets.push(String::from_utf8_lossy(&read(f)?).into_owned());
+                }
+            }
+            let env = volant_engine::Env { width, dark: flag("--dark").is_some() };
             let started = std::time::Instant::now();
-            let page = volant_engine::render(&doc, &css, width, &volant_engine::ApproxFonts, &PreviewImages);
+            let page = volant_engine::render_in(&doc, &sheets, env, &volant_engine::ApproxFonts, &PreviewImages);
             let took = started.elapsed();
             write(out, volant_engine::svg::to_svg(&page).as_bytes())?;
             println!("{out}: {} x {} px, {} items, {} links, laid out in {:.1} ms", page.width, page.height.ceil(), page.items.len(), page.links.len(), took.as_secs_f64() * 1000.0);

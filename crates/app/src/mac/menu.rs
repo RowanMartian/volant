@@ -42,6 +42,7 @@ pub enum Cmd {
     CheckUpdates,
     PickElement,
     BlockerSettings,
+    SimplePage,
     Tab1 = 100,
 }
 
@@ -49,6 +50,7 @@ const CMDS: &[Cmd] = &[
     Cmd::Settings, Cmd::MakeDefault, Cmd::NewTab, Cmd::OpenLocation, Cmd::ReopenTab, Cmd::CloseTab, Cmd::Print, Cmd::Find, Cmd::FindNext,
     Cmd::FindPrev, Cmd::CopyUrl, Cmd::ToggleSidebar, Cmd::Reload, Cmd::HardReload, Cmd::Stop, Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomReset,
     Cmd::Back, Cmd::Forward, Cmd::Home, Cmd::History, Cmd::PinTab, Cmd::NextTab, Cmd::PrevTab, Cmd::Welcome, Cmd::Source, Cmd::Reader, Cmd::CheckUpdates, Cmd::PickElement, Cmd::BlockerSettings,
+    Cmd::SimplePage,
 ];
 
 const CMD: u8 = 1;
@@ -180,6 +182,7 @@ pub fn install(b: &Browser) {
     Builder::new(b, "View")
         .cmd("Toggle Sidebar", "s", CMD, Cmd::ToggleSidebar)
         .cmd("Show Reader", "r", CMD | SHIFT, Cmd::Reader)
+        .cmd("Simple Page (Volant's Engine)", "e", CMD | OPT, Cmd::SimplePage)
         .cmd("Block Element…", "b", CMD | OPT, Cmd::PickElement)
         .sep()
         .cmd("Reload Page", "r", CMD, Cmd::Reload)
@@ -290,6 +293,7 @@ pub fn run(b: &mut Browser, tag: isize) {
             actions::open_tab(b, "https://github.com/RowanMartian/volant", true);
         }
         Cmd::Reader => actions::toggle_reader(b),
+        Cmd::SimplePage => super::engine_view::toggle_page(b),
         Cmd::CheckUpdates => super::updater::check(b, true),
         Cmd::PickElement => super::blocking::pick_element(b),
         Cmd::BlockerSettings => actions::open_or_switch(b, "volant://blocker"),

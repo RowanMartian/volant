@@ -42,8 +42,10 @@ struct Inner {
     tab: Option<TabId>,
     host: String,
     article: Option<volant_core::reader::Article>,
-    /// What the current layout was made for: (width, dark, size, serif).
-    laid: Option<(i64, bool, u32, bool)>,
+    /// Simple Page: a whole page drawn by the engine (`toggle_page`).
+    page: Option<SimplePage>,
+    /// What the current layout was made for: (width, dark, size, serif, simple page).
+    laid: Option<(i64, bool, u32, bool, bool)>,
     /// The article's pictures: loading, loaded (with their size) or failed.
     images: HashMap<String, ImageState>,
     relayout_soon: bool,
@@ -51,6 +53,13 @@ struct Inner {
     find_query: String,
     find_hits: Vec<NSRect>,
     find_current: usize,
+}
+
+/// A page as WebKit has it after its scripts ran: its HTML and linked style sheets.
+struct SimplePage {
+    url: String,
+    html: String,
+    sheets: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -177,6 +186,8 @@ pub struct EngineIvars {
     sel_areas: RefCell<Vec<NSRect>>,
     /// Whether the mouse moved since it went down (a drag selects; a click follows links).
     dragged: Cell<bool>,
+    /// The address relative links and images resolve against.
+    base: RefCell<String>,
 }
 
 define_class!(
@@ -252,8 +263,10 @@ define_class!(
                     .find(|l| p.x >= l.x as f64 && p.x <= (l.x + l.w) as f64 && p.y >= l.y as f64 && p.y <= (l.y + l.h) as f64)
                     .map(|l| l.href.clone())
             });
-            if let Some(href) = href.filter(|h| h.starts_with("https://") || h.starts_with("http://")) {
-                with(move |b| actions::navigate(b, &href));
+            let base = self.ivars().base.borrow().clone();
+            let target = href.and_then(|h| resolve(&base, &h));
+            if let Some(url) = target.filter(|h| h.starts_with("https://") || h.starts_with("http://")) {
+                with(move |b| actions::navigate(b, &url));
             }
         }
 
@@ -327,6 +340,7 @@ impl EngineView {
             sel: Cell::new(None),
             sel_areas: RefCell::new(Vec::new()),
             dragged: Cell::new(false),
+            base: RefCell::new(String::new()),
         });
         unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 100.0, 100.0)] }
     }
@@ -463,6 +477,7 @@ pub fn show(b: &Browser, id: TabId, article: volant_core::reader::Article, url: 
         e.tab = Some(id);
         e.host = volant_core::omnibox::host(url).to_string();
         e.article = Some(article);
+        e.page = None;
         e.laid = None;
         e.images.clear();
         e.find_hits.clear();
@@ -479,12 +494,15 @@ pub fn show(b: &Browser, id: TabId, article: volant_core::reader::Article, url: 
 pub fn sync(b: &Browser) {
     let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
     let active = b.tabs.active;
-    let visible = b.settings.engine_reader
-        && e.article.is_some()
-        && e.tab.is_some()
-        && e.tab == active
-        && active.map(|id| actions::in_reader(b, id)).unwrap_or(false);
-    if !visible {
+    let on_tab = e.tab.is_some() && e.tab == active;
+    let current_url = active.and_then(|id| b.webs.get(&id)).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string());
+    // A Simple Page snapshot belongs to the address it was taken at.
+    if on_tab && e.page.is_some() && current_url.as_deref() != e.page.as_ref().map(|p| p.url.as_str()) {
+        e.page = None;
+    }
+    let simple = on_tab && e.page.is_some();
+    let reader = !simple && b.settings.engine_reader && e.article.is_some() && on_tab && active.map(|id| actions::in_reader(b, id)).unwrap_or(false);
+    if !simple && !reader {
         if let Some(s) = &e.scroll {
             s.setHidden(true);
         }
@@ -506,29 +524,51 @@ pub fn sync(b: &Browser) {
     // Just above this tab's web view, below anything Volant puts over the content.
     b.ui.content.addSubview_positioned_relativeTo(&scroll, NSWindowOrderingMode::Above, Some(&web));
     let cb = b.ui.content.bounds();
-    scroll.setFrame(rect(0.0, TOOLBAR_H, cb.size.width, (cb.size.height - TOOLBAR_H).max(0.0)));
+    // Reader keeps its own toolbar visible above; a simple page takes the whole area.
+    let top = if simple { 0.0 } else { TOOLBAR_H };
+    scroll.setFrame(rect(0.0, top, cb.size.width, (cb.size.height - top).max(0.0)));
     scroll.setHidden(false);
     let dark = theme::is_dark(mtm);
     let size = b.settings.reader_size;
     let serif = b.settings.reader_font != "sans";
     let width = cb.size.width.floor() as i64;
-    let want = (width, dark, size, serif);
+    let want = (width, dark, size, serif, simple);
     if e.laid != Some(want) {
-        let Some(a) = e.article.as_ref() else { return };
-        let o = volant_engine::reader::Options { dark, size: size as f32, serif };
-        let (html, css) = volant_engine::reader::document(a, &e.host, &o);
-        // The Reader page's own top margin already sits above the toolbar line.
-        let css = css + "article { margin-top: 0 }";
+        let (html, sheets, base) = if let Some(p) = &e.page {
+            (p.html.clone(), p.sheets.clone(), p.url.clone())
+        } else {
+            let Some(a) = e.article.as_ref() else { return };
+            let o = volant_engine::reader::Options { dark, size: size as f32, serif };
+            let (html, css) = volant_engine::reader::document(a, &e.host, &o);
+            // The Reader page's own top margin already sits above the toolbar line.
+            (html, vec![css + "article { margin-top: 0 }"], format!("https://{}/", e.host))
+        };
         let started = std::time::Instant::now();
         let images = MacImages { known: &e.images, wanted: RefCell::new(Vec::new()) };
-        let page = volant_engine::render(&html, &css, width as f32, &MacFonts, &images);
+        let env = volant_engine::Env { width: width as f32, dark };
+        let page = volant_engine::render_in(&html, &sheets, env, &MacFonts, &images);
         let wanted = images.wanted.into_inner();
         let pictures = page.items.iter().filter(|i| matches!(i, Item::Image { .. })).count();
-        eprintln!("engine: laid out {} items ({pictures} images) in {:.1} ms", page.items.len(), started.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "engine: {} laid out {} items ({pictures} images) in {:.1} ms",
+            if simple { "page" } else { "reader" },
+            page.items.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        *view.ivars().base.borrow_mut() = base.clone();
         for src in wanted {
-            if e.images.len() < MAX_IMAGES && !e.images.contains_key(&src) && (src.starts_with("https://") || src.starts_with("http://")) {
+            if e.images.len() >= MAX_IMAGES || e.images.contains_key(&src) {
+                continue;
+            }
+            if let Some(data) = src.strip_prefix("data:") {
+                // Inline pictures decode straight away.
+                let bytes = data.split_once(";base64,").and_then(|(_, b64)| base64(b64));
                 e.images.insert(src.clone(), ImageState::Loading);
-                load_image(src);
+                let key = src.clone();
+                super::later(move || with(move |b| image_arrived(b, &key, bytes)));
+            } else if let Some(url) = resolve(&base, &src).filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
+                e.images.insert(src.clone(), ImageState::Loading);
+                load_image(src, url);
             }
         }
         let bg = ns_color(page.background);
@@ -547,11 +587,122 @@ pub fn sync(b: &Browser) {
     }
 }
 
-/// Downloads a picture (Volant's own HTTP), decodes it, and lays the article out again.
-fn load_image(src: String) {
+/// `href` resolved against `base` (`None` for fragments and scripts).
+fn resolve(base: &str, href: &str) -> Option<String> {
+    let h = href.trim();
+    if h.is_empty() || h.starts_with('#') || h.to_ascii_lowercase().starts_with("javascript:") {
+        return None;
+    }
+    if h.starts_with("data:") {
+        return Some(h.to_string());
+    }
+    volant_core::http::Url::parse(base).and_then(|u| u.join(h)).map(|u| u.as_string())
+}
+
+/// Standard base64 (as in `data:` URLs), padding optional.
+fn base64(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let clean: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    for chunk in clean.chunks(4) {
+        let mut n = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            n |= val(c)? << (18 - 6 * i);
+        }
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
+/// What WebKit is showing, after the page's scripts ran: its HTML, and each
+/// linked style sheet's rules (or just its address, when it's from another
+/// origin and WebKit won't share them).
+const SNAPSHOT_JS: &str = r#"(() => {
+  const sheets = [];
+  for (const s of document.styleSheets) {
+    if (!s.href || s.disabled) continue;
+    let text = null;
+    try { text = Array.from(s.cssRules).map((r) => r.cssText).join('\n'); } catch (e) {}
+    sheets.push({ href: s.href, text, media: s.media ? s.media.mediaText : '' });
+  }
+  return JSON.stringify({ html: document.documentElement.outerHTML, sheets });
+})()"#;
+
+/// View → Simple Page: draws the page in front with Volant's own engine (or
+/// goes back to WebKit).
+pub fn toggle_page(b: &Browser) {
+    let Some(id) = b.tabs.active else { return };
+    if is_active(b) && b.engine.0.try_borrow().map(|e| e.page.is_some()).unwrap_or(false) {
+        if let Ok(mut e) = b.engine.0.try_borrow_mut() {
+            e.page = None;
+        }
+        sync(b);
+        return;
+    }
+    let Some(web) = b.webs.get(&id).map(|w| w.web.clone()) else { return };
+    let Some(url) = unsafe { web.URL() }.and_then(|u| u.absoluteString()).map(|s| s.to_string()).filter(|u| u.starts_with("http")) else {
+        objc2_app_kit::NSBeep();
+        return;
+    };
+    let block = block2::RcBlock::new(move |res: *mut AnyObject, _e: *mut objc2_foundation::NSError| {
+        let Some(json) = unsafe { res.as_ref() }.and_then(|o| o.downcast_ref::<NSString>()).map(|s| s.to_string()) else { return };
+        let url = url.clone();
+        std::thread::spawn(move || {
+            let Some(v) = volant_core::json::parse(&json) else { return };
+            let html = v.str_at("html").unwrap_or("").to_string();
+            let mut sheets = Vec::new();
+            for sh in v.get("sheets").map(volant_core::json::Value::as_array).unwrap_or(&[]) {
+                let text = match sh.str_at("text") {
+                    Some(t) => Some(t.to_string()),
+                    // Another origin's sheet: Volant fetches it itself.
+                    None => sh.str_at("href").and_then(|h| super::net::fetch_text(h, 8 << 20).ok()),
+                };
+                let Some(text) = text else { continue };
+                let media = sh.str_at("media").unwrap_or("").trim().to_string();
+                sheets.push(if media.is_empty() || media == "all" { text } else { format!("@media {media} {{\n{text}\n}}") });
+            }
+            super::on_main(move || {
+                with(move |b| {
+                    if let Ok(mut e) = b.engine.0.try_borrow_mut() {
+                        e.tab = Some(id);
+                        e.page = Some(SimplePage { url, html, sheets });
+                        e.laid = None;
+                        e.images.clear();
+                        e.find_hits.clear();
+                        if let Some(v) = &e.view {
+                            v.ivars().images.borrow_mut().clear();
+                            *v.ivars().hits.borrow_mut() = (Vec::new(), 0);
+                        }
+                    }
+                    sync(b);
+                })
+            });
+        });
+    });
+    unsafe { web.evaluateJavaScript_completionHandler(&ns(SNAPSHOT_JS), Some(&block)) };
+}
+
+/// Downloads a picture (Volant's own HTTP), decodes it, and lays the page out again.
+/// `key` is the address as the page wrote it; `url` is where it really is.
+fn load_image(key: String, url: String) {
     std::thread::spawn(move || {
-        let bytes = super::net::fetch(&src, 24 << 20).ok();
-        super::on_main(move || with(move |b| image_arrived(b, &src, bytes)));
+        let bytes = super::net::fetch(&url, 24 << 20).ok();
+        super::on_main(move || with(move |b| image_arrived(b, &key, bytes)));
     });
 }
 
