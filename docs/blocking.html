@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Block ads and trackers, powered by uBlock — Volant</title>
+<meta name="description" content="Volant's built-in blocker runs uBlock Origin's filter lists and filter syntax inside WebKit's native content blocker: network, cosmetic and procedural filters, scriptlets, My filters, trusted sites and an element picker.">
+<meta name="theme-color" content="#0d0c11">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Volant">
+<meta property="og:title" content="Block ads and trackers, powered by uBlock — Volant">
+<meta property="og:description" content="Volant's built-in blocker runs uBlock Origin's filter lists and filter syntax inside WebKit's native content blocker: network, cosmetic and procedural filters, scriptlets, My filters, trusted sites and an element picker.">
+<meta property="og:image" content="https://rowanmartian.github.io/volant/readme/hero.png">
+<meta property="og:url" content="https://rowanmartian.github.io/volant/blocking.html">
+<link rel="canonical" href="https://rowanmartian.github.io/volant/blocking.html">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="./"><img src="logo.svg" alt="" width="30" height="30">Volant</a>
+  <div class="links"><a href="features.html">Features</a><a href="blocking.html" aria-current="page">Blocking</a><a href="performance.html">Performance</a><a href="help.html">Help</a><a href="download.html">Download</a><a href="https://github.com/RowanMartian/volant">GitHub</a></div>
+  <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg">Download</a>
+</div></nav>
+<header class="page-head"><div class="wrap">
+  <span class="pill"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5 3.5 5.7v6.1c0 5.3 3.7 8.6 8.5 9.7 4.8-1.1 8.5-4.4 8.5-9.7V5.7z"/></svg>Powered by uBlock</span>
+  <h1>Block ads and trackers. <em>Built into the browser.</em></h1>
+  <p class="lead">Volant runs uBlock Origin's filter lists, with the same defaults and the same filter syntax, compiled into the content blocker inside WebKit. There's nothing to install and no extension to keep updated. It's on from the first launch, and one switch turns it off.</p>
+  <div class="shot small"><img src="screens/blocker.png" alt="Volant's Block ads and trackers page, powered by uBlock: the main switch, settings, filter lists, My filters and trusted sites" loading="lazy"></div>
+</div></header>
+
+<section class="tight" id="how"><div class="wrap">
+  <div class="kicker">How it works</div>
+  <h2>uBlock's filters, at the engine's speed.</h2>
+  <p class="lead">Blockers that run as extensions inspect each request in JavaScript. Volant compiles the filters ahead of time, so WebKit can match them natively before a request leaves your Mac.</p>
+  <ol class="steps">
+    <li><b>The lists.</b> Volant downloads the filter lists uBlock Origin starts with: uBlock's own filters, EasyList, EasyPrivacy, Peter Lowe's list and the Online Malicious URL Blocklist. It refreshes them every four days.</li>
+    <li><b>The compiler.</b> Volant's own Rust compiler reads uBlock Origin's filter syntax and turns about 240,000 network filters into WebKit content rules. That takes under a second.</li>
+    <li><b>The engine.</b> WebKit compiles those rules into the content blocker built into every Mac. Ads, trackers and malware domains are stopped inside the engine, before the request is sent.</li>
+    <li><b>The page.</b> As each page starts loading, Volant adds only that site's cosmetic filters, procedural filters and scriptlets. The other 26,000 sites' fixes stay out of the page.</li>
+  </ol>
+</div></section>
+
+<section id="controls"><div class="wrap">
+  <div class="kicker">Your controls</div>
+  <h2>A shield for every site.</h2>
+  <div class="grid">
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></div><h3>The shield</h3><p>The shield in the address bar shows whether blocking is on for the site you're on. Click it to turn blocking off for that site, and click again to turn it back on. The page reloads either way.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l6.5 16 2.3-6.7L19.5 11z"/><path d="m13 13 6 6"/></svg></div><h3>Block Element</h3><p>Press <kbd>⌥⌘B</kbd>, or right-click the shield, then point at anything on the page. Use Wider and Narrower to adjust what's selected, then click Block. It's saved to My filters.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14"/></svg></div><h3>My filters</h3><p>Write your own filters in uBlock Origin's syntax, including cosmetic filters, procedural filters and <code>+js()</code> scriptlets.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></div><h3>Trusted sites</h3><p>Sites where Volant blocks nothing. Add whole domains, and their subdomains are trusted too.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg></div><h3>Filter lists</h3><p>uBlock Origin's catalogue: ads, privacy, malware, cookie notices, social widgets and annoyances. Tick a list and choose Apply Changes.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg></div><h3>Always current</h3><p>The lists update themselves every four days. Choose Update Now in Blocker Settings to fetch them straight away.</p></div>
+  </div>
+</div></section>
+
+<section id="settings" class="tight"><div class="wrap">
+  <div class="split even">
+    <div>
+      <div class="kicker">Settings</div>
+      <h2>The settings uBlock Origin has.</h2>
+      <p class="lead">Under <b>Volant → Blocker Settings…</b>, next to the main switch.</p>
+    </div>
+    <div class="mock" aria-hidden="false">
+      <div class="switchrow"><div class="tx"><b>Hide page elements</b><small>Cosmetic filtering: removes the empty boxes and banners ads leave behind</small></div><span class="toggle" role="img" aria-label="On by default"></span></div>
+      <div class="switchrow"><div class="tx"><b>Disable hyperlink auditing</b><small>Stops links from reporting your clicks with &lt;a ping&gt;</small></div><span class="toggle" role="img" aria-label="On by default"></span></div>
+      <div class="switchrow"><div class="tx"><b>Prevent WebRTC from leaking local IP addresses</b><small>Some video calls may stop working</small></div><span class="toggle off" role="img" aria-label="Off by default"></span></div>
+      <div class="switchrow"><div class="tx"><b>Block remote fonts</b><small>Faster pages and less tracking; some icons may become letters</small></div><span class="toggle off" role="img" aria-label="Off by default"></span></div>
+      <div class="switchrow"><div class="tx"><b>Disable JavaScript</b><small>Everywhere except trusted sites</small></div><span class="toggle off" role="img" aria-label="Off by default"></span></div>
+    </div>
+  </div>
+</div></section>
+
+<section id="filters"><div class="wrap">
+  <div class="kicker">Filter syntax</div>
+  <h2>What Volant understands.</h2>
+  <p class="lead">uBlock Origin's lists use a rich syntax. This is how each part is handled.</p>
+  <div class="table"><table>
+    <thead><tr><th>Filters</th><th>Example</th><th>In Volant</th></tr></thead>
+    <tbody>
+      <tr><td>Network filters</td><td><code>||ads.example^$script,third-party</code></td><td>WebKit content rules, with <code>$domain</code>, <code>$to</code>, resource types, first or third party and match-case</td></tr>
+      <tr><td>Exceptions</td><td><code>@@||example.com/player.js</code></td><td>Copied into every rule list, with <code>$important</code> and <code>$badfilter</code> respected</td></tr>
+      <tr><td>Regex filters</td><td><code>/banner[0-9]+\.gif/</code></td><td>Translated into WebKit's regex dialect when they fit it</td></tr>
+      <tr><td>Generic cosmetic</td><td><code>##.ad-banner</code></td><td>Hidden on every site by WebKit's own style rules</td></tr>
+      <tr><td>Site cosmetic</td><td><code>example.com##.sidebar-ad</code></td><td>Hidden on that site, including <code>example.*</code> entities</td></tr>
+      <tr><td>Procedural</td><td><code>example.com##div:has-text(Sponsored)</code></td><td>Volant's procedural engine: <code>:has-text</code>, <code>:upward</code>, <code>:matches-css</code>, <code>:xpath</code>, <code>:remove</code>, <code>:style</code> and more</td></tr>
+      <tr><td>Scriptlets</td><td><code>example.com##+js(set-constant, ads, false)</code></td><td>33 of uBlock Origin's scriptlets, rewritten for Volant, injected only into matching sites</td></tr>
+      <tr><td>Page exceptions</td><td><code>@@||example.com^$generichide</code></td><td><code>$document</code>, <code>$generichide</code>, <code>$elemhide</code> and <code>$specifichide</code></td></tr>
+      <tr><td>Preprocessor</td><td><code>!#if env_safari</code></td><td>Evaluated as uBlock Origin on Safari would</td></tr>
+      <tr><td>Redirects</td><td><code>$redirect=noopjs</code></td><td>Blocked instead. WebKit can't serve a stand-in file</td></tr>
+      <tr><td>Not supported</td><td><code>$removeparam</code>, <code>$csp</code>, <code>$header</code>, <code>##^</code></td><td>Skipped. WebKit's content blocker can't rewrite requests, headers or HTML</td></tr>
+    </tbody>
+  </table></div>
+</div></section>
+
+<section id="lists" class="tight"><div class="wrap">
+  <div class="split even">
+    <div class="card blue">
+      <h3><i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></i>On from the start</h3>
+      <p class="sub">The lists uBlock Origin turns on by default.</p>
+      <ul>
+        <li><b>uBlock filters</b><span>Ads, badware risks, privacy, unbreak and quick fixes</span></li>
+        <li><b>EasyList</b><span>Ads</span></li>
+        <li><b>EasyPrivacy</b><span>Trackers</span></li>
+        <li><b>Online Malicious URL Blocklist</b><span>Malware sites</span></li>
+        <li><b>Peter Lowe's list</b><span>Ad and tracking servers</span></li>
+      </ul>
+    </div>
+    <div class="card grey">
+      <h3><i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg></i>One tick away</h3>
+      <p class="sub">The rest of the catalogue, by kind.</p>
+      <ul>
+        <li><b>Ads and privacy</b><span>AdGuard lists, uBlock Experimental, Block Outsider Intrusion into LAN</span></li>
+        <li><b>Security</b><span>Phishing URL Blocklist, Dan Pollock's hosts file</span></li>
+        <li><b>Cookie notices</b><span>uBlock, EasyList and AdGuard cookie lists</span></li>
+        <li><b>Social widgets</b><span>EasyList, AdGuard and Fanboy lists</span></li>
+        <li><b>Annoyances</b><span>Pop-ups, chat and AI widgets, newsletter and notification prompts</span></li>
+      </ul>
+    </div>
+  </div>
+</div></section>
+
+<section id="faq"><div class="wrap prose" style="max-width:860px">
+  <div class="kicker">Questions</div>
+  <h2 style="margin-top:0">Good to know.</h2>
+  <details><summary>Is this the uBlock Origin extension?</summary><p>No. Volant doesn't run browser extensions. It uses uBlock Origin's filter lists, default list selection and filter syntax, and compiles them into WebKit's built-in content blocker. That's why it says "Powered by uBlock". The extension's logger and dynamic filtering aren't part of Volant.</p></details>
+  <details><summary>A site is broken. What do I do?</summary><p>Click the shield in the address bar to turn blocking off for that site. If you'd rather keep blocking on, open Blocker Settings and make sure uBlock filters – Unbreak and Quick fixes are ticked, then choose Update Now.</p></details>
+  <details><summary>Does blocking slow pages down?</summary><p>It speeds them up. Matching happens inside WebKit's compiled content blocker, and every blocked request is one your Mac never downloads. The only script Volant adds to a page is that site's own fixes, and only when the lists have some.</p></details>
+  <details><summary>What does Volant send when it updates the lists?</summary><p>It downloads each list from its usual address, the same request the uBlock Origin extension makes. Nothing about the pages you visit is sent.</p></details>
+  <details><summary>Can I turn it off entirely?</summary><p>Yes. Use the switch at the top of Blocker Settings, or Settings → Privacy. Setup also asks on the first launch.</p></details>
+</div></section>
+
+<section class="tight"><div class="wrap">
+  <div class="credit"><b>Thanks to uBlock Origin.</b> Blocking in Volant is powered by uBlock: the filter lists, the default list selection and the filter syntax are uBlock Origin's, by <a href="https://github.com/gorhill">Raymond Hill</a> and contributors, released under the GPLv3. The lists themselves are by their maintainers, including EasyList, Peter Lowe and abuse.ch's URLhaus. Volant is an independent project and isn't made or endorsed by uBlock Origin. If uBlock Origin helps you in other browsers, <a href="https://github.com/gorhill/uBlock">give it a star</a>.</div>
+</div></section>
+
+<section class="final"><div class="wrap">
+  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
+  <h2>Cleaner pages, from the first launch.</h2>
+  <div class="ctas" style="justify-content:center">
+    <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download Volant</a>
+    <a class="btn" href="features.html">All features</a>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>
+      <div class="brand"><img src="logo.svg" alt="" width="26" height="26">Volant</div>
+      <div>The featherweight browser for your Mac.<br>Free and open source, MIT licensed.</div>
+    </div>
+    <div><h4>Product</h4><ul><li><a href="features.html">Features</a></li><li><a href="blocking.html">Blocking</a></li><li><a href="performance.html">Performance</a></li><li><a href="download.html">Download</a></li></ul></div>
+    <div><h4>Help</h4><ul><li><a href="help.html">Shortcuts and FAQ</a></li><li><a href="download.html#install">Installing</a></li><li><a href="privacy.html">Privacy</a></li></ul></div>
+    <div><h4>Project</h4><ul><li><a href="https://github.com/RowanMartian/volant">Source on GitHub</a></li><li><a href="https://github.com/RowanMartian/volant/releases/tag/latest">Release notes</a></li><li><a href="https://github.com/RowanMartian/volant/issues">Report a problem</a></li></ul></div>
+  </div>
+  <p class="legal">Blocking is powered by uBlock: Volant uses uBlock Origin's filter lists and filter syntax. uBlock Origin is by Raymond Hill and contributors; Volant is an independent project, not made or endorsed by them. Mac, macOS, Safari and WebKit are trademarks of Apple Inc.</p>
+</div></footer>
+</body>
+</html>

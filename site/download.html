@@ -1,0 +1,53 @@
+<!--
+title: Download Volant for Mac
+description: Download Volant, the featherweight browser for macOS. Free and open source, 1.3 MB, for macOS 12 or later on Apple Silicon and Intel.
+nav: download
+-->
+<header class="page-head center"><div class="wrap">
+  <div class="final" style="padding:0"><div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div></div>
+  <h1 style="margin-left:auto;margin-right:auto">Download Volant.</h1>
+  <p class="lead">Free and open source. 1.3 MB, for macOS 12 Monterey or later, on Apple Silicon and Intel Macs.</p>
+  <div class="ctas">
+    <a class="btn primary" href="{{dmg}}">{{icon:download}}Download Volant.dmg</a>
+    <a class="btn" href="{{repo}}/releases/tag/latest">Release notes</a>
+  </div>
+  <p class="fine" style="margin-top:16px">Every download is built by GitHub from the public source, after it passes its tests.</p>
+</div></header>
+
+<section id="install" class="tight"><div class="wrap">
+  <div class="kicker">Install</div>
+  <h2>Three steps, once.</h2>
+  <ol class="steps">
+    <li><b>Open Volant.dmg</b> and drag Volant onto Applications.</li>
+    <li><b>Open Volant.</b> The first time, macOS says it can't check the developer, because Volant isn't notarized by Apple. Open <b>System Settings → Privacy &amp; Security</b>, scroll down, and click <b>Open Anyway</b>.</li>
+    <li><b>Set it up.</b> Volant asks for your search engine, whether to block ads and trackers, and whether to make it your default browser. You can change all of it later in Settings.</li>
+  </ol>
+  <p class="note">Prefer the Terminal? This clears the download warning instead of step 2:</p>
+<pre><code>xattr -cr /Applications/Volant.app</code></pre>
+</div></section>
+
+<section id="updates"><div class="wrap">
+  <div class="split even">
+    <div class="card blue">
+      <h3><i>{{icon:update}}</i>Updates</h3>
+      <p>Volant checks for a new build at launch and every few hours. When there is one, <b>Update available</b> appears at the bottom of the sidebar. Click it, and Volant downloads the update, checks its signature, swaps it in and reopens with your tabs.</p>
+      <p>Or choose <b>Volant → Check for Updates…</b> at any time.</p>
+    </div>
+    <div class="card grey">
+      <h3><i>{{icon:box}}</i>Uninstall</h3>
+      <p>Drag Volant from Applications to the Trash. To remove your settings, tabs and history too, delete this folder:</p>
+<pre><code>~/Library/Application Support/Volant</code></pre>
+    </div>
+  </div>
+</div></section>
+
+<section id="build" class="tight"><div class="wrap prose">
+  <div class="kicker">From source</div>
+  <h2 style="margin-top:0">Build it yourself.</h2>
+  <p>On a Mac with <a href="https://rustup.rs">Rust</a> and Xcode's command line tools:</p>
+<pre><code>git clone {{repo}}
+cd volant
+bash scripts/bundle-macos.sh
+open dist/Volant.app</code></pre>
+  <p>The engine pieces build and test on any OS with <code>cargo test -p volant-core</code>.</p>
+</div></section>

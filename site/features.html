@@ -1,0 +1,94 @@
+<!--
+title: Features — Volant
+description: Everything Volant does: a calm tab sidebar, a command bar for everything, sleeping tabs, Reader, a home page with favourites and weather, blocking powered by uBlock, and updates that install themselves.
+nav: features
+-->
+<header class="page-head"><div class="wrap">
+  <div class="kicker">Features</div>
+  <h1>Everything you need. <em>Nothing in the way.</em></h1>
+  <p class="lead">Volant keeps the browser small and quiet so the page gets the room. Here's everything it does, and where to find it.</p>
+  <div class="shot small"><img src="screens/browsing.png" alt="Volant showing a Wikipedia article, with the tab sidebar on the left and the shield in the address bar" loading="lazy"></div>
+</div></header>
+
+<section id="tabs" class="tight"><div class="wrap">
+  <div class="kicker">Tabs</div>
+  <h2>A sidebar that stays out of the way.</h2>
+  <p class="lead">Tabs run down the side, where long titles fit and there's room for dozens. Hide the sidebar with <kbd>⌘S</kbd> and the page takes the whole window.</p>
+  <div class="grid">
+    <div class="feat"><div class="ic">{{icon:pin}}</div><h3>Pinned tabs</h3><p>Pin the sites you keep open with <kbd>⌘D</kbd>. They stay at the top and survive closing the window.</p></div>
+    <div class="feat"><div class="ic">{{icon:moon}}</div><h3>Sleeping tabs</h3><p>Tabs you haven't looked at in a while hand their memory back, then reload where you left off when you return. You choose how long, or never.</p></div>
+    <div class="feat"><div class="ic">{{icon:update}}</div><h3>Nothing lost</h3><p>Volant reopens your tabs at launch, and <kbd>⇧⌘T</kbd> brings back the last one you closed.</p></div>
+    <div class="feat"><div class="ic">{{icon:sidebar}}</div><h3>Full-window pages</h3><p>With the sidebar hidden, a small button by the window controls brings it back.</p></div>
+    <div class="feat"><div class="ic">{{icon:keyboard}}</div><h3>Keyboard first</h3><p><kbd>⌘1</kbd>–<kbd>⌘9</kbd> jump to a tab, <kbd>⌃Tab</kbd> cycles them. <a href="help.html#shortcuts">All shortcuts</a>.</p></div>
+    <div class="feat"><div class="ic">{{icon:box}}</div><h3>Background tabs</h3><p><kbd>⌘</kbd>-click or middle-click a link to open it behind the page you're reading.</p></div>
+  </div>
+  <div class="shot small"><img src="screens/no-sidebar.png" alt="Volant with the sidebar hidden: the page fills the window" loading="lazy"></div>
+</div></section>
+
+<section id="command-bar"><div class="wrap">
+  <div class="split even">
+    <div>
+      <div class="kicker">Command bar</div>
+      <h2>One field for everything.</h2>
+      <p class="lead">Press <kbd>⌘L</kbd> or <kbd>⌘T</kbd> and type. Addresses, searches, pages from your history and tabs you already have open, all in one list that updates as fast as you type.</p>
+      <p class="note">History search is Volant's own index, sorted by how often and how recently you visit: under a millisecond per keystroke across 100,000 pages.</p>
+    </div>
+    <div class="shot" style="margin:0"><img src="screens/command-bar.png" alt="The command bar open over a page, listing suggestions" loading="lazy"></div>
+  </div>
+</div></section>
+
+<section id="home" class="tight"><div class="wrap">
+  <div class="split even">
+    <div class="shot" style="margin:0"><img src="screens/home-edit.png" alt="Volant's home page with the edit panel open: favourite sites and the weather widget" loading="lazy"></div>
+    <div>
+      <div class="kicker">Home page</div>
+      <h2>Your sites, and the weather.</h2>
+      <p class="lead">New tabs open on a clean search field under the Volant wordmark. Click the pencil in the corner to add favourite sites, drag them into order, and turn on the weather.</p>
+      <p class="note">Weather comes from Open-Meteo, free and without an account. Only the city you choose is sent, and only while the widget is on.</p>
+    </div>
+  </div>
+</div></section>
+
+<section id="reader"><div class="wrap">
+  <div class="split even">
+    <div>
+      <div class="kicker">Reader</div>
+      <h2>Just the article.</h2>
+      <p class="lead">Press <kbd>⇧⌘R</kbd> on any article and Volant lays out the text alone, set in New York, in light or dark.</p>
+      <p class="note">Reader runs on Volant's own HTML parser, written in Rust: it parses a 590 KB Wikipedia page in 4 ms and finds the article in 8.</p>
+    </div>
+    <div class="shot" style="margin:0"><img src="screens/reader.png" alt="An article in Volant's Reader" loading="lazy"></div>
+  </div>
+</div></section>
+
+<section id="blocking-teaser" class="tight"><div class="wrap">
+  <a class="feat" href="blocking.html" style="padding:34px">
+    <span class="pill">{{icon:shield-fill}}Powered by uBlock</span>
+    <h3 style="font-size:28px;margin-top:18px">Block ads and trackers</h3>
+    <p>uBlock Origin's filter lists and syntax, compiled into WebKit's native blocker: network filters, cosmetic filters, procedural filters, scriptlets, My filters, trusted sites, and an element picker. One switch turns it all on or off, and the shield in the address bar turns it off for one site.</p>
+    <span class="more">How blocking works →</span>
+  </a>
+</div></section>
+
+<section id="more"><div class="wrap">
+  <div class="kicker">And the rest</div>
+  <h2>The details, done properly.</h2>
+  <div class="grid">
+    <div class="feat" id="updates"><div class="ic">{{icon:update}}</div><h3>Updates itself</h3><p>Volant checks for a new build at launch and every few hours. One click downloads it, checks its signature, swaps it in and reopens with your tabs.</p></div>
+    <div class="feat"><div class="ic">{{icon:find}}</div><h3>Find on page</h3><p><kbd>⌘F</kbd> opens a small find bar that searches as you type; <kbd>⌘G</kbd> and <kbd>⇧⌘G</kbd> step through the matches.</p></div>
+    <div class="feat"><div class="ic">{{icon:box}}</div><h3>Downloads</h3><p>Files go straight to your Downloads folder, with their progress at the bottom of the sidebar.</p></div>
+    <div class="feat"><div class="ic">{{icon:sun}}</div><h3>Light and dark</h3><p>Follows your Mac, or pick one. Every page Volant draws itself, from Settings to Reader, matches.</p></div>
+    <div class="feat"><div class="ic">{{icon:search}}</div><h3>Your search engine</h3><p>DuckDuckGo, Google, Brave Search, Kagi, Bing or Ecosia, set in Settings or during setup.</p></div>
+    <div class="feat"><div class="ic">{{icon:lock}}</div><h3>Private by default</h3><p>No accounts, no sync, no telemetry. <a href="privacy.html">What Volant keeps, and where</a>.</p></div>
+  </div>
+  <div class="shot small"><img src="screens/dark.png" alt="Volant in dark appearance" loading="lazy"></div>
+</div></section>
+
+<section class="final"><div class="wrap">
+  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
+  <h2>Try it. It's 1.3 MB.</h2>
+  <div class="ctas" style="justify-content:center">
+    <a class="btn primary" href="{{dmg}}">{{icon:download}}Download Volant</a>
+    <a class="btn" href="help.html">Shortcuts and help</a>
+  </div>
+</div></section>

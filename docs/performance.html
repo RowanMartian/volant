@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Performance — Volant</title>
+<meta name="description" content="How fast Volant is, and how it's measured: launch time, app size and memory against Safari, Chrome and Firefox, benchmarked on every build.">
+<meta name="theme-color" content="#0d0c11">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Volant">
+<meta property="og:title" content="Performance — Volant">
+<meta property="og:description" content="How fast Volant is, and how it's measured: launch time, app size and memory against Safari, Chrome and Firefox, benchmarked on every build.">
+<meta property="og:image" content="https://rowanmartian.github.io/volant/readme/hero.png">
+<meta property="og:url" content="https://rowanmartian.github.io/volant/performance.html">
+<link rel="canonical" href="https://rowanmartian.github.io/volant/performance.html">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="./"><img src="logo.svg" alt="" width="30" height="30">Volant</a>
+  <div class="links"><a href="features.html">Features</a><a href="blocking.html">Blocking</a><a href="performance.html" aria-current="page">Performance</a><a href="help.html">Help</a><a href="download.html">Download</a><a href="https://github.com/RowanMartian/volant">GitHub</a></div>
+  <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg">Download</a>
+</div></nav>
+<header class="page-head"><div class="wrap">
+  <div class="kicker">Performance</div>
+  <h1>Small on disk. <em>Quick to start.</em> Still when idle.</h1>
+  <p class="lead">Every time Volant is built, GitHub's Apple Silicon machines launch it next to Safari, Chrome and Firefox, open the same five pages in each, and measure them. These are the latest results.</p>
+</div></header>
+
+<section class="tight"><div class="wrap">
+  <div class="charts" style="margin-top:0">
+    <div class="chart"><h3>Launch to window</h3><p>Seconds. Shorter is better.</p><div id="c-launch"></div></div>
+    <div class="chart"><h3>App size</h3><p>Megabytes on disk. Smaller is better.</p><div id="c-size"></div></div>
+    <div class="chart"><h3>Memory, five pages</h3><p>Megabytes, all processes. Lower is better.</p><div id="c-mem"></div></div>
+  </div>
+  <p class="note">Volant draws pages with the same engine as Safari, so page loading and JavaScript run at Safari's speed, and memory lands in Safari's range. Safari's app is small for the same reason Volant's is: its engine ships inside macOS.</p>
+</div></section>
+
+<section id="spread"><div class="wrap">
+  <div class="kicker">Across runs</div>
+  <h2>Shared machines vary. Here's the spread.</h2>
+  <p class="lead">Build machines are shared, so one run can be slow. These are the ranges across recent runs.</p>
+  <div class="table"><table>
+    <thead><tr><th>Browser</th><th>Launch to window</th><th>Memory, five pages</th><th>App size</th></tr></thead>
+    <tbody>
+      <tr><td class="us">Volant</td><td>0.29 – 1.04 s</td><td>253 – 320 MB</td><td>2 MB <span class="muted">(1.3 MB download)</span></td></tr>
+      <tr><td>Safari</td><td>2.1 – 3.6 s</td><td>160 – 308 MB</td><td>29 MB</td></tr>
+      <tr><td>Chrome</td><td>0.60 – 1.5 s</td><td>515 – 527 MB</td><td>732 MB</td></tr>
+      <tr><td>Firefox</td><td>1.3 – 2.3 s</td><td>805 – 823 MB</td><td>521 MB</td></tr>
+    </tbody>
+  </table></div>
+</div></section>
+
+<section id="inside" class="tight"><div class="wrap">
+  <div class="kicker">Inside Volant</div>
+  <h2>The parts Volant wrote, timed.</h2>
+  <p class="lead">Everything around the page is Volant's own Rust, so it's measured too.</p>
+  <div class="numbers" style="margin-top:44px">
+    <div class="num"><b>&lt;1<small>ms</small></b><span>per keystroke to search 100,000 pages of history.</span></div>
+    <div class="num"><b>4<small>ms</small></b><span>to parse a 590 KB Wikipedia page for Reader.</span></div>
+    <div class="num"><b>0.9<small>s</small></b><span>to compile uBlock's 240,000 default network filters.</span></div>
+    <div class="num"><b>110<small>k</small></b><span>random inputs fuzzed through the parsers without a crash.</span></div>
+  </div>
+</div></section>
+
+<section id="why"><div class="wrap">
+  <div class="kicker">Why it's fast</div>
+  <h2>Mostly, by not doing things.</h2>
+  <div class="grid">
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/></svg></div><h3>The window comes first</h3><p>Volant puts its window on screen before it starts WebKit for your first tab, so you see the browser in a third of a second.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10M7.5 9.5 12 14l4.5-4.5M5 19h14"/></svg></div><h3>No engine in the box</h3><p>WebKit already ships with macOS, and it's usually already in memory. Volant's download is the browser around it, and nothing else.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg></div><h3>Sleeping tabs</h3><p>Tabs you haven't looked at in a while give their memory back. With 20 tabs open, most of them cost almost nothing.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></div><h3>Blocking ahead of time</h3><p>uBlock's filters are compiled once, so WebKit matches requests natively instead of asking a script about each one.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14"/></svg></div><h3>Plain files</h3><p>History is an append-only log and settings are a text file. There's no database to open at launch.</p></div>
+    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg></div><h3>Still when idle</h3><p>Volant redraws only when something changes, and its housekeeping wakes once a minute. The benchmark checks idle CPU on every build.</p></div>
+  </div>
+</div></section>
+
+<section id="method" class="tight"><div class="wrap prose">
+  <div class="kicker">Method</div>
+  <h2 style="margin-top:0">How it's measured.</h2>
+  <ul>
+    <li><b>Launch to window</b>: from starting the app to its first window being on screen, watched from outside the app. One warm-up launch, then the median of three.</li>
+    <li><b>Memory</b>: the memory footprint of every process each browser runs (app, web content, networking and GPU), with the same five pages loaded, as Activity Monitor counts it.</li>
+    <li><b>App size</b>: the app bundle on disk after installing.</li>
+    <li><b>Idle</b>: the CPU time all of those processes use over 30 seconds with nothing happening, also in the results.</li>
+  </ul>
+  <p>The benchmark is <a href="https://github.com/RowanMartian/volant/tree/main/scripts/bench">in the repository</a> and runs on every build. Its results are kept with each run.</p>
+</div></section>
+
+<section class="final"><div class="wrap">
+  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
+  <h2>See for yourself.</h2>
+  <div class="ctas" style="justify-content:center">
+    <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download Volant</a>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>
+      <div class="brand"><img src="logo.svg" alt="" width="26" height="26">Volant</div>
+      <div>The featherweight browser for your Mac.<br>Free and open source, MIT licensed.</div>
+    </div>
+    <div><h4>Product</h4><ul><li><a href="features.html">Features</a></li><li><a href="blocking.html">Blocking</a></li><li><a href="performance.html">Performance</a></li><li><a href="download.html">Download</a></li></ul></div>
+    <div><h4>Help</h4><ul><li><a href="help.html">Shortcuts and FAQ</a></li><li><a href="download.html#install">Installing</a></li><li><a href="privacy.html">Privacy</a></li></ul></div>
+    <div><h4>Project</h4><ul><li><a href="https://github.com/RowanMartian/volant">Source on GitHub</a></li><li><a href="https://github.com/RowanMartian/volant/releases/tag/latest">Release notes</a></li><li><a href="https://github.com/RowanMartian/volant/issues">Report a problem</a></li></ul></div>
+  </div>
+  <p class="legal">Blocking is powered by uBlock: Volant uses uBlock Origin's filter lists and filter syntax. uBlock Origin is by Raymond Hill and contributors; Volant is an independent project, not made or endorsed by them. Mac, macOS, Safari and WebKit are trademarks of Apple Inc.</p>
+</div></footer>
+<script src="charts.js"></script>
+</body>
+</html>

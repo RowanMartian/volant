@@ -1,0 +1,46 @@
+<!--
+title: Privacy — Volant
+description: Volant has no accounts, no sync and no telemetry. Here's exactly what it stores on your Mac and the few requests it makes on its own.
+nav: privacy
+-->
+<header class="page-head"><div class="wrap">
+  <div class="kicker">Privacy</div>
+  <h1>Nothing leaves your Mac <em>but the pages you visit.</em></h1>
+  <p class="lead">Volant has no accounts, no sync, no analytics and no telemetry. There's no Volant server to send anything to.</p>
+</div></header>
+
+<section class="tight"><div class="wrap">
+  <div class="split even">
+    <div class="card blue">
+      <h3><i>{{icon:lock}}</i>What stays on your Mac</h3>
+      <p class="sub">In plain text, in ~/Library/Application Support/Volant.</p>
+      <ul>
+        <li><b>Settings</b><span>Your choices, in settings.txt</span></li>
+        <li><b>Open tabs</b><span>So they come back at launch</span></li>
+        <li><b>History</b><span>Clear it any time in Settings or History</span></li>
+        <li><b>Favourites</b><span>The sites on your home page</span></li>
+        <li><b>Blocker</b><span>Filter lists, My filters and trusted sites</span></li>
+      </ul>
+      <div class="why">Cookies, caches and site data are kept by WebKit, as they are for Safari. Clear them per site or all at once in Settings.</div>
+    </div>
+    <div class="card grey">
+      <h3><i>{{icon:eye}}</i>What Volant asks the internet for</h3>
+      <p class="sub">Besides the pages you open, only these.</p>
+      <ul>
+        <li><b>Updates</b><span>GitHub's release page for Volant, at launch and every few hours</span></li>
+        <li><b>Filter lists</b><span>Each list from its usual address, every four days, while blocking is on</span></li>
+        <li><b>Weather</b><span>Open-Meteo, with only the city you chose, while the widget is on</span></li>
+        <li><b>Site icons</b><span>The icon of a page you visit, from that same site</span></li>
+        <li><b>Search</b><span>What you type goes to the search engine you picked, when you search</span></li>
+      </ul>
+    </div>
+  </div>
+</div></section>
+
+<section class="tight" style="padding-top:56px"><div class="wrap prose">
+  <h2 style="margin-top:0">Blocking protects you by default.</h2>
+  <p>Ad and tracker blocking, <a href="blocking.html">powered by uBlock</a>, is on from the first launch. It stops requests to known trackers inside WebKit, before they're sent, and it can stop links reporting your clicks and WebRTC revealing your local IP address.</p>
+  <h2>This website</h2>
+  <p>This site is hosted on GitHub Pages. It uses no cookies, analytics or third-party scripts. GitHub may log visits as it does for every Pages site.</p>
+  <p class="fine">Questions? <a href="{{repo}}/issues">Ask on GitHub</a>.</p>
+</div></section>

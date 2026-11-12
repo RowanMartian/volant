@@ -1,0 +1,67 @@
+<!--
+title: Help and keyboard shortcuts — Volant
+description: Keyboard shortcuts for Volant, and answers to common questions about tabs, the home page, blocking, updates and where your data lives.
+nav: help
+-->
+<header class="page-head"><div class="wrap">
+  <div class="kicker">Help</div>
+  <h1>Shortcuts and <em>answers.</em></h1>
+  <p class="lead">Everything in Volant is in its menus too, so if you forget a shortcut, it's one click away.</p>
+</div></header>
+
+<section id="shortcuts" class="tight"><div class="wrap">
+  <h2>Keyboard shortcuts</h2>
+  <div class="split even" style="margin-top:28px">
+    <div class="table" style="margin:0"><table>
+      <thead><tr><th colspan="2">Tabs</th></tr></thead>
+      <tbody>
+        <tr><td><kbd>⌘T</kbd></td><td>New tab, ready to search or type an address</td></tr>
+        <tr><td><kbd>⌘W</kbd></td><td>Close tab</td></tr>
+        <tr><td><kbd>⇧⌘T</kbd></td><td>Reopen the last tab you closed</td></tr>
+        <tr><td><kbd>⌘D</kbd></td><td>Pin or unpin the tab</td></tr>
+        <tr><td><kbd>⌘1</kbd> – <kbd>⌘9</kbd></td><td>Go to a tab (<kbd>⌘9</kbd> is always the last)</td></tr>
+        <tr><td><kbd>⌃Tab</kbd> <kbd>⇧⌘]</kbd></td><td>Next tab</td></tr>
+        <tr><td><kbd>⌃⇧Tab</kbd> <kbd>⇧⌘[</kbd></td><td>Previous tab</td></tr>
+        <tr><td><kbd>⌘S</kbd></td><td>Show or hide the sidebar</td></tr>
+        <tr><td><kbd>⇧⌘H</kbd></td><td>Home page</td></tr>
+      </tbody>
+    </table></div>
+    <div class="table" style="margin:0"><table>
+      <thead><tr><th colspan="2">Pages</th></tr></thead>
+      <tbody>
+        <tr><td><kbd>⌘L</kbd></td><td>Command bar: addresses, searches, history, tabs</td></tr>
+        <tr><td><kbd>⌘[</kbd> <kbd>⌘]</kbd></td><td>Back, forward</td></tr>
+        <tr><td><kbd>⌘R</kbd></td><td>Reload (<kbd>⌥⌘R</kbd> ignores the cache)</td></tr>
+        <tr><td><kbd>⌘F</kbd> <kbd>⌘G</kbd> <kbd>⇧⌘G</kbd></td><td>Find on page, next, previous</td></tr>
+        <tr><td><kbd>⇧⌘R</kbd></td><td>Reader</td></tr>
+        <tr><td><kbd>⌥⌘B</kbd></td><td>Block an element on the page</td></tr>
+        <tr><td><kbd>⌘+</kbd> <kbd>⌘-</kbd> <kbd>⌘0</kbd></td><td>Zoom in, out, actual size</td></tr>
+        <tr><td><kbd>⇧⌘C</kbd></td><td>Copy the page's address</td></tr>
+        <tr><td><kbd>⌘Y</kbd> <kbd>⌘,</kbd></td><td>History, Settings</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+  <p class="note"><kbd>⌘</kbd>-click or middle-click a link to open it in a background tab; add <kbd>⇧</kbd> to switch to it. Right-click a tab to pin, duplicate, copy its link or close the others.</p>
+</div></section>
+
+<section id="faq"><div class="wrap prose" style="max-width:860px">
+  <h2 style="margin-top:0">Questions</h2>
+
+  <h3>Tabs and pages</h3>
+  <details><summary>Where did my tabs go when I hid the sidebar?</summary><p>They're still open. Press <kbd>⌘S</kbd>, or click the sidebar button next to the window controls, to bring it back.</p></details>
+  <details><summary>Why does a tab reload when I go back to it?</summary><p>It was asleep. Tabs you haven't looked at in a while give their memory back and reload when you return. Change how long that takes, or turn it off, in Settings → Sleep background tabs.</p></details>
+  <details><summary>How do I add sites to the home page?</summary><p>Click the pencil in the bottom-right corner of the home page. Add sites, drag them into order, and turn the weather widget on or off from the same panel.</p></details>
+
+  <h3>Blocking</h3>
+  <details><summary>A site doesn't work properly.</summary><p>Click the shield in the address bar to turn blocking off for just that site. The page reloads without any blocking. Click it again to turn blocking back on.</p></details>
+  <details><summary>An ad got through.</summary><p>Press <kbd>⌥⌘B</kbd>, point at it and click Block. It's saved to My filters. If several ads get through on a site, open Blocker Settings and choose Update Now to fetch the latest lists.</p></details>
+  <details><summary>What does "Powered by uBlock" mean?</summary><p>Volant's blocker uses uBlock Origin's filter lists and filter syntax, compiled into WebKit's built-in content blocker. <a href="blocking.html">More about blocking</a>.</p></details>
+
+  <h3>Updates and data</h3>
+  <details><summary>How do I update Volant?</summary><p>When an update is ready, <b>Update available</b> shows at the bottom of the sidebar. Click it. If Volant can't write to the folder it's in, it opens the download page instead.</p></details>
+  <details><summary>Where are my settings and history?</summary><p>In plain text files in <code>~/Library/Application Support/Volant</code>. Downloads go to your Downloads folder.</p></details>
+  <details><summary>How do I make Volant my default browser?</summary><p>Choose <b>Volant → Make Volant Your Default Browser</b>, or set it in Settings.</p></details>
+
+  <h3>Something else?</h3>
+  <p><a href="{{repo}}/issues">Open an issue on GitHub</a> and describe what happened. Volant's version is in Settings.</p>
+</div></section>

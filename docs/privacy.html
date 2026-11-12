@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — Volant</title>
+<meta name="description" content="Volant has no accounts, no sync and no telemetry. Here's exactly what it stores on your Mac and the few requests it makes on its own.">
+<meta name="theme-color" content="#0d0c11">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Volant">
+<meta property="og:title" content="Privacy — Volant">
+<meta property="og:description" content="Volant has no accounts, no sync and no telemetry. Here's exactly what it stores on your Mac and the few requests it makes on its own.">
+<meta property="og:image" content="https://rowanmartian.github.io/volant/readme/hero.png">
+<meta property="og:url" content="https://rowanmartian.github.io/volant/privacy.html">
+<link rel="canonical" href="https://rowanmartian.github.io/volant/privacy.html">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="./"><img src="logo.svg" alt="" width="30" height="30">Volant</a>
+  <div class="links"><a href="features.html">Features</a><a href="blocking.html">Blocking</a><a href="performance.html">Performance</a><a href="help.html">Help</a><a href="download.html">Download</a><a href="https://github.com/RowanMartian/volant">GitHub</a></div>
+  <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg">Download</a>
+</div></nav>
+<header class="page-head"><div class="wrap">
+  <div class="kicker">Privacy</div>
+  <h1>Nothing leaves your Mac <em>but the pages you visit.</em></h1>
+  <p class="lead">Volant has no accounts, no sync, no analytics and no telemetry. There's no Volant server to send anything to.</p>
+</div></header>
+
+<section class="tight"><div class="wrap">
+  <div class="split even">
+    <div class="card blue">
+      <h3><i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></i>What stays on your Mac</h3>
+      <p class="sub">In plain text, in ~/Library/Application Support/Volant.</p>
+      <ul>
+        <li><b>Settings</b><span>Your choices, in settings.txt</span></li>
+        <li><b>Open tabs</b><span>So they come back at launch</span></li>
+        <li><b>History</b><span>Clear it any time in Settings or History</span></li>
+        <li><b>Favourites</b><span>The sites on your home page</span></li>
+        <li><b>Blocker</b><span>Filter lists, My filters and trusted sites</span></li>
+      </ul>
+      <div class="why">Cookies, caches and site data are kept by WebKit, as they are for Safari. Clear them per site or all at once in Settings.</div>
+    </div>
+    <div class="card grey">
+      <h3><i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg></i>What Volant asks the internet for</h3>
+      <p class="sub">Besides the pages you open, only these.</p>
+      <ul>
+        <li><b>Updates</b><span>GitHub's release page for Volant, at launch and every few hours</span></li>
+        <li><b>Filter lists</b><span>Each list from its usual address, every four days, while blocking is on</span></li>
+        <li><b>Weather</b><span>Open-Meteo, with only the city you chose, while the widget is on</span></li>
+        <li><b>Site icons</b><span>The icon of a page you visit, from that same site</span></li>
+        <li><b>Search</b><span>What you type goes to the search engine you picked, when you search</span></li>
+      </ul>
+    </div>
+  </div>
+</div></section>
+
+<section class="tight" style="padding-top:56px"><div class="wrap prose">
+  <h2 style="margin-top:0">Blocking protects you by default.</h2>
+  <p>Ad and tracker blocking, <a href="blocking.html">powered by uBlock</a>, is on from the first launch. It stops requests to known trackers inside WebKit, before they're sent, and it can stop links reporting your clicks and WebRTC revealing your local IP address.</p>
+  <h2>This website</h2>
+  <p>This site is hosted on GitHub Pages. It uses no cookies, analytics or third-party scripts. GitHub may log visits as it does for every Pages site.</p>
+  <p class="fine">Questions? <a href="https://github.com/RowanMartian/volant/issues">Ask on GitHub</a>.</p>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>
+      <div class="brand"><img src="logo.svg" alt="" width="26" height="26">Volant</div>
+      <div>The featherweight browser for your Mac.<br>Free and open source, MIT licensed.</div>
+    </div>
+    <div><h4>Product</h4><ul><li><a href="features.html">Features</a></li><li><a href="blocking.html">Blocking</a></li><li><a href="performance.html">Performance</a></li><li><a href="download.html">Download</a></li></ul></div>
+    <div><h4>Help</h4><ul><li><a href="help.html">Shortcuts and FAQ</a></li><li><a href="download.html#install">Installing</a></li><li><a href="privacy.html">Privacy</a></li></ul></div>
+    <div><h4>Project</h4><ul><li><a href="https://github.com/RowanMartian/volant">Source on GitHub</a></li><li><a href="https://github.com/RowanMartian/volant/releases/tag/latest">Release notes</a></li><li><a href="https://github.com/RowanMartian/volant/issues">Report a problem</a></li></ul></div>
+  </div>
+  <p class="legal">Blocking is powered by uBlock: Volant uses uBlock Origin's filter lists and filter syntax. uBlock Origin is by Raymond Hill and contributors; Volant is an independent project, not made or endorsed by them. Mac, macOS, Safari and WebKit are trademarks of Apple Inc.</p>
+</div></footer>
+</body>
+</html>

@@ -4,132 +4,34 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Volant — the featherweight browser for your Mac</title>
-<meta name="description" content="A native macOS browser written in Rust on the WebKit already in macOS. A 1.3 MB download that opens in a third of a second.">
+<meta name="description" content="A native macOS browser written in Rust on the WebKit already in macOS. A 1.3 MB download that opens in a third of a second, with ad and tracker blocking powered by uBlock.">
+<meta name="theme-color" content="#0d0c11">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Volant">
+<meta property="og:title" content="Volant — the featherweight browser for your Mac">
+<meta property="og:description" content="A native macOS browser written in Rust on the WebKit already in macOS. A 1.3 MB download that opens in a third of a second, with ad and tracker blocking powered by uBlock.">
+<meta property="og:image" content="https://rowanmartian.github.io/volant/readme/hero.png">
+<meta property="og:url" content="https://rowanmartian.github.io/volant/">
+<link rel="canonical" href="https://rowanmartian.github.io/volant/">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
-<style>
-:root{
-  --bg:#0d0c11; --panel:#16151c; --panel2:#1d1c24; --text:#f5f5f7; --text2:#a1a1aa; --text3:#6e6e78;
-  --brand:#0088fe; --accent:#1f95ff; --accent-hover:#46a8ff; --glint:#4aa6ff; --dim:#2c2b34;
-  --max:1120px;
-}
-*{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-a{color:inherit;text-decoration:none}
-.wrap{max-width:var(--max);margin:0 auto;padding:0 28px}
-section{padding:96px 0}
-h2{font-size:clamp(30px,4vw,44px);line-height:1.1;letter-spacing:-.025em;margin:0 0 14px;font-weight:700}
-.kicker{color:var(--brand);font-weight:650;font-size:13px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:14px}
-.lead{color:var(--text2);font-size:18px;max-width:620px;margin:0}
-.btn{display:inline-flex;align-items:center;gap:10px;height:48px;padding:0 24px;border-radius:14px;font-weight:600;font-size:16px;background:var(--panel2);color:var(--text)}
-.btn:hover{background:var(--dim)}
-.btn.primary{background:var(--accent);color:#fff}
-.btn.primary:hover{background:var(--accent-hover)}
-.btn svg{width:18px;height:18px}
-
-/* nav */
-nav{position:sticky;top:0;z-index:5;background:rgba(13,12,17,.86);-webkit-backdrop-filter:saturate(1.4) blur(14px);backdrop-filter:saturate(1.4) blur(14px)}
-nav .wrap{display:flex;align-items:center;gap:28px;height:64px}
-nav .home{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.01em}
-nav .home img{width:30px;height:30px}
-nav .links{display:flex;gap:24px;margin-left:auto;color:var(--text2);font-size:14px}
-nav .links a:hover{color:var(--text)}
-nav .btn{height:36px;padding:0 16px;font-size:14px;border-radius:10px}
-
-/* hero */
-.hero{padding:88px 0 40px;text-align:center}
-.hero .mark{width:min(560px,86vw);margin:0 auto 44px}
-.hero h1{font-size:clamp(38px,6vw,68px);line-height:1.04;letter-spacing:-.035em;margin:0 auto 20px;max-width:880px;font-weight:750}
-.hero h1 em{font-style:normal;color:var(--brand)}
-.hero .lead{margin:0 auto;font-size:19px}
-.hero .ctas{display:flex;gap:12px;justify-content:center;margin:36px 0 16px;flex-wrap:wrap}
-.hero .fine{color:var(--text3);font-size:13px}
-.shot{margin:64px auto 0;max-width:1040px;border-radius:22px;overflow:hidden;background:var(--panel)}
-.shot img{display:block;width:100%;height:auto}
-
-/* numbers */
-.numbers{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:8px}
-.num{background:var(--panel);border-radius:20px;padding:30px 24px}
-.num b{display:block;font-size:clamp(34px,4.4vw,52px);letter-spacing:-.04em;line-height:1;font-weight:750}
-.num b small{font-size:.45em;letter-spacing:-.01em;color:var(--text2);font-weight:600;margin-left:4px}
-.num span{display:block;color:var(--text2);margin-top:10px;font-size:15px}
-
-/* speed */
-.charts{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:44px}
-.chart{background:var(--panel);border-radius:20px;padding:26px 24px 22px}
-.chart h3{margin:0 0 4px;font-size:17px;letter-spacing:-.01em}
-.chart p{margin:0 0 22px;color:var(--text3);font-size:13px}
-.bar{display:grid;grid-template-columns:72px 1fr;align-items:center;gap:12px;margin:12px 0}
-.bar .who{font-size:14px;color:var(--text2)}
-.bar .track{position:relative;height:30px}
-.bar .fill{height:100%;border-radius:8px;background:var(--dim);min-width:8px;display:flex;align-items:center;justify-content:flex-end;padding:0 10px;font-size:13px;font-weight:600;color:var(--text);white-space:nowrap}
-.bar.us .who{color:var(--text);font-weight:650}
-.bar.us .fill{background:var(--brand);color:#fff}
-.bar .fill.out{background:none;justify-content:flex-start;padding:0;color:var(--text2)}
-.note{color:var(--text3);font-size:13.5px;margin-top:22px;max-width:820px}
-
-/* rust vs macos */
-.split{display:grid;grid-template-columns:1.25fr 1fr;gap:14px;margin-top:44px}
-.card{background:var(--panel);border-radius:22px;padding:30px}
-.card h3{margin:0 0 4px;font-size:21px;letter-spacing:-.015em;display:flex;align-items:center;gap:12px}
-.card h3 i{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;font-style:normal;font-size:17px}
-.card .sub{color:var(--text3);font-size:14px;margin:0 0 20px}
-.card ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
-.card li{background:var(--panel2);border-radius:12px;padding:12px 14px;display:flex;gap:12px;align-items:baseline}
-.card li b{font-weight:600;white-space:nowrap}
-.card li span{color:var(--text2);font-size:14px}
-.rust h3 i{background:var(--brand);color:#fff}
-.mac h3 i{background:var(--dim);color:var(--text)}
-.why{background:var(--panel2);border-radius:14px;padding:16px 18px;margin-top:14px;color:var(--text2);font-size:14px}
-
-/* features */
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:44px}
-.feat{background:var(--panel);border-radius:20px;padding:26px}
-.feat .ic{width:44px;height:44px;border-radius:13px;background:rgba(0,136,254,.14);color:var(--brand);display:grid;place-items:center;margin-bottom:18px}
-.feat .ic svg{width:22px;height:22px}
-.feat h3{margin:0 0 6px;font-size:18px;letter-spacing:-.01em}
-.feat p{margin:0;color:var(--text2);font-size:15px}
-
-/* download */
-.final{text-align:center;padding:110px 0 120px}
-.final .mark{width:86px;margin:0 auto 26px}
-.final .ctas{display:flex;gap:12px;justify-content:center;margin-top:32px;flex-wrap:wrap}
-footer{color:var(--text3);font-size:13px;padding:30px 0 50px}
-footer .wrap{display:flex;gap:20px;flex-wrap:wrap}
-footer a:hover{color:var(--text)}
-
-/* glitter wordmark (same as the app's) */
-.wordmark-live{display:block;width:100%;height:auto;overflow:visible}
-.glitter .glint{fill:var(--glint);opacity:0;transform-box:fill-box;transform-origin:center;animation-name:glint;animation-timing-function:ease-in-out;animation-iteration-count:infinite}
-@keyframes glint{0%{opacity:0;transform:translate(0,3px) scale(calc(var(--s) * .25))}40%{opacity:var(--o);transform:translate(var(--dx),0) scale(var(--s))}65%{opacity:calc(var(--o) * .55);transform:translate(calc(var(--dx) * 1.5),-2px) scale(calc(var(--s) * .8))}100%{opacity:0;transform:translate(calc(var(--dx) * 2),-4px) scale(calc(var(--s) * .3))}}
-@media (prefers-reduced-motion: reduce){.glitter{display:none}html{scroll-behavior:auto}}
-
-@media (max-width:880px){
-  .numbers{grid-template-columns:repeat(2,1fr)}
-  .charts,.split,.grid{grid-template-columns:1fr}
-  nav .links{display:none}
-  nav .btn{margin-left:auto}
-  section{padding:72px 0}
-}
-</style>
+<link rel="stylesheet" href="site.css">
 </head>
 <body>
-<script src="brand.js"></script>
-
 <nav><div class="wrap">
-  <a class="home" href="#"><img src="logo.svg" alt="">Volant</a>
-  <div class="links"><a href="#speed">Speed</a><a href="#rust">Built with Rust</a><a href="#features">Features</a><a href="https://github.com/RowanMartian/volant">GitHub</a></div>
+  <a class="home" href="./"><img src="logo.svg" alt="" width="30" height="30">Volant</a>
+  <div class="links"><a href="features.html">Features</a><a href="blocking.html">Blocking</a><a href="performance.html">Performance</a><a href="help.html">Help</a><a href="download.html">Download</a><a href="https://github.com/RowanMartian/volant">GitHub</a></div>
   <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg">Download</a>
 </div></nav>
+<script src="brand.js"></script>
 
 <header class="hero" id="top"><div class="wrap">
   <div id="hero-copy">
   <div class="mark" id="mark" role="img" aria-label="Volant"></div>
   <h1>The featherweight browser <em>for your Mac.</em></h1>
-  <p class="lead">Native AppKit and Rust, on the WebKit already inside macOS. A 1.3 MB download that's on screen in a third of a second, and sits truly still when you're not using it.</p>
+  <p class="lead">Native AppKit and Rust, on the WebKit already inside macOS. A 1.3 MB download that's on screen in a third of a second, with ads and trackers blocked before they load.</p>
   <div class="ctas">
-    <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download for macOS</a>
-    <a class="btn" href="https://github.com/RowanMartian/volant">View the source</a>
+    <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download for macOS</a>
+    <a class="btn" href="features.html">See what it does</a>
   </div>
   <div class="fine">Free and open source · macOS 12 or later · Apple Silicon and Intel</div>
   </div>
@@ -140,9 +42,37 @@ footer a:hover{color:var(--text)}
   <div class="numbers">
     <div class="num"><b>1.3<small>MB</small></b><span>to download. Chrome is 732 MB.</span></div>
     <div class="num"><b>0.3<small>s</small></b><span>from launch to window on screen.</span></div>
-    <div class="num"><b>0</b><span>trackers by default, blocked inside the engine.</span></div>
+    <div class="num"><b>240<small>k</small></b><span>ad and tracker rules, powered by uBlock.</span></div>
     <div class="num"><b>100<small>%</small></b><span>open source, MIT licensed.</span></div>
   </div>
+</div></section>
+
+<section id="blocking" class="tight"><div class="wrap">
+  <span class="pill"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5 3.5 5.7v6.1c0 5.3 3.7 8.6 8.5 9.7 4.8-1.1 8.5-4.4 8.5-9.7V5.7z"/></svg>Powered by uBlock</span>
+  <h2 style="margin-top:18px">Block ads and trackers. Built in.</h2>
+  <p class="lead">uBlock Origin's filter lists, defaults and filter syntax, compiled into WebKit's own content blocker. Nothing to install, and no extension running on every page.</p>
+  <div class="shield">
+    <div class="big">
+      <div>
+        <h3>The same filters as uBlock Origin, at the engine's speed.</h3>
+        <p>Network filters become WebKit rules that stop requests before they leave your Mac. Cosmetic filters, procedural filters and scriptlets clean up what's left on the page.</p>
+      </div>
+      <div class="stat-row">
+        <div class="stat"><b>240,000</b><span>network rules from uBlock's default lists</span></div>
+        <div class="stat"><b>10,000+</b><span>site fixes and scriptlets</span></div>
+        <div class="stat"><b>1 click</b><span>to turn it off for a site</span></div>
+        <div class="stat"><b>0</b><span>extensions to install or update</span></div>
+      </div>
+    </div>
+    <div class="mock" aria-hidden="true">
+      <div class="bar-top"><span class="url">news.example.com/article</span><span class="sh"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5 3.5 5.7v6.1c0 5.3 3.7 8.6 8.5 9.7 4.8-1.1 8.5-4.4 8.5-9.7V5.7z"/></svg></span></div>
+      <div class="switchrow"><div class="tx"><b>Block ads and trackers</b><span class="powered">Powered by uBlock</span></div><span class="toggle"></span></div>
+      <div class="switchrow"><div class="tx"><b>Hide page elements</b><small>Removes the empty boxes ads leave behind</small></div><span class="toggle"></span></div>
+      <div class="switchrow"><div class="tx"><b>Disable hyperlink auditing</b><small>Stops links reporting your clicks</small></div><span class="toggle"></span></div>
+      <div class="switchrow"><div class="tx"><b>Block remote fonts</b><small>Faster pages, less tracking</small></div><span class="toggle off"></span></div>
+    </div>
+  </div>
+  <div class="ctas"><a class="btn" href="blocking.html">How blocking works</a></div>
 </div></section>
 
 <section id="speed"><div class="wrap">
@@ -154,7 +84,7 @@ footer a:hover{color:var(--text)}
     <div class="chart"><h3>App size</h3><p>Megabytes on disk. Smaller is better.</p><div id="c-size"></div></div>
     <div class="chart"><h3>Memory, five pages</h3><p>Megabytes, all processes. Lower is better.</p><div id="c-mem"></div></div>
   </div>
-  <p class="note">Volant draws pages with the same engine as Safari, so page loading and JavaScript run at Safari's speed and memory lands in Safari's range. Safari's app is small because its engine ships inside macOS, just like Volant's. Numbers from the latest benchmark run; shared machines vary, and the full spread is in the repository.</p>
+  <p class="note">Volant draws pages with the same engine as Safari, so page loading and JavaScript run at Safari's speed and memory lands in Safari's range. <a href="performance.html">How it's measured</a>.</p>
 </div></section>
 
 <section id="rust"><div class="wrap">
@@ -162,19 +92,19 @@ footer a:hover{color:var(--text)}
   <h2>Everything that makes it Volant is new.</h2>
   <p class="lead">The whole browser around the page is written from scratch in Rust; its only libraries are the bindings that let Rust talk to macOS. The page itself is drawn by the WebKit that already ships with every Mac.</p>
   <div class="split">
-    <div class="card rust">
+    <div class="card blue">
       <h3><i>R</i>Written in Rust, from scratch</h3>
       <p class="sub">Zero dependencies in the engine pieces, fuzzed with 110,000 random inputs.</p>
       <ul>
         <li><b>The whole interface</b><span>Window, sidebar, tabs, command bar, find bar and menus, as native AppKit views driven from Rust.</span></li>
         <li><b>Tab engine</b><span>Session restore, sleeping tabs that hand memory back, closed-tab memory.</span></li>
         <li><b>Search as you type</b><span>A frecency-sorted index: under a millisecond per keystroke across 100,000 pages.</span></li>
-        <li><b>Ad and tracker blocking</b><span>A compiler that turns EasyList-style filters into WebKit's native rules: 119,000 rules in 0.2 s.</span></li>
+        <li><b>uBlock filter compiler</b><span>uBlock Origin's filter syntax compiled into WebKit's native rules: 240,000 rules in under a second.</span></li>
         <li><b>HTML parser and Reader</b><span>Parses a 590 KB Wikipedia page in 4 ms and finds the article in 8.</span></li>
         <li><b>Updater, history, settings</b><span>Plain files and an append-only log instead of databases.</span></li>
       </ul>
     </div>
-    <div class="card mac">
+    <div class="card grey">
       <h3><i>⌘</i>Borrowed from macOS</h3>
       <p class="sub">The parts a single project shouldn't reinvent.</p>
       <ul>
@@ -191,53 +121,41 @@ footer a:hover{color:var(--text)}
   <h2>Quiet by design.</h2>
   <p class="lead">Flat and calm: no borders, no shadows, no gradients. Just your pages, and a sidebar that stays out of the way.</p>
   <div class="grid">
-    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></div><h3>Blocking inside the engine</h3><p>Filter lists compiled into WebKit's own rules. No blocker scripts on any page.</p></div>
-    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"/></svg></div><h3>Reader</h3><p>Any article without the clutter, set in New York, on Volant's own HTML parser.</p></div>
-    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg></div><h3>Sleeping tabs</h3><p>Tabs you haven't looked at in a while give their memory back, and wake when you return.</p></div>
-    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg></div><h3>Command bar</h3><p>Addresses, searches, history and open tabs in one field, with instant completion.</p></div>
-    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg></div><h3>Updates itself</h3><p>One click installs a new build, checks its signature, and reopens with your tabs.</p></div>
-    <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="10" width="14" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div><h3>Private by default</h3><p>No accounts, no sync, no telemetry. Nothing leaves your Mac but the pages you visit.</p></div>
+    <a class="feat" href="blocking.html"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></div><h3>Blocking <span class="tag">Powered by uBlock</span></h3><p>uBlock Origin's filters compiled into WebKit's own rules, with a shield for every site.</p></a>
+    <a class="feat" href="features.html#reader"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"/></svg></div><h3>Reader</h3><p>Any article without the clutter, set in New York, on Volant's own HTML parser.</p></a>
+    <a class="feat" href="features.html#tabs"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg></div><h3>Sleeping tabs</h3><p>Tabs you haven't looked at in a while give their memory back, and wake when you return.</p></a>
+    <a class="feat" href="features.html#command-bar"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg></div><h3>Command bar</h3><p>Addresses, searches, history and open tabs in one field, with instant completion.</p></a>
+    <a class="feat" href="features.html#updates"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg></div><h3>Updates itself</h3><p>One click installs a new build, checks its signature, and reopens with your tabs.</p></a>
+    <a class="feat" href="privacy.html"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div><h3>Private by default</h3><p>No accounts, no sync, no telemetry. Nothing leaves your Mac but the pages you visit.</p></a>
   </div>
 </div></section>
 
 <section class="final"><div class="wrap">
-  <div class="mark"><img src="logo.svg" alt="" width="86"></div>
+  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
   <h2>Take off.</h2>
   <p class="lead" style="margin:0 auto">Free, open source, and smaller than most web pages.</p>
-  <div class="ctas">
-    <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download Volant</a>
-    <a class="btn" href="https://github.com/RowanMartian/volant">GitHub</a>
+  <div class="ctas" style="justify-content:center">
+    <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download Volant</a>
+    <a class="btn" href="https://github.com/RowanMartian/volant"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
   </div>
 </div></section>
 
-<footer><div class="wrap"><span>Volant · MIT License</span><a href="https://github.com/RowanMartian/volant">Source</a><a href="https://github.com/RowanMartian/volant/releases/tag/latest">Releases</a></div></footer>
-
+<footer><div class="wrap">
+  <div class="cols">
+    <div>
+      <div class="brand"><img src="logo.svg" alt="" width="26" height="26">Volant</div>
+      <div>The featherweight browser for your Mac.<br>Free and open source, MIT licensed.</div>
+    </div>
+    <div><h4>Product</h4><ul><li><a href="features.html">Features</a></li><li><a href="blocking.html">Blocking</a></li><li><a href="performance.html">Performance</a></li><li><a href="download.html">Download</a></li></ul></div>
+    <div><h4>Help</h4><ul><li><a href="help.html">Shortcuts and FAQ</a></li><li><a href="download.html#install">Installing</a></li><li><a href="privacy.html">Privacy</a></li></ul></div>
+    <div><h4>Project</h4><ul><li><a href="https://github.com/RowanMartian/volant">Source on GitHub</a></li><li><a href="https://github.com/RowanMartian/volant/releases/tag/latest">Release notes</a></li><li><a href="https://github.com/RowanMartian/volant/issues">Report a problem</a></li></ul></div>
+  </div>
+  <p class="legal">Blocking is powered by uBlock: Volant uses uBlock Origin's filter lists and filter syntax. uBlock Origin is by Raymond Hill and contributors; Volant is an independent project, not made or endorsed by them. Mac, macOS, Safari and WebKit are trademarks of Apple Inc.</p>
+</div></footer>
+<script src="charts.js"></script>
 <script>
 // The hero wordmark: letters in white on the dark page, with the app's glitter.
-document.documentElement.style.setProperty('--text', '#f5f5f7');
 mountWordmark(document.getElementById('mark'), 22);
-
-// Latest benchmark run (scripts/bench/run.sh in CI).
-const DATA = {
-  launch: [['Volant', 0.30], ['Chrome', 1.47], ['Firefox', 2.31], ['Safari', 3.64]],
-  size: [['Volant', 2], ['Safari', 29], ['Firefox', 521], ['Chrome', 732]],
-  mem: [['Safari', 169], ['Volant', 320], ['Chrome', 515], ['Firefox', 821]],
-};
-function chart(id, rows, unit, digits) {
-  const max = Math.max(...rows.map((r) => r[1]));
-  document.getElementById(id).innerHTML = rows.map(([who, v]) => {
-    const pct = Math.max(2, (v / max) * 100);
-    const label = v.toFixed(digits) + unit;
-    const inside = pct > 30;
-    return `<div class="bar${who === 'Volant' ? ' us' : ''}"><span class="who">${who}</span><div class="track">` +
-      (inside ? `<div class="fill" style="width:${pct}%">${label}</div>` :
-        `<div style="display:flex;align-items:center;gap:10px;height:100%"><div class="fill" style="width:${pct}%"></div><div class="fill out">${label}</div></div>`) +
-      `</div></div>`;
-  }).join('');
-}
-chart('c-launch', DATA.launch, ' s', 2);
-chart('c-size', DATA.size, ' MB', 0);
-chart('c-mem', DATA.mem, ' MB', 0);
 </script>
 </body>
 </html>
