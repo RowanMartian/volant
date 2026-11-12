@@ -948,7 +948,11 @@ impl<'r> Ctx<'_> {
     /// The content width a table takes inside `avail`.
     fn table_width(&mut self, t: &Table, s: &Style, avail: f32) -> f32 {
         let (mins, maxs) = self.columns(t);
-        let (sum_min, sum_max): (f32, f32) = (mins.iter().sum(), maxs.iter().sum());
+        let (mut sum_min, sum_max): (f32, f32) = (mins.iter().sum(), maxs.iter().sum());
+        // At least as wide as a caption's longest word.
+        for cap in &t.captions {
+            sum_min = sum_min.max(self.intrinsic(cap).0);
+        }
         match s.width {
             Len::Auto => sum_max.min(avail).max(sum_min),
             w => w.resolve(avail).max(sum_min),
@@ -981,12 +985,15 @@ impl<'r> Ctx<'_> {
             (0..n).map(|k| mins[k] + if spread > 0.0 { (width - sum_min).max(0.0) * (maxs[k] - mins[k]) / spread } else { 0.0 }).collect()
         };
         let mut cursor = y;
-        for cap in &t.captions {
-            let (mt, mb) = vmargins(&self.styles[cap.node as usize], width);
-            cursor += mt;
-            cursor += self.block(cap, x, cursor, width, Opts::default());
-            cursor += mb;
-        }
+        let place_captions = |me: &mut Self, cursor: &mut f32, bottom: bool| {
+            for cap in t.captions.iter().filter(|c| me.styles[c.node as usize].caption_bottom == bottom) {
+                let (mt, mb) = vmargins(&me.styles[cap.node as usize], width);
+                *cursor += mt;
+                *cursor += me.block(cap, x, *cursor, width, Opts::default());
+                *cursor += mb;
+            }
+        };
+        place_captions(self, &mut cursor, false);
         for (row, cells) in &t.rows {
             let mut row_h = 0f32;
             let mut col = 0;
@@ -1008,6 +1015,7 @@ impl<'r> Ctx<'_> {
             }
             cursor += row_h;
         }
+        place_captions(self, &mut cursor, true);
         cursor - y
     }
 
@@ -1856,6 +1864,10 @@ mod tests {
         assert!(get("Speed").1 > get("Name").1 + 20.0);
         assert!((get("740 km/h").1 - get("Speed").1).abs() < 25.0, "same column");
         assert!(get("Cap").2 < get("Name").2 && get("Name").2 < get("Comet").2 && get("Comet").2 < get("Both columns").2);
+        // caption-side: bottom puts the caption under the rows (Wikipedia's figures).
+        let below = page("<table class=b><caption>Under</caption><tr><td>Cell</td></tr></table>", &format!("{css} .b {{ caption-side: bottom }}"), 500.0);
+        let tb = texts(&below);
+        assert!(tb.iter().find(|x| x.0 == "Under").unwrap().2 > tb.iter().find(|x| x.0 == "Cell").unwrap().2);
         // A narrow container wraps cell text instead of overflowing.
         let narrow = page("<table><tr><td>alpha beta gamma delta</td><td>x</td></tr></table>", &css, 60.0);
         assert!(texts(&narrow).len() > 2);

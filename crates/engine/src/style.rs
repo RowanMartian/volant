@@ -195,6 +195,8 @@ pub struct Style {
     pub radius: f32,
     /// `box-sizing: border-box`: width and height include padding and borders.
     pub border_box: bool,
+    /// `caption-side: bottom` (inherited).
+    pub caption_bottom: bool,
     pub min_width: Len,
     pub min_height: Len,
     /// Custom properties (`--name`), inherited.
@@ -261,6 +263,7 @@ impl Default for Style {
             shift: 0.0,
             radius: 0.0,
             border_box: false,
+            caption_bottom: false,
             min_width: Len::Auto,
             min_height: Len::Auto,
             vars: Rc::new(HashMap::new()),
@@ -988,6 +991,7 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         }
         "visibility" => s.hidden = lower == "hidden" || lower == "collapse",
         "box-sizing" => s.border_box = lower == "border-box",
+        "caption-side" => s.caption_bottom = lower == "bottom",
         "min-width" => {
             if let Some(l) = len(v) {
                 s.min_width = l
@@ -1265,6 +1269,7 @@ pub(crate) fn inherited(p: &Style) -> Style {
         transform: p.transform,
         hidden: p.hidden,
         vars: p.vars.clone(),
+        caption_bottom: p.caption_bottom,
         ..Style::default()
     }
 }
