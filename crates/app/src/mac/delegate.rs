@@ -243,10 +243,13 @@ const SELFTEST_JS: &str = r#"(async () => {
   r.scriptlet = window.volantSelfTest === true;
   const h1 = document.querySelector('h1'); r.procedural = !!h1 && getComputedStyle(h1).display === 'none';
   const p = document.querySelector('p'); r.site_cosmetic = !!p && getComputedStyle(p).display === 'none';
-  const ad = document.createElement('ins'); ad.className = 'adsbygoogle'; ad.textContent = 'ad'; document.body.appendChild(ad);
+  const ad = document.createElement('ins'); ad.className = 'adsbygoogle'; ad.setAttribute('data-ad-client', 'ca-pub-0'); ad.textContent = 'ad'; document.body.appendChild(ad);
   await new Promise((ok) => setTimeout(ok, 400));
   r.generic_cosmetic = getComputedStyle(ad).display === 'none';
   r.network = await fetch('https://www.google-analytics.com/analytics.js', { mode: 'no-cors', cache: 'no-store' }).then(() => 'loaded', () => 'blocked');
+  // What the page looks like to Volant's scripts, to explain a failure.
+  r.diag = { h1: h1 ? h1.outerHTML.slice(0, 160) : 'none', ready: document.readyState,
+    styles: Array.from(document.querySelectorAll('style')).map((st) => (st.parentNode && st.parentNode.nodeName) + ':' + st.textContent.length + ':' + st.textContent.slice(-60)) };
   window.__volantSelfTest = JSON.stringify(r);
 })(); 'started'"#;
 

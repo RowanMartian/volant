@@ -9,9 +9,9 @@
   const mark = 'v' + Math.random().toString(36).slice(2, 9);
 
   // ---------- plain selectors: one CSS rule each, so a bad one can't sink the rest ----------
-  const sheet = [];
+  // Volant's own rule first, so no odd selector from a list can swallow it.
+  const sheet = [`[${mark}]{display:none!important}`];
   for (const sel of hide) sheet.push(`${sel}{display:none!important}`);
-  sheet.push(`[${mark}]{display:none!important}`);
 
   // ---------- procedural filters ----------
   const OPS = ['has-text', 'upward', 'remove', 'style', 'matches-css', 'matches-css-before', 'matches-css-after', 'min-text-length', 'xpath',
@@ -227,18 +227,25 @@
     mo.observe(doc, { childList: true, subtree: true });
   }
 
+  let installed = false;
   const install = () => {
     attach();
-    if (filters.length === 0) return;
+    if (installed || filters.length === 0 || !doc.documentElement) return;
+    installed = true;
     applyAll();
     let queued = false;
+    // Batched to one pass per frame; the timer covers pages that aren't drawing frames.
+    const run = () => { if (queued) { queued = false; applyAll(); } };
     const mo = new MutationObserver(() => {
       if (queued) return;
       queued = true;
-      requestAnimationFrame(() => { queued = false; applyAll(); });
+      requestAnimationFrame(run);
+      setTimeout(run, 120);
     });
     mo.observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'id', 'style'] });
   };
   if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', install, { once: true });
   else install();
+  // Once more when everything has loaded, for content added without a mutation we watch.
+  addEventListener('load', () => { install(); if (installed) applyAll(); }, { once: true });
 })
