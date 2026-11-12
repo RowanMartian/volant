@@ -40,7 +40,7 @@ h2{font-size:22px;font-weight:700;letter-spacing:-.015em}
 </head>
 <body>
 <script id="volant-data" type="application/json">__VOLANT_DATA__</script>
-<script>window.VOLANT_SAMPLE = { engines: [['duckduckgo','DuckDuckGo','Private search, no tracking'],['google','Google',''],['brave','Brave Search',''],['kagi','Kagi',''],['bing','Bing',''],['ecosia','Ecosia','']], settings: { engine: 'duckduckgo', blocking: 'standard' }, isDefault: false, version: '0.1.0' };</script>
+<script>window.VOLANT_SAMPLE = { engines: [['duckduckgo','DuckDuckGo','Private search, no tracking'],['google','Google',''],['brave','Brave Search',''],['kagi','Kagi',''],['bing','Bing',''],['ecosia','Ecosia','']], settings: { engine: 'duckduckgo', ublock: true }, isDefault: false, version: '0.1.0' };</script>
 <script src="volant://app/volant.js"></script>
 
 <div class="wrap">
@@ -64,7 +64,7 @@ h2{font-size:22px;font-weight:700;letter-spacing:-.015em}
   </section>
 
   <section class="step" data-step="blocking">
-    <div class="head"><h2>Block ads and trackers</h2><p class="lead">Blocking runs inside WebKit as compiled rules, so pages load faster, not slower.</p></div>
+    <div class="head"><h2>Block ads and trackers</h2><p class="lead">Powered by uBlock. Change lists, add your own filters or trust a site any time in Settings.</p></div>
     <div class="choices" id="blocking"></div>
     <div class="actions"><button class="btn ghost" data-back>Back</button><span class="grow"></span><button class="btn primary" data-next>Continue</button></div>
   </section>
@@ -91,9 +91,8 @@ h2{font-size:22px;font-weight:700;letter-spacing:-.015em}
 <script>
 const ENGINE_NOTES = { duckduckgo: 'Private search, no tracking', google: 'The most popular search engine', brave: 'Independent index, private', kagi: 'Paid, ad-free search', bing: 'Search by Microsoft', ecosia: 'Plants trees with ad revenue' };
 const LEVELS = [
-  ['standard', 'Standard', 'Blocks the big ad networks and trackers. Breaks nothing.', 'Recommended'],
-  ['strict', 'Strict', 'Adds EasyList and EasyPrivacy: over 100,000 rules, compiled on your Mac.', ''],
-  ['off', 'Off', 'Load everything pages ask for.', ''],
+  ['1', 'On', 'uBlock Origin’s filter lists, compiled into WebKit itself. Pages load faster, not slower.', 'Recommended'],
+  ['0', 'Off', 'Load everything pages ask for.', ''],
 ];
 const KEYS = [
   ['New tab: search or type an address', '⌘ T'], ['Edit the address', '⌘ L'], ['Show or hide the sidebar', '⌘ S'],
@@ -126,7 +125,7 @@ function choices(el, items, current, key) {
   });
 }
 choices($('#engines'), (V.engines || []).map(([id, name]) => [id, name, ENGINE_NOTES[id] || '']), (V.settings || {}).engine, 'engine');
-choices($('#blocking'), LEVELS, (V.settings || {}).blocking || 'standard', 'blocking');
+choices($('#blocking'), LEVELS, (V.settings || {}).ublock === false ? '0' : '1', 'ublock');
 $('#keys').innerHTML = KEYS.map(([l, k]) => `<div class="key"><span>${esc(l)}</span><span>${shortcutKeys(k)}</span></div>`).join('');
 
 function markDefault(yes) {

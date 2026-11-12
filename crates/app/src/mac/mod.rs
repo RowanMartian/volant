@@ -24,7 +24,7 @@ use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-use objc2_web_kit::{WKUserContentController, WKWebViewConfiguration};
+use objc2_web_kit::WKWebViewConfiguration;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -42,7 +42,6 @@ pub struct Paths {
     pub session: PathBuf,
     pub history: PathBuf,
     pub favorites: PathBuf,
-    pub lists: PathBuf,
     pub downloads: PathBuf,
 }
 
@@ -50,13 +49,12 @@ impl Paths {
     fn new() -> Self {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
         let data = std::env::var_os("VOLANT_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| home.join("Library/Application Support/Volant"));
-        let _ = std::fs::create_dir_all(data.join("lists"));
+        let _ = std::fs::create_dir_all(&data);
         Self {
             settings: data.join("settings.txt"),
             session: data.join("session.txt"),
             history: data.join("history.log"),
             favorites: data.join("favorites.txt"),
-            lists: data.join("lists"),
             downloads: home.join("Downloads"),
             data,
         }
@@ -86,7 +84,6 @@ pub struct Browser {
     pub update: updater::State,
     pub paths: Paths,
     pub config: Retained<WKWebViewConfiguration>,
-    pub content: Retained<WKUserContentController>,
     pub delegate: Retained<delegate::Delegate>,
     pub web_delegate: Retained<web::WebDelegate>,
     pub icons: HashMap<String, Retained<NSImage>>,
@@ -196,7 +193,7 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
     theme::apply_appearance(settings.appearance, mtm);
 
     let web_delegate = web::WebDelegate::new(mtm);
-    let (config, content) = web::make_config(&web_delegate, mtm);
+    let config = web::make_config(&web_delegate, mtm);
     let window = ui::make_window(&delegate, mtm);
     let ui = ui::Ui::build(&window, &delegate, mtm);
     let browser = Browser {
@@ -212,7 +209,6 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
         update: Default::default(),
         paths,
         config,
-        content,
         delegate,
         web_delegate,
         icons: HashMap::new(),
@@ -245,6 +241,9 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
             updater::schedule(b);
             if std::env::args().any(|a| a == "--smoke-test") {
                 delegate::smoke_test(b);
+            }
+            if std::env::args().any(|a| a == "--ublock-selftest") {
+                delegate::ublock_selftest(b);
             }
             // CI: install the latest release over this copy, end to end, without asking.
             if std::env::args().any(|a| a == "--install-update") {

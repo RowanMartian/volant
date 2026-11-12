@@ -41,8 +41,9 @@ fn main() {
     for _ in 0..30_000 {
         let lines: Vec<String> = (0..(rnd() % 6)).map(|_| (0..(rnd() % 10)).map(|_| FILTER[(rnd() % FILTER.len() as u64) as usize]).collect()).collect();
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let c = volant_core::blocker::compile(&[&refs.join("\n")]);
-        assert!(c.json.starts_with('[') && c.json.ends_with(']'));
+        let c = volant_core::ublock::compile(&[("fuzz", &refs.join("\n"))], volant_core::ublock::Options::default());
+        assert!(c.network.iter().all(|n| n.starts_with('[') && n.ends_with(']')));
+        let _ = c.sites.lookup("www.example.com");
         n += 1;
     }
     const TYPED: &[&str] = &["a", ".", "com", "/", ":", "8080", "http", "://", " ", "?", "#", "@", "[", "]", "é", "localhost", "1", "-", "www."];

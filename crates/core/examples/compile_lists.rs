@@ -2,12 +2,18 @@
 //! cargo run --release -p volant-core --example compile_lists -- easylist.txt easyprivacy.txt
 fn main() {
     let texts: Vec<String> = std::env::args().skip(1).map(|p| std::fs::read_to_string(p).expect("read list")).collect();
-    let mut all: Vec<&str> = vec![volant_core::blocker::BUILTIN];
-    all.extend(texts.iter().map(String::as_str));
+    let names: Vec<String> = std::env::args().skip(1).collect();
+    let lists: Vec<(&str, &str)> = names.iter().zip(&texts).map(|(n, t)| (n.as_str(), t.as_str())).collect();
     let t = std::time::Instant::now();
-    let c = volant_core::blocker::compile(&all);
-    eprintln!("{} rules, {} skipped, {} KB JSON, {:?}", c.rules, c.skipped, c.json.len() / 1024, t.elapsed());
+    let c = volant_core::ublock::compile(&lists, volant_core::ublock::Options::default());
+    let kb: usize = c.network.iter().map(|n| n.len()).sum::<usize>() / 1024;
+    eprintln!("{:?} in {:?}", c.stats, t.elapsed());
+    eprintln!("{} network lists ({} KB), cosmetic {} KB, {} sites with scriptlets/procedural filters", c.network.len(), kb, c.cosmetic.len() / 1024, c.sites.sites());
     if let Ok(out) = std::env::var("OUT") {
-        std::fs::write(out, &c.json).unwrap();
+        for (i, n) in c.network.iter().enumerate() {
+            std::fs::write(format!("{out}/network-{i}.json"), n).unwrap();
+        }
+        std::fs::write(format!("{out}/cosmetic.json"), &c.cosmetic).unwrap();
+        std::fs::write(format!("{out}/sites.txt"), c.sites.serialize()).unwrap();
     }
 }

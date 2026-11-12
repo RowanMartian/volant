@@ -39,12 +39,13 @@ pub enum Kind {
     Reader,
     Update,
     ShowSidebar,
+    Shield,
 }
 
 impl Kind {
     fn from(v: u32) -> Self {
         use Kind::*;
-        [None, Tab, CloseTab, NewTab, Address, Back, Forward, Reload, Settings, Sidebar, Suggestion, Scrim, Downloads, FindPrev, FindNext, FindClose, Panel, Reader, Update, ShowSidebar]
+        [None, Tab, CloseTab, NewTab, Address, Back, Forward, Reload, Settings, Sidebar, Suggestion, Scrim, Downloads, FindPrev, FindNext, FindClose, Panel, Reader, Update, ShowSidebar, Shield]
             .get(v as usize)
             .copied()
             .unwrap_or(None)
@@ -131,6 +132,7 @@ define_class!(
         fn menu_for_event(&self, _e: &NSEvent) -> Option<Retained<NSMenu>> {
             match Kind::from(self.ivars().kind.get()) {
                 Kind::Tab => actions::tab_menu(self.ivars().data.get()),
+                Kind::Shield => actions::shield_menu(),
                 _ => None,
             }
         }

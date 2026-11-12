@@ -84,8 +84,7 @@ fn main() {
 
     let lists: Vec<String> = std::env::args().skip(1).map(|p| std::fs::read_to_string(p).unwrap()).collect();
     if !lists.is_empty() {
-        let mut all = vec![volant_core::blocker::BUILTIN];
-        all.extend(lists.iter().map(String::as_str));
-        time("compile EasyList+EasyPrivacy", 5, || volant_core::blocker::compile(&all).rules);
+        let all: Vec<(&str, &str)> = lists.iter().map(|t| ("list", t.as_str())).collect();
+        time("compile filter lists", 3, || volant_core::ublock::compile(&all, volant_core::ublock::Options::default()).stats.network_rules);
     }
 }

@@ -3,32 +3,6 @@
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Blocking {
-    Off,
-    /// Volant's built-in tracker and ad list.
-    Standard,
-    /// Built-in list plus EasyList and EasyPrivacy, downloaded and compiled on your Mac.
-    Strict,
-}
-
-impl Blocking {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Blocking::Off => "off",
-            Blocking::Standard => "standard",
-            Blocking::Strict => "strict",
-        }
-    }
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "off" => Blocking::Off,
-            "strict" => Blocking::Strict,
-            _ => Blocking::Standard,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Appearance {
     System,
     Light,
@@ -55,7 +29,17 @@ impl Appearance {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub engine: String,
-    pub blocking: Blocking,
+    /// Block ads and trackers (powered by uBlock).
+    pub ublock: bool,
+    /// The uBlock Origin filter lists that are on, by list id.
+    pub ublock_lists: Vec<String>,
+    /// uBlock Origin's switches: cosmetic filtering, remote fonts, JavaScript,
+    /// hyperlink auditing (pings), WebRTC local IP leaks.
+    pub ublock_cosmetic: bool,
+    pub ublock_fonts: bool,
+    pub ublock_noscript: bool,
+    pub ublock_pings: bool,
+    pub ublock_webrtc: bool,
     pub appearance: Appearance,
     pub onboarded: bool,
     pub restore_session: bool,
@@ -79,7 +63,13 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             engine: crate::search::DEFAULT_ENGINE.into(),
-            blocking: Blocking::Standard,
+            ublock: true,
+            ublock_lists: crate::ublock::default_lists(),
+            ublock_cosmetic: true,
+            ublock_fonts: false,
+            ublock_noscript: false,
+            ublock_pings: true,
+            ublock_webrtc: false,
             appearance: Appearance::System,
             onboarded: false,
             restore_session: true,
@@ -113,7 +103,15 @@ impl Settings {
         for (k, v) in kv(text) {
             match k {
                 "engine" => s.engine = v.to_string(),
-                "blocking" => s.blocking = Blocking::parse(v),
+                // Volant before uBlock: "off" / "standard" / "strict".
+                "blocking" => s.ublock = v != "off",
+                "ublock" => s.ublock = v == "1",
+                "ublock_lists" => s.ublock_lists = v.split(',').map(str::trim).filter(|x| crate::ublock::list(x).is_some()).map(String::from).collect(),
+                "ublock_cosmetic" => s.ublock_cosmetic = v == "1",
+                "ublock_fonts" => s.ublock_fonts = v == "1",
+                "ublock_noscript" => s.ublock_noscript = v == "1",
+                "ublock_pings" => s.ublock_pings = v == "1",
+                "ublock_webrtc" => s.ublock_webrtc = v == "1",
                 "appearance" => s.appearance = Appearance::parse(v),
                 "onboarded" => s.onboarded = v == "1",
                 "restore_session" => s.restore_session = v == "1",
@@ -137,9 +135,15 @@ impl Settings {
     pub fn serialize(&self) -> String {
         let b = |x: bool| if x { "1" } else { "0" };
         format!(
-            "engine={}\nblocking={}\nappearance={}\nonboarded={}\nrestore_session={}\nsidebar={}\nsuspend_minutes={}\nlists_updated={}\nreader_size={}\nreader_font={}\nweather={}\nweather_place={}\nweather_at={}\nweather_unit={}\n",
+            "engine={}\nublock={}\nublock_lists={}\nublock_cosmetic={}\nublock_fonts={}\nublock_noscript={}\nublock_pings={}\nublock_webrtc={}\nappearance={}\nonboarded={}\nrestore_session={}\nsidebar={}\nsuspend_minutes={}\nlists_updated={}\nreader_size={}\nreader_font={}\nweather={}\nweather_place={}\nweather_at={}\nweather_unit={}\n",
             self.engine,
-            self.blocking.as_str(),
+            b(self.ublock),
+            self.ublock_lists.join(","),
+            b(self.ublock_cosmetic),
+            b(self.ublock_fonts),
+            b(self.ublock_noscript),
+            b(self.ublock_pings),
+            b(self.ublock_webrtc),
             self.appearance.as_str(),
             b(self.onboarded),
             b(self.restore_session),
@@ -168,6 +172,7 @@ impl Settings {
         let before = self.clone();
         *self = Self::parse(&format!("{}{key}={value}\n", self.serialize()));
         *self != before
+            || key.starts_with("ublock")
             || matches!(key, "engine" | "blocking" | "appearance" | "onboarded" | "restore_session" | "sidebar" | "suspend_minutes" | "reader_size" | "reader_font" | "weather" | "weather_place" | "weather_at" | "weather_unit")
     }
 }
@@ -303,11 +308,16 @@ mod tests {
     fn settings_round_trip() {
         let mut s = Settings::default();
         assert!(s.set("engine", "kagi"));
-        assert!(s.set("blocking", "strict"));
+        assert!(s.set("ublock", "0"));
+        assert!(s.set("ublock_lists", "easylist,not-a-list,easyprivacy"));
         assert!(s.set("onboarded", "1"));
         let t = Settings::parse(&s.serialize());
         assert_eq!(t, s);
         assert_eq!(t.engine, "kagi");
+        assert!(!t.ublock);
+        assert_eq!(t.ublock_lists, ["easylist", "easyprivacy"]);
+        assert!(Settings::parse("blocking=off\n").ublock == false && Settings::parse("blocking=strict\n").ublock, "old settings carry over");
+        assert_eq!(Settings::parse("").ublock_lists, crate::ublock::default_lists());
         assert!(s.set("weather_at", "43.65,-79.38"));
         assert!(s.set("weather_place", "Toronto, Ontario"));
         let t = Settings::parse(&s.serialize());

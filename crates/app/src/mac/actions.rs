@@ -41,6 +41,13 @@ pub fn hit(kind: Kind, data: u64, click: Click) {
             }
         }
         (Kind::ShowSidebar, _) => toggle_sidebar(b),
+        (Kind::Shield, _) => {
+            if b.settings.ublock {
+                super::blocking::toggle_site(b);
+            } else {
+                open_or_switch(b, "volant://blocker");
+            }
+        }
         (Kind::FindPrev, _) => find::step(b, true),
         (Kind::FindNext, _) => find::step(b, false),
         (Kind::FindClose, _) => find::close(b),
@@ -76,6 +83,27 @@ pub fn tab_menu(id: TabId) -> Option<Retained<NSMenu>> {
         Some(menu)
     })
     .flatten()
+}
+
+/// Right-click on the shield.
+pub fn shield_menu() -> Option<Retained<NSMenu>> {
+    super::try_with(|b| {
+        let menu = NSMenu::new(b.mtm);
+        for (title, tag) in [("Block Element…", 1isize), ("Blocker Settings…", 2)] {
+            let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(b.mtm), &ns(title), Some(sel!(shieldMenu:)), &ns("")) };
+            unsafe { item.setTarget(Some(&b.delegate as &AnyObject)) };
+            item.setTag(tag);
+            menu.addItem(&item);
+        }
+        menu
+    })
+}
+
+pub fn shield_menu_action(b: &mut Browser, tag: isize) {
+    match tag {
+        1 => super::blocking::pick_element(b),
+        _ => open_or_switch(b, "volant://blocker"),
+    }
 }
 
 pub fn tab_menu_action(b: &mut Browser, tag: isize) {

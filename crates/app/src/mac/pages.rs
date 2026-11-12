@@ -18,6 +18,7 @@ const SETTINGS: &str = include_str!("../../../../assets/pages/settings.html");
 const HISTORY: &str = include_str!("../../../../assets/pages/history.html");
 const ERROR: &str = include_str!("../../../../assets/pages/error.html");
 const READER: &str = include_str!("../../../../assets/pages/reader.html");
+const BLOCKER: &str = include_str!("../../../../assets/pages/blocker.html");
 const ICON: &str = include_str!("../../../../assets/icon.svg");
 
 fn engines_json() -> String {
@@ -28,7 +29,7 @@ fn settings_json(b: &Browser) -> String {
     let s = &b.settings;
     Obj::new()
         .str("engine", &s.engine)
-        .str("blocking", s.blocking.as_str())
+        .bool("ublock", s.ublock)
         .str("appearance", s.appearance.as_str())
         .bool("restore_session", s.restore_session)
         .num("suspend_minutes", s.suspend_minutes)
@@ -72,9 +73,7 @@ fn page_data(b: &Browser, page: &str) -> String {
         "settings" => Obj::new()
             .raw("engines", &engines_json())
             .raw("settings", &settings_json(b))
-            .num("rules", b.blocking.rules)
-            .str("blockError", &b.blocking.error)
-            .num("listsUpdated", b.settings.lists_updated)
+            .raw("blocker", &blocking::status_json(b))
             .bool("isDefault", is_default())
             .str("version", super::VERSION)
             .str("commit", super::COMMIT.map(|c| &c[..c.len().min(7)]).unwrap_or(""))
@@ -113,6 +112,7 @@ pub fn serve(b: &Browser, url: &str) -> (&'static str, Vec<u8>) {
         "newtab" | "" => ("text/html", fill(NEWTAB, &page_data(b, "newtab"))),
         "settings" => ("text/html", fill(SETTINGS, &page_data(b, "settings"))),
         "history" => ("text/html", fill(HISTORY, &page_data(b, "history"))),
+        "blocker" => ("text/html", fill(BLOCKER, &blocking::page_data(b))),
         _ => ("text/html", fill(ERROR, &Obj::new().str("message", "Volant has no page here.").num("code", 404).done())),
     }
 }
@@ -164,7 +164,10 @@ pub fn handle(b: &mut Browser, tab: Option<TabId>, cmd: &str, value: &str) {
                     theme::apply_appearance(b.settings.appearance, b.mtm);
                     theme::refresh(b);
                 }
-                "blocking" => blocking::apply(b),
+                // Switches that change what's compiled.
+                "ublock" | "ublock_cosmetic" | "ublock_fonts" | "ublock_pings" => blocking::rebuild(b),
+                // These apply from the next page load.
+                "ublock_noscript" | "ublock_webrtc" => blocking::push_status(b),
                 "sidebar" => ui::layout(b),
                 _ => {}
             }
@@ -221,7 +224,10 @@ pub fn handle(b: &mut Browser, tab: Option<TabId>, cmd: &str, value: &str) {
         "removeHistory" => b.history.remove(value),
         "clearHistory" => b.history.clear(),
         "clearData" => clear_website_data(b),
-        "updateLists" => blocking::download_lists(b, true),
+        "ublockUpdate" => blocking::download(b, true),
+        "ublockLists" => blocking::set_lists_selected(b, value),
+        "ublockMyFilters" => blocking::set_my_filters(b, value),
+        "ublockTrusted" => blocking::set_trusted(b, value),
         "exitReader" => actions::toggle_reader(b),
         _ => {}
     }

@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Block ads and trackers</title>
+<link rel="stylesheet" href="volant://app/style.css">
+<style>
+body{padding:52px 24px 72px}
+.wrap{width:min(680px,100%);margin:0 auto}
+.head{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.shield{width:44px;height:44px;border-radius:12px;background:var(--accent);color:#fff;display:grid;place-items:center;flex:none}
+.shield svg{width:22px;height:22px}
+.head .tx{flex:1;min-width:0}
+h1{font-size:24px;font-weight:700;letter-spacing:-.02em}
+.powered{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--text2);margin-top:2px}
+.status{color:var(--text2);font-size:12.5px;margin:12px 0 22px;display:flex;align-items:center;gap:8px;min-height:18px}
+.status .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.status.off .dot{background:var(--text3)}
+.status.busy .dot{background:var(--accent)}
+.tabs{display:flex;gap:2px;background:var(--fill);border-radius:10px;padding:3px;margin-bottom:18px}
+.tabs button{flex:1;height:30px;border-radius:8px;color:var(--text2);font-weight:550}
+.tabs button:hover{color:var(--text)}
+.tabs button.on{background:var(--bg);color:var(--text)}
+@media (prefers-color-scheme: dark){.tabs button.on{background:var(--fill-hover)}}
+.pane{display:none}
+.pane.on{display:block}
+h2{font-size:12px;font-weight:600;color:var(--text3);margin:22px 0 8px 14px}
+h2:first-child{margin-top:0}
+.group{background:var(--fill-soft);border-radius:var(--r-lg);padding:4px}
+.row{display:flex;align-items:center;gap:14px;padding:12px 14px;min-height:52px;border-radius:var(--r-md)}
+.row + .row{margin-top:2px}
+.row .tx{flex:1;min-width:0}
+.row b{display:block;font-weight:550;font-size:13px}
+.row small{display:block;color:var(--text2);font-size:12px;margin-top:1px}
+.row.list{min-height:44px;padding:9px 14px}
+.row.list b{font-weight:500}
+.check{width:20px;height:20px;border-radius:6px;background:var(--fill-hover);flex:none;display:grid;place-items:center;color:#fff}
+.check.on{background:var(--accent)}
+.check svg{width:12px;height:12px;opacity:0}
+.check.on svg{opacity:1}
+.row.list{cursor:default}
+.row.list:hover{background:var(--fill)}
+.tag{font-size:10.5px;font-weight:600;color:var(--text3);margin-left:6px}
+.bar{display:flex;gap:8px;align-items:center;margin-top:14px}
+.bar .muted{flex:1;font-size:12px}
+textarea{width:100%;min-height:300px;border:0;border-radius:var(--r-md);background:var(--fill-soft);color:var(--text);padding:14px;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical;-webkit-user-select:text;user-select:text;outline:none}
+textarea:focus{background:var(--fill)}
+.help{color:var(--text2);font-size:12.5px;margin:0 2px 10px;line-height:1.5}
+.help code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--fill);border-radius:5px;padding:1px 5px}
+.credit{margin-top:34px;color:var(--text3);font-size:12px;line-height:1.6;text-align:center}
+.credit a{color:var(--text2)}
+</style>
+</head>
+<body>
+<script id="volant-data" type="application/json">__VOLANT_DATA__</script>
+<script>window.VOLANT_SAMPLE = { status: { on: true, network: 239737, cosmetic: 30200, scriptlets: 10361, procedural: 1331, status: '', error: '', updated: Date.now() / 1000 - 3600 },
+  lists: [
+    { id: 'ublock-filters', title: 'uBlock filters – Ads', group: 'Built-in', on: true, downloaded: true, default: true },
+    { id: 'ublock-privacy', title: 'uBlock filters – Privacy', group: 'Built-in', on: true, downloaded: true, default: true },
+    { id: 'easylist', title: 'EasyList', group: 'Ads', on: true, downloaded: true, default: true },
+    { id: 'easyprivacy', title: 'EasyPrivacy', group: 'Privacy', on: true, downloaded: true, default: true },
+    { id: 'ublock-annoyances', title: 'uBlock filters – Annoyances', group: 'Annoyances', on: false, downloaded: false, default: false }],
+  cosmetic: true, fonts: false, noscript: false, pings: true, webrtc: false, myFilters: 'example.com##.promo\n', trusted: 'news.example\n' };</script>
+<script src="volant://app/volant.js"></script>
+
+<div class="wrap">
+  <div class="head">
+    <div class="shield"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5 4.5 5.4v5.9c0 4.9 3.2 9 7.5 10.2 4.3-1.2 7.5-5.3 7.5-10.2V5.4z"/></svg></div>
+    <div class="tx"><h1>Block ads and trackers</h1><div class="powered">Powered by uBlock</div></div>
+    <label class="switch" title="Block ads and trackers"><input type="checkbox" id="on"><i></i></label>
+  </div>
+  <div class="status" id="status"><span class="dot"></span><span id="status-text"></span></div>
+
+  <div class="tabs" id="tabs">
+    <button data-pane="settings" class="on">Settings</button>
+    <button data-pane="lists">Filter lists</button>
+    <button data-pane="mine">My filters</button>
+    <button data-pane="trusted">Trusted sites</button>
+  </div>
+
+  <section class="pane on" id="settings">
+    <div class="group">
+      <div class="row"><div class="tx"><b>Hide page elements</b><small>Cosmetic filtering: removes the empty boxes and banners ads leave behind</small></div><label class="switch"><input type="checkbox" data-key="ublock_cosmetic" data-v="cosmetic"><i></i></label></div>
+      <div class="row"><div class="tx"><b>Disable hyperlink auditing</b><small>Stops links from reporting your clicks with &lt;a ping&gt;</small></div><label class="switch"><input type="checkbox" data-key="ublock_pings" data-v="pings"><i></i></label></div>
+      <div class="row"><div class="tx"><b>Prevent WebRTC from leaking local IP addresses</b><small>Some video calls may stop working</small></div><label class="switch"><input type="checkbox" data-key="ublock_webrtc" data-v="webrtc"><i></i></label></div>
+      <div class="row"><div class="tx"><b>Block remote fonts</b><small>Faster pages and less tracking; some icons may become letters</small></div><label class="switch"><input type="checkbox" data-key="ublock_fonts" data-v="fonts"><i></i></label></div>
+      <div class="row"><div class="tx"><b>Disable JavaScript</b><small>Everywhere except trusted sites. Many sites won't work</small></div><label class="switch"><input type="checkbox" data-key="ublock_noscript" data-v="noscript"><i></i></label></div>
+    </div>
+    <h2>ON A PAGE</h2>
+    <div class="group">
+      <div class="row"><div class="tx"><b>Turn blocking off for a site</b><small>Click the shield in the address bar. The site is added to Trusted sites</small></div></div>
+      <div class="row"><div class="tx"><b>Block an element</b><small>View → Block Element… (⌥⌘B), then click the part of the page to remove</small></div></div>
+    </div>
+  </section>
+
+  <section class="pane" id="lists">
+    <div id="list-groups"></div>
+    <div class="bar"><span class="muted" id="list-note"></span><button class="btn" id="update">Update Now</button><button class="btn primary" id="apply-lists" hidden>Apply Changes</button></div>
+  </section>
+
+  <section class="pane" id="mine">
+    <p class="help">One filter per line, in uBlock Origin's syntax: <code>example.com##.banner</code> hides an element, <code>||ads.example^</code> blocks a server, <code>@@||site.example^</code> makes an exception, <code>example.com##+js(set, adsEnabled, false)</code> runs a scriptlet. Lines starting with <code>!</code> are comments.</p>
+    <textarea id="my-filters" spellcheck="false"></textarea>
+    <div class="bar"><span class="muted"></span><button class="btn primary" id="apply-mine" disabled>Apply Changes</button></div>
+  </section>
+
+  <section class="pane" id="trusted">
+    <p class="help">Blocking is off on these sites, one per line. The shield in the address bar adds or removes the site you're on.</p>
+    <textarea id="trusted-sites" spellcheck="false" style="min-height:200px"></textarea>
+    <div class="bar"><span class="muted"></span><button class="btn primary" id="apply-trusted" disabled>Apply Changes</button></div>
+  </section>
+
+  <p class="credit">Powered by uBlock: Volant uses <a href="https://github.com/gorhill/uBlock">uBlock Origin</a>'s filter lists, default list selection and filter syntax, compiled into WebKit's native content blocker. uBlock Origin is by Raymond Hill and contributors (GPLv3); the lists are by their maintainers.</p>
+</div>
+
+<script>
+const CHECK = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.2 5 8.6l4.5-5"/></svg>';
+const st = V.status || {};
+const fmt = (n) => Number(n || 0).toLocaleString();
+function ago(ts) {
+  if (!ts) return 'never';
+  const m = Math.floor((Date.now() / 1000 - ts) / 60);
+  if (m < 2) return 'just now';
+  if (m < 60) return `${m} minutes ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return h === 1 ? 'an hour ago' : `${h} hours ago`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? 'yesterday' : `${d} days ago`;
+}
+function showStatus(s) {
+  Object.assign(st, s);
+  const el = $('#status');
+  el.classList.toggle('off', !st.on);
+  el.classList.toggle('busy', !!st.status);
+  let t;
+  if (!st.on) t = 'Off. Everything loads.';
+  else if (st.status) t = st.status;
+  else t = `${fmt(st.network)} network rules · ${fmt(st.cosmetic)} cosmetic filters · ${fmt(st.scriptlets)} scriptlets · lists updated ${ago(st.updated)}`;
+  if (st.error) t += ` · ${st.error}`;
+  $('#status-text').textContent = t;
+  $('#on').checked = !!st.on;
+}
+window.volantBlocker = showStatus;
+showStatus(st);
+$('#on').onchange = (e) => { volant.send('set', 'ublock=' + (e.target.checked ? 1 : 0)); showStatus({ on: e.target.checked, status: e.target.checked ? 'Starting…' : '' }); };
+
+$$('#tabs button').forEach((b) => b.onclick = () => {
+  $$('#tabs button').forEach((x) => x.classList.toggle('on', x === b));
+  $$('.pane').forEach((p) => p.classList.toggle('on', p.id === b.dataset.pane));
+});
+
+$$('#settings input[data-key]').forEach((i) => {
+  i.checked = !!V[i.dataset.v];
+  i.onchange = () => volant.send('set', `${i.dataset.key}=${i.checked ? 1 : 0}`);
+});
+
+// ---------- filter lists, grouped as uBlock Origin groups them ----------
+const lists = V.lists || [];
+const initial = new Set(lists.filter((l) => l.on).map((l) => l.id));
+const chosen = new Set(initial);
+function renderLists() {
+  const groups = [];
+  for (const l of lists) { let g = groups.find((x) => x[0] === l.group); if (!g) groups.push(g = [l.group, []]); g[1].push(l); }
+  $('#list-groups').innerHTML = groups.map(([g, ls]) => `<h2>${esc(g.toUpperCase())}</h2><div class="group">${ls.map((l) => `
+    <div class="row list" data-id="${esc(l.id)}"><span class="check${chosen.has(l.id) ? ' on' : ''}">${CHECK}</span>
+      <div class="tx"><b>${esc(l.title)}${l.default ? '<span class="tag">DEFAULT</span>' : ''}</b></div></div>`).join('')}</div>`).join('');
+  const changed = chosen.size !== initial.size || [...chosen].some((id) => !initial.has(id));
+  $('#apply-lists').hidden = !changed;
+  $('#list-note').textContent = `${chosen.size} of ${lists.length} lists on`;
+}
+$('#list-groups').addEventListener('click', (e) => {
+  const row = e.target.closest('.row.list');
+  if (!row) return;
+  const id = row.dataset.id;
+  if (chosen.has(id)) chosen.delete(id); else chosen.add(id);
+  renderLists();
+});
+$('#apply-lists').onclick = () => {
+  volant.send('ublockLists', [...chosen].join(','));
+  initial.clear(); chosen.forEach((id) => initial.add(id));
+  renderLists();
+  showStatus({ status: 'Updating…' });
+};
+$('#update').onclick = () => { volant.send('ublockUpdate'); showStatus({ status: 'Downloading filter lists…' }); };
+renderLists();
+
+// ---------- my filters, trusted sites ----------
+for (const [area, button, key, cmd] of [['#my-filters', '#apply-mine', 'myFilters', 'ublockMyFilters'], ['#trusted-sites', '#apply-trusted', 'trusted', 'ublockTrusted']]) {
+  const ta = $(area), btn = $(button);
+  let saved = V[key] || '';
+  ta.value = saved;
+  ta.oninput = () => { btn.disabled = ta.value === saved; };
+  btn.onclick = () => { saved = ta.value; btn.disabled = true; volant.send(cmd, ta.value); };
+}
+</script>
+</body>
+</html>

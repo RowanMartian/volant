@@ -30,13 +30,14 @@ h2{font-size:12px;font-weight:600;color:var(--text3);margin:26px 0 8px 14px}
 .about .logo{width:48px;height:48px}
 .about .tx{flex:1}
 .about b{font-size:15px;font-weight:650}
+.powered{font-size:11px;font-weight:600;color:var(--text3);margin-left:6px}
 .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:9px 16px;border-radius:999px;font-weight:500;opacity:0;transition:opacity .2s;pointer-events:none}
 .toast.on{opacity:1}
 </style>
 </head>
 <body>
 <script id="volant-data" type="application/json">__VOLANT_DATA__</script>
-<script>window.VOLANT_SAMPLE = { engines: [['duckduckgo','DuckDuckGo'],['google','Google'],['brave','Brave Search'],['kagi','Kagi'],['bing','Bing'],['ecosia','Ecosia']], settings: { engine: 'duckduckgo', blocking: 'strict', appearance: 'system', restore_session: true, suspend_minutes: 20 }, rules: 119122, listsUpdated: Date.now()/1000 - 86400*2, isDefault: false, version: '0.1.0', commit: 'abc1234', dataDir: '~/Library/Application Support/Volant', historyCount: 1832 };</script>
+<script>window.VOLANT_SAMPLE = { engines: [['duckduckgo','DuckDuckGo'],['google','Google'],['brave','Brave Search'],['kagi','Kagi'],['bing','Bing'],['ecosia','Ecosia']], settings: { engine: 'duckduckgo', ublock: true, appearance: 'system', restore_session: true, suspend_minutes: 20 }, blocker: { on: true, network: 239737, scriptlets: 10361, cosmetic: 30200, status: '', error: '', updated: Date.now()/1000 - 7200 }, isDefault: false, version: '0.1.0', commit: 'abc1234', dataDir: '~/Library/Application Support/Volant', historyCount: 1832 };</script>
 <script src="volant://app/volant.js"></script>
 
 <div class="wrap">
@@ -58,10 +59,10 @@ h2{font-size:12px;font-weight:600;color:var(--text3);margin:26px 0 8px 14px}
 
   <h2>PRIVACY</h2>
   <div class="group">
-    <div class="row"><div class="tx"><b>Block ads and trackers</b><div class="status" id="block-status"></div></div>
-      <div class="seg" data-key="blocking"><button data-v="off">Off</button><button data-v="standard">Standard</button><button data-v="strict">Strict</button></div></div>
-    <div class="row" id="lists-row"><div class="tx"><b>Filter lists</b><small>EasyList and EasyPrivacy, downloaded from easylist.to and compiled on this Mac</small></div>
-      <button class="btn" id="update-lists">Update Now</button></div>
+    <div class="row"><div class="tx"><b>Block ads and trackers <span class="powered">Powered by uBlock</span></b><div class="status" id="block-status"></div></div>
+      <label class="switch"><input type="checkbox" id="ublock"><i></i></label></div>
+    <div class="row"><div class="tx"><b>Filter lists, my filters and trusted sites</b><small>uBlock Origin's lists and settings</small></div>
+      <a class="btn" href="volant://blocker">Blocker Settings…</a></div>
     <div class="row"><div class="tx"><b>Browsing history</b><small id="hist-count"></small></div>
       <button class="btn danger" id="clear-history">Clear History…</button></div>
     <div class="row"><div class="tx"><b>Cookies and website data</b><small>Signs you out of websites</small></div>
@@ -107,27 +108,31 @@ $('#restore').onchange = (e) => volant.send('set', 'restore_session=' + (e.targe
 $('#suspend').value = String(S.suspend_minutes ?? 20);
 $('#suspend').onchange = (e) => volant.send('set', 'suspend_minutes=' + e.target.value);
 
-function blockStatus(level) {
+const BL = V.blocker || {};
+function blockStatus(st) {
+  Object.assign(BL, st || {});
   const el = $('#block-status');
-  $('#lists-row').hidden = level !== 'strict';
-  if (level === 'off') el.innerHTML = 'Everything loads';
-  else if (V.blockError) el.innerHTML = `<span style="color:var(--danger)">${esc(V.blockError)}</span>`;
-  else if (V.rules) el.innerHTML = `<span class="ok">●</span> ${Number(V.rules).toLocaleString()} rules active${level === 'strict' ? ' · lists updated ' + ago(V.listsUpdated) : ''}`;
-  else el.innerHTML = 'Compiling rules…';
+  $('#ublock').checked = !!BL.on;
+  if (!BL.on) el.textContent = 'Off. Everything loads';
+  else if (BL.status) el.textContent = BL.status;
+  else if (BL.error) el.innerHTML = '<span style="color:var(--danger)">' + esc(BL.error) + '</span>';
+  else el.innerHTML = '<span class="ok">●</span> ' + Number(BL.network || 0).toLocaleString() + ' rules, ' + Number(BL.scriptlets || 0).toLocaleString() + ' scriptlets · lists updated ' + ago(BL.updated);
 }
+window.volantBlocker = blockStatus;
+$('#ublock').onchange = (e) => {
+  volant.send('set', 'ublock=' + (e.target.checked ? 1 : 0));
+  blockStatus({ on: e.target.checked, status: e.target.checked ? 'Starting…' : '' });
+};
 $$('.seg').forEach((seg) => {
   const key = seg.dataset.key;
   const set = (v) => $$('button', seg).forEach((b) => b.classList.toggle('on', b.dataset.v === v));
-  set(S[key] || (key === 'appearance' ? 'system' : 'standard'));
+  set(S[key] || 'system');
   $$('button', seg).forEach((b) => b.onclick = () => {
     set(b.dataset.v);
     volant.send('set', key + '=' + b.dataset.v);
-    if (key === 'blocking') { V.rules = 0; blockStatus(b.dataset.v); }
   });
 });
-blockStatus(S.blocking || 'standard');
-window.volantRules = (rules, err) => { V.rules = rules; V.blockError = err || ''; blockStatus($('.seg[data-key=blocking] .on').dataset.v); };
-$('#update-lists').onclick = () => { volant.send('updateLists'); V.rules = 0; blockStatus('strict'); };
+blockStatus();
 
 $('#hist-count').textContent = V.historyCount ? `${Number(V.historyCount).toLocaleString()} pages remembered` : 'Nothing remembered yet';
 $('#clear-history').onclick = () => { if (confirm('Clear all browsing history?')) { volant.send('clearHistory'); $('#hist-count').textContent = 'Nothing remembered yet'; toast('History cleared'); } };

@@ -42,7 +42,7 @@ jobs:
         run: |
           mkdir -p smoke build
           swiftc -O scripts/bench/appicon.swift -o build/appicon
-          build/appicon dist/Volant.app smoke/appicon.png 1024
+          build/appicon "$PWD/dist/Volant.app" smoke/appicon.png 1024
           echo "Assets.car: $(ls -la dist/Volant.app/Contents/Resources/Assets.car 2>/dev/null || echo missing)"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' dist/Volant.app/Contents/Info.plist || true
 
@@ -59,6 +59,18 @@ jobs:
           cat smoke/log.txt smoke/report.txt 2>/dev/null || true
           ls -la smoke
           grep -q "exit 0" smoke/log.txt
+
+      - name: uBlock self-test (default lists, compiled into WebKit, checked on a real page)
+        run: |
+          export VOLANT_DATA_DIR="$RUNNER_TEMP/ublock-data" VOLANT_SMOKE_DIR="$PWD/smoke"
+          ( dist/Volant.app/Contents/MacOS/Volant --ublock-selftest > smoke/ublock-log.txt 2>&1 ) &
+          PID=$!
+          for i in $(seq 1 660); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          kill -0 $PID 2>/dev/null && { echo "still running after 660s" >> smoke/ublock-log.txt; pkill -f "Volant --ublock-selftest" || true; }
+          grep ublock smoke/ublock-log.txt | head -20 || true
+          cat smoke/ublock.txt 2>/dev/null || echo "no report"
+          { echo '### uBlock self-test'; echo '```'; cat smoke/ublock.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          tail -n 1 smoke/ublock.txt | grep -qx PASS
 
       - name: Updater test (install the current release over a copy of this build)
         run: |

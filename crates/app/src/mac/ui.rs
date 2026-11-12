@@ -117,6 +117,8 @@ pub struct Ui {
     pub address_icon: Retained<NSImageView>,
     pub address_text: Retained<NSTextField>,
     pub reader: IconButton,
+    /// uBlock's power button: blocking on or off for the site in front.
+    pub shield: IconButton,
     pub new_tab: Retained<Hit>,
     pub new_tab_icon: Retained<NSImageView>,
     pub new_tab_label: Retained<NSTextField>,
@@ -187,6 +189,8 @@ impl Ui {
         address.addSubview(&address_icon);
         address.addSubview(&address_text);
         address.addSubview(&reader.hit);
+        let shield = IconButton::new(Kind::Shield, "shield.fill", 12.0, rect(SIDEBAR_W - 20.0 - 62.0, 6.0, 26.0, 24.0), "Blocking is on for this site", mtm);
+        address.addSubview(&shield.hit);
         address.setToolTip(Some(&ns("Search or enter an address (⌘L)")));
         sidebar.addSubview(&address);
 
@@ -248,6 +252,7 @@ impl Ui {
             address_icon,
             address_text,
             reader,
+            shield,
             new_tab,
             new_tab_icon,
             new_tab_label,
@@ -465,8 +470,26 @@ pub fn update_chrome(b: &Browser) {
     let reading = b.tabs.active.map(|id| super::actions::in_reader(b, id)).unwrap_or(false);
     let reader_shown = reading || url.starts_with("http");
     ui.reader.hit.setHidden(!reader_shown);
-    // The text gets the room the Reader button would use when it isn't there.
-    ui.address_text.setFrame(rect(34.0, 9.0, SIDEBAR_W - 20.0 - if reader_shown { 72.0 } else { 44.0 }, 18.0));
+    // The shield (Powered by uBlock): on, or off for this site.
+    let web_host = if url.starts_with("http") { omnibox::host(&url).to_string() } else { String::new() };
+    let shield_shown = !web_host.is_empty() && !reading;
+    let protected = shield_shown && super::blocking::site_on(b, &web_host);
+    ui.shield.hit.setHidden(!shield_shown);
+    let pill_w = SIDEBAR_W - 20.0;
+    ui.reader.hit.setFrame(rect(pill_w - 34.0, 6.0, 26.0, 24.0));
+    ui.shield.hit.setFrame(rect(pill_w - if reader_shown { 62.0 } else { 34.0 }, 6.0, 26.0, 24.0));
+    ui.shield.img.setImage(symbol(if protected { "shield.fill" } else { "shield.slash" }, 12.0, Weight::Medium).as_deref());
+    views::tint(&ui.shield.img, if protected { t.accent } else { t.text3 });
+    ui.shield.hit.setToolTip(Some(&ns(&if !b.settings.ublock {
+        "Blocking is off (Settings → Block ads and trackers)".to_string()
+    } else if protected {
+        format!("Blocking ads and trackers on {web_host}. Click to turn off for this site. Powered by uBlock")
+    } else {
+        format!("Blocking is off for {web_host}. Click to turn it back on")
+    })));
+    // The text gets the room the buttons would use when they aren't there.
+    let buttons = (reader_shown as i32 + shield_shown as i32) as f64;
+    ui.address_text.setFrame(rect(34.0, 9.0, pill_w - 44.0 - 28.0 * buttons, 18.0));
     views::tint(&ui.reader.img, if reading { t.accent } else { t.text2 });
     ui.reader.hit.setToolTip(Some(&ns(if reading { "Hide Reader (⇧⌘R)" } else { "Show Reader (⇧⌘R)" })));
     set_text(&ui.address_text, &text);
@@ -552,7 +575,7 @@ pub fn repaint(b: &mut Browser) {
     fill(&ui.content, t.content);
     fill(&ui.progress, t.accent);
     ui.address.set_fill(Some(t.fill));
-    for btn in [&ui.back, &ui.forward, &ui.reload, &ui.settings, &ui.toggle, &ui.reader, &ui.show_sidebar] {
+    for btn in [&ui.back, &ui.forward, &ui.reload, &ui.settings, &ui.toggle, &ui.reader, &ui.show_sidebar, &ui.shield] {
         views::tint(&btn.img, t.text2);
         btn.hit.restyle();
     }

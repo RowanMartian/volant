@@ -140,6 +140,12 @@ define_class!(
             with(move |b| menu::run(b, tag));
         }
 
+        #[unsafe(method(shieldMenu:))]
+        fn shield_menu_action(&self, sender: &NSMenuItem) {
+            let tag = sender.tag();
+            with(move |b| actions::shield_menu_action(b, tag));
+        }
+
         #[unsafe(method(tabMenu:))]
         fn tab_menu_action(&self, sender: &NSMenuItem) {
             let tag = sender.tag();
@@ -177,7 +183,124 @@ pub fn start_timers(b: &Browser) {
 fn housekeeping(b: &mut Browser) {
     actions::save_session(b);
     actions::sleep_idle(b);
+    super::blocking::maybe_update(b);
     super::updater::tick(b);
+}
+
+/// `--ublock-selftest`: downloads uBlock Origin's default lists, compiles them
+/// all the way into WebKit, then checks on a real page that network blocking,
+/// generic and site cosmetic filtering, a procedural filter and a scriptlet all
+/// work, and that trusting the site turns them off. Writes ublock.txt to
+/// $VOLANT_SMOKE_DIR and quits; CI fails unless it says PASS.
+pub fn ublock_selftest(b: &mut Browser) {
+    let dir = std::env::var("VOLANT_SMOKE_DIR").unwrap_or_else(|_| "/tmp/volant-smoke".into());
+    let _ = std::fs::create_dir_all(&dir);
+    b.settings.onboarded = true;
+    b.settings.ublock = true;
+    b.settings.ublock_lists = volant_core::ublock::default_lists();
+    let started = std::time::Instant::now();
+    // My filters: one of each kind, all aimed at example.com.
+    super::blocking::set_my_filters(
+        b,
+        "example.com##+js(set, volantSelfTest, true)\nexample.com##h1:has-text(Example)\nexample.com##p\n",
+    );
+    wait_until_compiled(dir, started, 0);
+}
+
+fn wait_until_compiled(dir: String, started: std::time::Instant, polls: u32) {
+    super::after(2.0, move || {
+        with(move |b| {
+            let ready = !super::blocking::is_busy(b) && !b.blocking.lists.is_empty();
+            if !ready && polls < 300 {
+                wait_until_compiled(dir, started, polls + 1);
+                return;
+            }
+            let compiled_in = started.elapsed();
+            let mut report = format!(
+                "lists ready after {:.1} s ({})\n{} network rules, {} cosmetic filters, {} scriptlets, {} procedural; {} WebKit lists\nerror: {}\n",
+                compiled_in.as_secs_f64(),
+                b.blocking.timings,
+                b.blocking.counts.network,
+                b.blocking.counts.cosmetic,
+                b.blocking.counts.scriptlets,
+                b.blocking.counts.procedural,
+                b.blocking.lists.len(),
+                if b.blocking.error.is_empty() { "none" } else { &b.blocking.error },
+            );
+            if !ready {
+                report.push_str("FAIL: lists never finished compiling\n");
+                finish_selftest(&dir, &report);
+                return;
+            }
+            actions::open_tab(b, "https://example.com/", true);
+            selftest_page(dir, report, false);
+        })
+    });
+}
+
+const SELFTEST_JS: &str = r#"(async () => {
+  const r = {};
+  r.scriptlet = window.volantSelfTest === true;
+  const h1 = document.querySelector('h1'); r.procedural = !!h1 && getComputedStyle(h1).display === 'none';
+  const p = document.querySelector('p'); r.site_cosmetic = !!p && getComputedStyle(p).display === 'none';
+  const ad = document.createElement('ins'); ad.className = 'adsbygoogle'; ad.textContent = 'ad'; document.body.appendChild(ad);
+  await new Promise((ok) => setTimeout(ok, 400));
+  r.generic_cosmetic = getComputedStyle(ad).display === 'none';
+  r.network = await fetch('https://www.google-analytics.com/analytics.js', { mode: 'no-cors', cache: 'no-store' }).then(() => 'loaded', () => 'blocked');
+  window.__volantSelfTest = JSON.stringify(r);
+})(); 'started'"#;
+
+fn selftest_page(dir: String, report: String, trusted: bool) {
+    super::after(7.0, move || {
+        with(move |b| {
+            let Some(w) = b.tabs.active.and_then(|id| b.webs.get(&id)) else { return };
+            unsafe { w.web.evaluateJavaScript_completionHandler(&super::ns(SELFTEST_JS), None) };
+            super::after(3.0, move || {
+                with(move |b| {
+                    let Some(w) = b.tabs.active.and_then(|id| b.webs.get(&id)) else { return };
+                    let dir2 = dir.clone();
+                    let report2 = report.clone();
+                    let done = block2::RcBlock::new(move |res: *mut objc2::runtime::AnyObject, _e: *mut objc2_foundation::NSError| {
+                        let text = unsafe { res.as_ref() }
+                            .and_then(|o| o.downcast_ref::<objc2_foundation::NSString>())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "no result".into());
+                        let (dir, mut report) = (dir2.clone(), report2.clone());
+                        let label = if trusted { "trusted site" } else { "blocking on" };
+                        report.push_str(&format!("{label}: {text}\n"));
+                        if !trusted {
+                            let all_on = ["\"scriptlet\":true", "\"procedural\":true", "\"site_cosmetic\":true", "\"generic_cosmetic\":true", "\"network\":\"blocked\""]
+                                .iter()
+                                .all(|k| text.contains(k));
+                            report.push_str(if all_on { "blocking: PASS\n" } else { "blocking: FAIL\n" });
+                            with(move |b| {
+                                super::blocking::set_trusted(b, "example.com");
+                                if let Some(w) = b.tabs.active.and_then(|id| b.webs.get(&id)) {
+                                    unsafe { w.web.reload() };
+                                }
+                                selftest_page(dir, report, true);
+                            });
+                        } else {
+                            let all_off = ["\"scriptlet\":false", "\"procedural\":false", "\"site_cosmetic\":false", "\"network\":\"loaded\""].iter().all(|k| text.contains(k));
+                            report.push_str(if all_off { "trusted: PASS\n" } else { "trusted: FAIL\n" });
+                            finish_selftest(&dir, &report);
+                        }
+                    });
+                    unsafe { w.web.evaluateJavaScript_completionHandler(&super::ns("window.__volantSelfTest || 'not finished'"), Some(&done)) };
+                })
+            });
+        })
+    });
+}
+
+fn finish_selftest(dir: &str, report: &str) {
+    let verdict = if report.contains("FAIL") || !report.contains("trusted: PASS") { "FAIL" } else { "PASS" };
+    let text = format!("{report}{verdict}\n");
+    eprint!("{text}");
+    let _ = std::fs::write(format!("{dir}/ublock.txt"), text);
+    if let Some(mtm) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(mtm).terminate(None);
+    }
 }
 
 /// `--smoke-test`: drives the real app through its main screens, saves

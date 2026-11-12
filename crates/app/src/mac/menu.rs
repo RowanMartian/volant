@@ -40,13 +40,15 @@ pub enum Cmd {
     Source,
     Reader,
     CheckUpdates,
+    PickElement,
+    BlockerSettings,
     Tab1 = 100,
 }
 
 const CMDS: &[Cmd] = &[
     Cmd::Settings, Cmd::MakeDefault, Cmd::NewTab, Cmd::OpenLocation, Cmd::ReopenTab, Cmd::CloseTab, Cmd::Print, Cmd::Find, Cmd::FindNext,
     Cmd::FindPrev, Cmd::CopyUrl, Cmd::ToggleSidebar, Cmd::Reload, Cmd::HardReload, Cmd::Stop, Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomReset,
-    Cmd::Back, Cmd::Forward, Cmd::Home, Cmd::History, Cmd::PinTab, Cmd::NextTab, Cmd::PrevTab, Cmd::Welcome, Cmd::Source, Cmd::Reader, Cmd::CheckUpdates,
+    Cmd::Back, Cmd::Forward, Cmd::Home, Cmd::History, Cmd::PinTab, Cmd::NextTab, Cmd::PrevTab, Cmd::Welcome, Cmd::Source, Cmd::Reader, Cmd::CheckUpdates, Cmd::PickElement, Cmd::BlockerSettings,
 ];
 
 const CMD: u8 = 1;
@@ -137,6 +139,7 @@ pub fn install(b: &Browser) {
         .cmd("Check for Updates…", "", 0, Cmd::CheckUpdates)
         .sep()
         .cmd("Settings…", ",", CMD, Cmd::Settings)
+        .cmd("Blocker Settings…", "", 0, Cmd::BlockerSettings)
         .cmd("Make Volant Your Default Browser", "", 0, Cmd::MakeDefault)
         .sep()
         .std("Hide Volant", sel!(hide:), "h", CMD)
@@ -177,6 +180,7 @@ pub fn install(b: &Browser) {
     Builder::new(b, "View")
         .cmd("Toggle Sidebar", "s", CMD, Cmd::ToggleSidebar)
         .cmd("Show Reader", "r", CMD | SHIFT, Cmd::Reader)
+        .cmd("Block Element…", "b", CMD | OPT, Cmd::PickElement)
         .sep()
         .cmd("Reload Page", "r", CMD, Cmd::Reload)
         .cmd("Reload Ignoring Cache", "r", CMD | OPT, Cmd::HardReload)
@@ -287,6 +291,8 @@ pub fn run(b: &mut Browser, tag: isize) {
         }
         Cmd::Reader => actions::toggle_reader(b),
         Cmd::CheckUpdates => super::updater::check(b, true),
+        Cmd::PickElement => super::blocking::pick_element(b),
+        Cmd::BlockerSettings => actions::open_or_switch(b, "volant://blocker"),
         Cmd::Tab1 => {}
     }
 }

@@ -4,7 +4,8 @@ use super::{actions, ns, pages, rect, theme, ui, with, Browser, Download};
 use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send, sel, AnyThread, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, MainThreadMarker, MainThreadOnly, Message};
+use objc2_foundation::NSCopying;
 use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAutoresizingMaskOptions, NSEventModifierFlags, NSModalResponseOK, NSOpenPanel, NSWorkspace};
 use objc2_foundation::{
     NSArray, NSData, NSDictionary, NSObjectNSKeyValueObserverRegistration, NSDistributedNotificationCenter, NSError, NSHTTPURLResponse, NSKeyValueChangeKey, NSKeyValueObservingOptions,
@@ -13,9 +14,11 @@ use objc2_foundation::{
 use objc2_web_kit::{
     WKDownload, WKDownloadDelegate, WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
     WKNavigationResponse, WKNavigationResponsePolicy, WKNavigationType, WKOpenPanelParameters, WKScriptMessage, WKScriptMessageHandler,
-    WKUIDelegate, WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKWebView, WKWebViewConfiguration, WKWindowFeatures,
+    WKUIDelegate, WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKWebView, WKWebViewConfiguration, WKWebpagePreferences,
+    WKWindowFeatures,
 };
 use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::path::{Path, PathBuf};
 use volant_core::tabs::TabId;
 
@@ -27,6 +30,8 @@ const UA_SUFFIX: &str = "Version/18.4 Safari/605.1.15";
 
 pub struct WebTab {
     pub web: Retained<WKWebView>,
+    /// This tab's own content controller: its rule lists and page scripts change per site.
+    pub ucc: Retained<WKUserContentController>,
     /// Last URL written to history for this tab.
     pub recorded: String,
 }
@@ -50,9 +55,19 @@ define_class!(
     }
 
     unsafe impl WKNavigationDelegate for WebDelegate {
-        #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
-        fn decide_action(&self, web: &WKWebView, action: &WKNavigationAction, handler: &DynBlock<dyn Fn(WKNavigationActionPolicy)>) {
-            handler.call((decide_navigation(web, action),));
+        #[unsafe(method(webView:decidePolicyForNavigationAction:preferences:decisionHandler:))]
+        fn decide_action(
+            &self,
+            web: &WKWebView,
+            action: &WKNavigationAction,
+            prefs: &WKWebpagePreferences,
+            handler: &DynBlock<dyn Fn(WKNavigationActionPolicy, NonNull<WKWebpagePreferences>)>,
+        ) {
+            let policy = decide_navigation(web, action);
+            if policy == WKNavigationActionPolicy::Allow {
+                prepare_page(web, action, prefs);
+            }
+            handler.call((policy, NonNull::from(prefs)));
         }
 
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
@@ -221,6 +236,14 @@ define_class!(
     unsafe impl WKScriptMessageHandler for WebDelegate {
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
         fn message(&self, _c: &WKUserContentController, msg: &WKScriptMessage) {
+            // The element picker runs inside web pages; its messages carry a one-time token.
+            if unsafe { msg.name() }.to_string() == "volantPicker" {
+                let body = unsafe { msg.body() };
+                if let Some(text) = body.downcast_ref::<NSString>().map(|s| s.to_string()) {
+                    with(move |b| super::blocking::picked(b, &text));
+                }
+                return;
+            }
             // Only Volant's own pages may talk to the browser.
             let frame = unsafe { msg.frameInfo() };
             let origin = unsafe { frame.securityOrigin() };
@@ -307,19 +330,17 @@ pub fn alert(title: &str, text: &str, buttons: &[&str]) -> usize {
     (r - NSAlertFirstButtonReturn).max(0) as usize
 }
 
-pub fn make_config(del: &WebDelegate, mtm: MainThreadMarker) -> (Retained<WKWebViewConfiguration>, Retained<WKUserContentController>) {
+/// The configuration every tab starts from (each tab then gets its own content controller).
+pub fn make_config(del: &WebDelegate, mtm: MainThreadMarker) -> Retained<WKWebViewConfiguration> {
     unsafe {
         let config = WKWebViewConfiguration::new(mtm);
-        let content = WKUserContentController::new(mtm);
-        content.addScriptMessageHandler_name(ProtocolObject::from_ref(del), &ns("volant"));
-        config.setUserContentController(&content);
         config.setURLSchemeHandler_forURLScheme(Some(ProtocolObject::from_ref(del)), &ns("volant"));
         config.setApplicationNameForUserAgent(Some(&ns(UA_SUFFIX)));
         let prefs = config.preferences();
         if prefs.respondsToSelector(sel!(setElementFullscreenEnabled:)) {
             prefs.setElementFullscreenEnabled(true);
         }
-        (config, content)
+        config
     }
 }
 
@@ -333,8 +354,18 @@ pub fn paint_background(web: &WKWebView) {
 
 /// Creates the web view for a tab (or adopts one WebKit made for a popup).
 pub fn create(b: &mut Browser, id: TabId, config: Option<&WKWebViewConfiguration>) -> Retained<WKWebView> {
-    let cfg = config.unwrap_or(&b.config);
-    let web = unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(b.mtm), b.ui.content.bounds(), cfg) };
+    // Each tab gets its own content controller, so its blocking can follow the site it's on.
+    let cfg: Retained<WKWebViewConfiguration> = match config {
+        Some(c) => c.retain(),
+        None => b.config.copy(),
+    };
+    let ucc = unsafe { WKUserContentController::new(b.mtm) };
+    unsafe {
+        ucc.addScriptMessageHandler_name(ProtocolObject::from_ref(&*b.web_delegate), &ns("volant"));
+        ucc.addScriptMessageHandler_name(ProtocolObject::from_ref(&*b.web_delegate), &ns("volantPicker"));
+        cfg.setUserContentController(&ucc);
+    }
+    let web = unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(b.mtm), b.ui.content.bounds(), &cfg) };
     unsafe {
         web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*b.web_delegate)));
         web.setUIDelegate(Some(ProtocolObject::from_ref(&*b.web_delegate)));
@@ -349,7 +380,7 @@ pub fn create(b: &mut Browser, id: TabId, config: Option<&WKWebViewConfiguration
     for key in OBSERVED {
         unsafe { web.addObserver_forKeyPath_options_context(&b.web_delegate, &ns(key), NSKeyValueObservingOptions::New, std::ptr::null_mut()) };
     }
-    b.webs.insert(id, WebTab { web: web.clone(), recorded: String::new() });
+    b.webs.insert(id, WebTab { web: web.clone(), ucc, recorded: String::new() });
     web
 }
 
@@ -418,6 +449,27 @@ fn decide_navigation(web: &WKWebView, action: &WKNavigationAction) -> WKNavigati
         return WKNavigationActionPolicy::Download;
     }
     WKNavigationActionPolicy::Allow
+}
+
+/// Just before a main-frame load: the tab's rule lists and scripts for the site it's going to,
+/// and JavaScript off if "Disable JavaScript" is on (never on Volant's own pages).
+fn prepare_page(web: &WKWebView, action: &WKNavigationAction, prefs: &WKWebpagePreferences) {
+    let main_frame = unsafe { action.targetFrame() }.map(|f| unsafe { f.isMainFrame() }).unwrap_or(true);
+    let url = unsafe { action.request() }.URL();
+    let host = url.as_ref().and_then(|u| u.host()).map(|h| h.to_string()).unwrap_or_default();
+    let http = url.as_ref().and_then(|u| u.scheme()).map(|s| s.to_string().starts_with("http")).unwrap_or(false);
+    let ptr = ptr_of(web);
+    super::try_with(|b| {
+        if !main_frame {
+            return;
+        }
+        if let Some(id) = tab_of(b, ptr) {
+            let ucc = b.webs[&id].ucc.clone();
+            super::blocking::prepare_navigation(b, &ucc, if http { &host } else { "" });
+        }
+        let no_js = http && b.settings.ublock_noscript && super::blocking::site_on(b, &host);
+        unsafe { prefs.setAllowsContentJavaScript(!no_js) };
+    });
 }
 
 fn current_is_internal(web: &WKWebView) -> bool {
