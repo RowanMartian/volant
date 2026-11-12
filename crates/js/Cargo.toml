@@ -1,0 +1,11 @@
+[package]
+name = "volant-js"
+description = "Volant's own JavaScript engine: a parser and interpreter, written from scratch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+volant-core = { path = "../core" }

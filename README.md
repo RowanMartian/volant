@@ -72,7 +72,19 @@ line and paragraph breaks (`engine_view.rs`). `volant-tools render page.html out
 It's used for an opt-in Reader (Settings → Experimental): the extracted article is laid out by the engine and drawn
 natively over the Reader page. View → Simple Page (⌥⌘E) draws any page with the engine: the page's HTML and style
 sheets are taken from WebKit after its scripts ran (cross-origin sheets fetched with Volant's HTTP), laid out
-natively, with images, links, Find, selection and copy; navigating returns to WebKit. Next: JavaScript (`crates/js`).
+natively, with images, links, Find, selection and copy; navigating returns to WebKit.
+
+## JavaScript engine
+
+`crates/js` (volant-js) is Volant's own JavaScript engine, from scratch with no dependencies beyond volant-core. A
+lexer with automatic semicolon insertion and template literals feeds a recursive-descent parser, and a tree-walking
+interpreter runs the result: closures and hoisting, prototypes, `this`, `new`, classes (`extends`, `super`, getters
+and setters, instance and static fields), destructuring with defaults, spread and rest, optional chaining, `??=`,
+labelled loops, `switch`, and `try`/`catch`/`finally`. The standard library covers Object, Function (`call`,
+`apply`, `bind`), Array, String, Number, Boolean, Math, JSON, the Error types, Map, Set, Date, console and
+`setTimeout`. Scripts run under a step budget and a recursion limit, so a page can't hang or crash the browser.
+`volant-tools js file.js` runs a script. Not yet: regular expressions, Promises/async, generators, Symbols, and the
+DOM bindings that connect it to the engine.
 
 ## Blocking engine
 

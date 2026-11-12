@@ -12,6 +12,7 @@
 //!                                              draw a page with Volant's own engine
 //!                                              (--reader: as Reader view of URL; images
 //!                                              without a known size are drawn 3:2)
+//! volant-tools js FILE.js                      run a script with Volant's own JavaScript engine
 //! ```
 
 mod site;
@@ -39,6 +40,21 @@ fn write(p: &str, data: &[u8]) -> Result<(), String> {
 fn run(args: &[String]) -> Result<(), String> {
     let arg = |i: usize| args.get(i).map(String::as_str).ok_or_else(|| format!("missing argument {i}; see the top of crates/tools/src/main.rs"));
     match arg(0)? {
+        "js" => {
+            let src = String::from_utf8(read(arg(1)?)?).map_err(|_| "the script isn't UTF-8".to_string())?;
+            let t = std::time::Instant::now();
+            let printed = volant_js::run(&src);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            match printed {
+                Ok(lines) => {
+                    for l in lines {
+                        println!("{l}");
+                    }
+                    eprintln!("(ran in {ms:.1} ms)");
+                }
+                Err(e) => return Err(format!("uncaught {e}")),
+            }
+        }
         "site" => {
             let root = args.get(1).map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
             let built = site::build(&root)?;

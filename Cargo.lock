@@ -275,9 +275,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "volant-js"
+version = "0.1.0"
+dependencies = [
+ "volant-core",
+]
+
+[[package]]
 name = "volant-tools"
 version = "0.1.0"
 dependencies = [
  "volant-core",
  "volant-engine",
+ "volant-js",
 ]

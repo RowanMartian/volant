@@ -29,7 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Test the engine pieces
-        run: cargo test --locked -p volant-core -p volant-tools
+        run: cargo test --locked -p volant-core -p volant-engine -p volant-js -p volant-tools
 
       - name: Build Volant.app
         env:
