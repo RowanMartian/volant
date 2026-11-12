@@ -202,7 +202,7 @@ pub fn ublock_selftest(b: &mut Browser) {
     // My filters: one of each kind, all aimed at example.com.
     super::blocking::set_my_filters(
         b,
-        "example.com##+js(set, volantSelfTest, true)\nexample.com##h1:has-text(Example)\nexample.com##p\n",
+        "example.com##+js(set, volantSelfTest, true)\nexample.com##div:has-text(volant-procedural-check)\nexample.com##p\n",
     );
     wait_until_compiled(dir, started, 0);
 }
@@ -241,14 +241,16 @@ fn wait_until_compiled(dir: String, started: std::time::Instant, polls: u32) {
 const SELFTEST_JS: &str = r#"(async () => {
   const r = {};
   r.scriptlet = window.volantSelfTest === true;
-  const h1 = document.querySelector('h1'); r.procedural = !!h1 && getComputedStyle(h1).display === 'none';
   const p = document.querySelector('p'); r.site_cosmetic = !!p && getComputedStyle(p).display === 'none';
   const ad = document.createElement('ins'); ad.className = 'adsbygoogle'; ad.setAttribute('data-ad-client', 'ca-pub-0'); ad.textContent = 'ad'; document.body.appendChild(ad);
-  await new Promise((ok) => setTimeout(ok, 400));
+  // Added after load, so this also checks that procedural filters follow page changes.
+  const pd = document.createElement('div'); pd.textContent = 'volant-procedural-check'; document.body.appendChild(pd);
+  await new Promise((ok) => setTimeout(ok, 600));
+  r.procedural = getComputedStyle(pd).display === 'none';
   r.generic_cosmetic = getComputedStyle(ad).display === 'none';
   r.network = await fetch('https://www.google-analytics.com/analytics.js', { mode: 'no-cors', cache: 'no-store' }).then(() => 'loaded', () => 'blocked');
   // What the page looks like to Volant's scripts, to explain a failure.
-  r.diag = { h1: h1 ? h1.outerHTML.slice(0, 160) : 'none', ready: document.readyState,
+  r.diag = { probe: pd.outerHTML.slice(0, 160), ready: document.readyState,
     styles: Array.from(document.querySelectorAll('style')).map((st) => (st.parentNode && st.parentNode.nodeName) + ':' + st.textContent.length + ':' + st.textContent.slice(-60)) };
   window.__volantSelfTest = JSON.stringify(r);
 })(); 'started'"#;
