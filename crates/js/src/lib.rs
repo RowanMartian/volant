@@ -17,22 +17,22 @@ pub mod parse;
 
 pub use interp::{Interp, Value};
 
-/// Runs a script; returns what it printed with console.log, or the error.
+/// Runs a script. Returns what it printed with console.log, and how it ended:
+/// `Err` holds an uncaught exception or a syntax error.
 ///
 /// It runs on its own thread with a large stack, so deep (but bounded) JS
 /// recursion can't overflow the caller's stack.
-pub fn run(src: &str) -> Result<Vec<String>, String> {
+pub fn run(src: &str) -> (Vec<String>, Result<(), String>) {
     let src = src.to_string();
-    std::thread::Builder::new()
-        .stack_size(256 << 20)
-        .spawn(move || {
-            let mut i = Interp::new();
-            i.run(&src)?;
-            Ok(i.output)
-        })
-        .map_err(|e| e.to_string())?
-        .join()
-        .map_err(|_| "the script crashed the interpreter".to_string())?
+    let spawned = std::thread::Builder::new().stack_size(256 << 20).spawn(move || {
+        let mut i = Interp::new();
+        let r = i.run(&src).map(|_| ());
+        (std::mem::take(&mut i.output), r)
+    });
+    match spawned {
+        Ok(h) => h.join().unwrap_or_else(|_| (Vec::new(), Err("the script crashed the interpreter".into()))),
+        Err(e) => (Vec::new(), Err(e.to_string())),
+    }
 }
 
 #[cfg(test)]

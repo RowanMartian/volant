@@ -2,8 +2,8 @@ use crate::run;
 
 fn out(src: &str) -> String {
     match run(src) {
-        Ok(lines) => lines.join("\n"),
-        Err(e) => format!("ERROR {e}"),
+        (lines, Ok(())) => lines.join("\n"),
+        (_, Err(e)) => format!("ERROR {e}"),
     }
 }
 
@@ -201,4 +201,12 @@ fn a_real_program() {
         console.log([...done].join('>'))
     ";
     assert_eq!(out(src), "the:3 quick:1\n6765\n1>2>3");
+}
+
+#[test]
+fn uri_and_partial_output() {
+    assert_eq!(out("console.log(encodeURIComponent('a b&c/é'), decodeURIComponent('a%20b%26c%2F%C3%A9'), encodeURI('/a b?x=1'))"), "a%20b%26c%2F%C3%A9 a b&c/é /a%20b?x=1");
+    let (printed, r) = run("console.log('before'); missing()");
+    assert_eq!(printed, vec!["before".to_string()]);
+    assert!(r.unwrap_err().contains("ReferenceError"));
 }

@@ -1360,6 +1360,47 @@ pub fn install(i: &mut Interp) {
         }
     }
 
+    // ---------------------------------------------------------- URIs
+    for (name, keep) in [("encodeURIComponent", "-_.!~*'()"), ("encodeURI", "-_.!~*'();/?:@&=+$,#")] {
+        let f = i.native(move |i, _t, a| {
+            let s = i.to_str(&arg(&a, 0))?;
+            let mut out = String::new();
+            for b in s.bytes() {
+                if b.is_ascii_alphanumeric() || keep.as_bytes().contains(&b) {
+                    out.push(b as char);
+                } else {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+            Ok(Value::Str(out.into()))
+        });
+        global(i, name, f);
+    }
+    for name in ["decodeURIComponent", "decodeURI"] {
+        let f = i.native(|i, _t, a| {
+            let s = i.to_str(&arg(&a, 0))?;
+            let b = s.as_bytes();
+            let mut out = Vec::new();
+            let mut k = 0;
+            while k < b.len() {
+                if b[k] == b'%' {
+                    let hex = s.get(k + 1..k + 3).and_then(|h| u8::from_str_radix(h, 16).ok());
+                    let Some(v) = hex else { return i.throw("URIError", "malformed URI sequence") };
+                    out.push(v);
+                    k += 3;
+                } else {
+                    out.push(b[k]);
+                    k += 1;
+                }
+            }
+            match String::from_utf8(out) {
+                Ok(t) => Ok(Value::Str(t.into())),
+                Err(_) => i.throw("URIError", "malformed URI sequence"),
+            }
+        });
+        global(i, name, f);
+    }
+
     // ---------------------------------------------------------- timers
     let set_timeout = i.native(|i, _t, a| {
         let f = arg(&a, 0);

@@ -43,17 +43,13 @@ fn run(args: &[String]) -> Result<(), String> {
         "js" => {
             let src = String::from_utf8(read(arg(1)?)?).map_err(|_| "the script isn't UTF-8".to_string())?;
             let t = std::time::Instant::now();
-            let printed = volant_js::run(&src);
+            let (printed, result) = volant_js::run(&src);
             let ms = t.elapsed().as_secs_f64() * 1000.0;
-            match printed {
-                Ok(lines) => {
-                    for l in lines {
-                        println!("{l}");
-                    }
-                    eprintln!("(ran in {ms:.1} ms)");
-                }
-                Err(e) => return Err(format!("uncaught {e}")),
+            for l in printed {
+                println!("{l}");
             }
+            result.map_err(|e| format!("uncaught {e}"))?;
+            eprintln!("(ran in {ms:.1} ms)");
         }
         "site" => {
             let root = args.get(1).map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
