@@ -293,3 +293,16 @@ fn for_with_expression_init() {
     assert_eq!(out("let i, n; for (i = 5 > 3 ? (n = 1, 0) : 9; i < 3; i++) n += i; console.log(i, n)"), "3 4");
     assert_eq!(out("let s = 'a.b', i, x; for (i = s.indexOf('.'), i === -1 ? (x = 0) : (x = i); x < 3;) x++; console.log(x)"), "3");
 }
+
+#[test]
+fn dates_and_static_blocks() {
+    let src = "
+        const d = new Date(2026, 10, 12, 9, 30)
+        console.log(d.toISOString(), d.getDate(), d.getMonth(), d.getDay())
+        d.setDate(d.getDate() + 30); console.log(d.toISOString())
+        d.setMonth(13); d.setHours(25, 61); console.log(d.toISOString(), Date.UTC(2000, 0, 1))
+        class C { static n = 1; static { C.n += 41 } }
+        console.log(C.n)
+    ";
+    assert_eq!(out(src), "2026-11-12T09:30:00.000Z 12 10 4\n2026-12-12T09:30:00.000Z\n2027-02-13T02:01:00.000Z 946684800000\n42");
+}

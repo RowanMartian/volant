@@ -828,7 +828,9 @@ fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
         },
         None => (text, format!("inline script in {url}")),
     };
-    if code.contains("\nimport ") || code.trim_start().starts_with("import ") || code.contains("\nexport ") {
+    let module = st.borrow().dom.attr(id, "type").map(|t| t.trim().eq_ignore_ascii_case("module")).unwrap_or(false);
+    let uses_modules = |c: &str| c.contains("\nimport ") || c.trim_start().starts_with("import ") || c.contains("\nexport ") || c.trim_start().starts_with("export ") || c.contains(";export{") || c.contains(";export ");
+    if uses_modules(&code) || (module && (code.contains("import ") || code.contains("export "))) {
         return Err(format!("{origin}: modules (import/export) aren't supported yet"));
     }
     Ok((code, origin))

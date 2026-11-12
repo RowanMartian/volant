@@ -572,10 +572,6 @@
   D.toLocaleString = function () { return this.toLocaleDateString() + ', ' + this.toLocaleTimeString() }
   D.toDateString = function () { return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][this.getDay()] + ' ' + months[this.getMonth()] + ' ' + String(this.getDate()).padStart(2, '0') + ' ' + this.getFullYear() }
   D.toUTCString = D.toGMTString = function () { return this.toDateString() + ' ' + this.toISOString().slice(11, 19) + ' GMT' }
-  D.getMilliseconds = D.getMilliseconds || function () { return this.getTime() % 1000 }
-  D.setTime = function (t) { return this.constructor === Date ? (Object.assign(this, { __t: t }), t) : t }
-  if (!Date.UTC) Date.UTC = (y, m, d, h, mi, s) => new Date(String(y).padStart(4, '0') + '-' + String((m || 0) + 1).padStart(2, '0') + '-' + String(d || 1).padStart(2, '0') + 'T' + String(h || 0).padStart(2, '0') + ':' + String(mi || 0).padStart(2, '0') + ':' + String(s || 0).padStart(2, '0') + 'Z').getTime()
-  if (!Date.parse) Date.parse = s => new Date(s).getTime()
   const A = Array.prototype
   A.findLast = A.findLast || function (f, t) { for (let i = this.length - 1; i >= 0; i--) if (f.call(t, this[i], i, this)) return this[i] }
   A.findLastIndex = A.findLastIndex || function (f, t) { for (let i = this.length - 1; i >= 0; i--) if (f.call(t, this[i], i, this)) return i; return -1 }

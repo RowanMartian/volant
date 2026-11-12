@@ -23,6 +23,8 @@ pub struct Token {
     /// A line break came before it (for automatic semicolon insertion).
     pub nl: bool,
     pub line: u32,
+    /// The character offset in the source (minified scripts are one long line).
+    pub at: u32,
 }
 
 const PUNCTS: &[&str] = &[
@@ -70,7 +72,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         let start_nl = nl;
         nl = false;
         let tok_line = line;
-        let push = |out: &mut Vec<Token>, tok: Tok| out.push(Token { tok, nl: start_nl, line: tok_line });
+        let tok_at = i as u32;
+        let push = |out: &mut Vec<Token>, tok: Tok| out.push(Token { tok, nl: start_nl, line: tok_line, at: tok_at });
         if c.is_ascii_digit() || (c == '.' && s.get(i + 1).map(|d| d.is_ascii_digit()).unwrap_or(false)) {
             let start = i;
             if c == '0' && matches!(s.get(i + 1), Some('x' | 'X' | 'b' | 'B' | 'o' | 'O')) {
@@ -223,7 +226,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             None => return Err(format!("line {line}: unexpected character {c:?}")),
         }
     }
-    out.push(Token { tok: Tok::Eof, nl: true, line });
+    out.push(Token { tok: Tok::Eof, nl: true, line, at: s.len() as u32 });
     Ok(out)
 }
 
@@ -342,6 +345,8 @@ pub enum Member {
     Set(Rc<Func>),
     /// `name = value;` (or just `name;`)
     Field(Option<Expr>),
+    /// `static { ... }`
+    StaticBlock(Vec<Stmt>),
 }
 
 #[derive(Debug)]
@@ -402,6 +407,20 @@ pub struct Parser {
 
 type R<T> = Result<T, String>;
 
+/// A place in the source, for error messages: "3", or "1, char 52011" in a long line.
+#[derive(Clone, Copy)]
+pub struct Where(pub u32, pub u32);
+
+impl std::fmt::Display for Where {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0 == 1 && self.1 > 200 {
+            write!(f, "1, char {}", self.1)
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
 fn binary_prec(op: &str) -> Option<u8> {
     Some(match op {
         "??" => 1,
@@ -450,8 +469,9 @@ impl Parser {
     fn nl_before(&self) -> bool {
         self.toks[self.i].nl
     }
-    fn line(&self) -> u32 {
-        self.toks[self.i].line
+    fn line(&self) -> Where {
+        let t = &self.toks[self.i];
+        Where(t.line, t.at)
     }
     fn next(&mut self) -> Tok {
         let t = self.toks[self.i].tok.clone();
@@ -780,7 +800,7 @@ impl Parser {
     fn func_rest(&mut self, name: Option<Rc<str>>) -> R<Rc<Func>> {
         let (is_async, is_gen) = (std::mem::take(&mut self.next_async), std::mem::take(&mut self.next_gen));
         let outer = std::mem::replace(&mut self.in_gen, is_gen);
-        let line = self.line();
+        let line = self.line().0;
         let r = (|| {
             self.expect("(")?;
             let params = self.params()?;
@@ -815,9 +835,15 @@ impl Parser {
             if self.eat(";") {
                 continue;
             }
-            let is_static = self.is_word("static") && !matches!(self.peek_at(1), Tok::Punct("("));
+            let is_static = self.is_word("static") && !matches!(self.peek_at(1), Tok::Punct("(" | "=" | ";" | "}"));
             if is_static {
                 self.next();
+                if self.is("{") {
+                    // A static initialisation block.
+                    let body = self.block()?;
+                    members.push((Expr::Str("".into()), Member::StaticBlock(body), true));
+                    continue;
+                }
             }
             let mut accessor = None;
             for w in ["get", "set"] {
@@ -989,7 +1015,7 @@ impl Parser {
     fn arrow_body(&mut self, params: Vec<Expr>) -> R<Expr> {
         let is_async = std::mem::take(&mut self.next_async);
         let outer = std::mem::replace(&mut self.in_gen, false);
-        let line = self.line();
+        let line = self.line().0;
         let r = (|| {
             if self.is("{") {
                 let body = self.block()?;

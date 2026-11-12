@@ -1344,6 +1344,7 @@ impl Interp {
                     }
                     target.borrow_mut().set_slot(&key, Slot::Accessor(g, st));
                 }
+                Member::StaticBlock(body) => statics.push(Stmt::Block(body.clone())),
                 Member::Field(init) => {
                     let value = init.clone().unwrap_or(Expr::Undefined);
                     let assign = Stmt::Expr(Expr::Assign("=", Box::new(Expr::Member(Box::new(Expr::This), Box::new(Expr::Str(key)), false)), Box::new(value)));
@@ -1364,6 +1365,10 @@ impl Interp {
             if let Value::Obj(c) = &ctor {
                 c.borrow_mut().set_own(FIELDS, f);
             }
+        }
+        if let Some(n) = &name {
+            // Static initialisers can refer to the class by name.
+            sc.borrow_mut().vars.insert(n.clone(), (ctor.clone(), true));
         }
         if !statics.is_empty() {
             let init = Rc::new(Func { name: None, params: vec![], body: statics, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 });

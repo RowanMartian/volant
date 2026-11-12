@@ -1415,8 +1415,23 @@ pub fn install(i: &mut Interp) {
         let is_new = matches!(&t, Value::Obj(o) if o.borrow().get_own("__new__").is_some());
         let ms = match a.first() {
             None => now(),
+            // new Date(year, month, day, hours, minutes, seconds, ms)
+            Some(_) if a.len() >= 2 => {
+                let mut p = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+                for (k, v) in a.iter().take(7).enumerate() {
+                    p[k] = i.to_number(v)?;
+                }
+                if (0.0..100.0).contains(&p[0]) {
+                    p[0] += 1900.0;
+                }
+                make_time(p)
+            }
             Some(Value::Num(n)) => *n,
             Some(Value::Str(s)) => parse_date(s),
+            Some(Value::Obj(o)) if matches!(o.borrow().kind, Kind::Date(_)) => match o.borrow().kind {
+                Kind::Date(t) => t,
+                _ => f64::NAN,
+            },
             Some(v) => i.to_number(v)?,
         };
         if !is_new {
@@ -1425,6 +1440,56 @@ pub fn install(i: &mut Interp) {
         Ok(i.obj(Kind::Date(ms)))
     });
     def(i, &date, "now", move |_i, _t, _a| Ok(Value::Num(now())));
+    def(i, &date, "UTC", |i, _t, a| {
+        let mut p = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        for (k, v) in a.iter().take(7).enumerate() {
+            p[k] = i.to_number(v)?;
+        }
+        Ok(Value::Num(make_time(p)))
+    });
+    def(i, &date, "parse", |i, _t, a| {
+        let s = i.to_str(&arg(&a, 0))?;
+        Ok(Value::Num(parse_date(&s)))
+    });
+    def(i, &dp, "setTime", |i, t, a| {
+        let ms = i.to_number(&arg(&a, 0))?;
+        if let Value::Obj(o) = &t {
+            if let Kind::Date(d) = &mut o.borrow_mut().kind {
+                *d = ms;
+                return Ok(Value::Num(ms));
+            }
+        }
+        i.throw("TypeError", "not a Date")
+    });
+    // setFullYear … setMilliseconds (and their UTC twins; Volant's local time is UTC).
+    for (name, at) in [("FullYear", 0usize), ("Month", 1), ("Date", 2), ("Hours", 3), ("Minutes", 4), ("Seconds", 5), ("Milliseconds", 6)] {
+        for n in [format!("set{name}"), format!("setUTC{name}")] {
+            def(i, &dp, &n, move |i, t, a| {
+                let Value::Obj(o) = &t else { return i.throw("TypeError", "not a Date") };
+                let Kind::Date(ms) = o.borrow().kind else { return i.throw("TypeError", "not a Date") };
+                let mut p = time_parts(ms);
+                for (k, v) in a.iter().enumerate() {
+                    if at + k < 7 {
+                        p[at + k] = i.to_number(v)?;
+                    }
+                }
+                let new = make_time(p);
+                if let Kind::Date(d) = &mut o.borrow_mut().kind {
+                    *d = new;
+                }
+                Ok(Value::Num(new))
+            });
+        }
+    }
+    for n in ["getMilliseconds", "getUTCMilliseconds"] {
+        def(i, &dp, n, |i, t, _a| match &t {
+            Value::Obj(o) => match o.borrow().kind {
+                Kind::Date(ms) => Ok(Value::Num(ms.rem_euclid(1000.0))),
+                _ => i.throw("TypeError", "not a Date"),
+            },
+            _ => i.throw("TypeError", "not a Date"),
+        });
+    }
     let this_time = |i: &Interp, t: &Value| -> Res<f64> {
         match t {
             Value::Obj(o) => match &o.borrow().kind {
@@ -1524,6 +1589,35 @@ pub fn install(i: &mut Interp) {
     let _ = |c: &Callable| matches!(c, Callable::Native(_));
     let _ = to_i32;
     let _ = str_to_number;
+}
+
+/// Days from 1970-01-01 to a civil date (month 1–12).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// ms since the epoch from (year, month 0–11, day, h, m, s, ms), any of them overflowing.
+fn make_time(p: [f64; 7]) -> f64 {
+    if p.iter().any(|x| !x.is_finite()) {
+        return f64::NAN;
+    }
+    let y = p[0].trunc() as i64 + (p[1].trunc() as i64).div_euclid(12);
+    let m = (p[1].trunc() as i64).rem_euclid(12) + 1;
+    let days = days_from_civil(y, m, 1) as f64 + p[2].trunc() - 1.0;
+    days * 86_400_000.0 + p[3].trunc() * 3_600_000.0 + p[4].trunc() * 60_000.0 + p[5].trunc() * 1000.0 + p[6].trunc()
+}
+
+/// (year, month 0–11, day, h, m, s, ms) of a time.
+fn time_parts(ms: f64) -> [f64; 7] {
+    let s = date_string(ms);
+    let f = |a: usize, b: usize| s.get(a..b).and_then(|x| x.parse::<f64>().ok()).unwrap_or(f64::NAN);
+    [f(0, 4), f(5, 7) - 1.0, f(8, 10), f(11, 13), f(14, 16), f(17, 19), ms.rem_euclid(1000.0)]
 }
 
 /// `Date.parse` for the ISO forms (`2026-11-12`, `2026-11-12T06:47:13Z`).
