@@ -192,6 +192,11 @@ pub struct Interp {
     steps: u64,
     pub max_steps: u64,
     depth: u32,
+    /// How deep JS calls may nest. Each level costs native stack, so callers
+    /// that raise it run the interpreter on a thread with a large stack.
+    pub max_depth: u32,
+    /// The names of the JS functions being called, innermost last (for error messages).
+    pub call_names: Vec<(Option<Rc<str>>, u32)>,
 }
 
 impl Default for Interp {
@@ -234,6 +239,8 @@ impl Interp {
             steps: 0,
             max_steps: 50_000_000,
             depth: 0,
+            max_depth: 400,
+            call_names: Vec::new(),
         };
         crate::builtins::install(&mut i);
         i
@@ -877,9 +884,14 @@ impl Interp {
 
     pub fn call(&mut self, f: &Value, this: Value, args: Vec<Value>) -> Res<Value> {
         self.depth += 1;
-        if self.depth > 400 {
+        if self.depth > self.max_depth {
             self.depth -= 1;
-            return self.throw("RangeError", "too much recursion");
+            // Name the functions going round, to make the loop findable.
+            let mut names: Vec<String> = Vec::new();
+            for (n, line) in self.call_names.iter().rev().take(12) {
+                names.push(format!("{}:{line}", n.as_deref().unwrap_or("function")));
+            }
+            return self.throw("RangeError", &format!("too much recursion (in {})", names.join(" ← ")));
         }
         let r = self.call_inner(f, this, args);
         self.depth -= 1;
@@ -919,6 +931,18 @@ impl Interp {
         match callable {
             None => self.throw("TypeError", "not a function"),
             Some((func, parent, lexical, sup)) => {
+                self.call_names.push((func.name.clone(), func.line));
+                let r = self.call_closure(f, o, func, parent, lexical, sup, this, args);
+                self.call_names.pop();
+                r
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_closure(&mut self, f: &Value, o: &Obj, func: Rc<Func>, parent: Scope, lexical: Option<Value>, sup: Option<Value>, this: Value, args: Vec<Value>) -> Res<Value> {
+        {
+            {
                 let this_v = if func.arrow { lexical } else { Some(this) };
                 let sc = scope(Some(&parent), true, if func.arrow { None } else { this_v.clone() });
                 if !func.arrow {
@@ -1257,7 +1281,7 @@ impl Interp {
             } else {
                 vec![]
             };
-            Rc::new(Func { name: name.clone(), params: vec![], body, arrow: false, expr_body: false, is_async: false, is_gen: false })
+            Rc::new(Func { name: name.clone(), params: vec![], body, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 })
         });
         let ctor = self.closure(&ctor_func, sc);
         let proto = match self.get(&ctor, "prototype")? {
@@ -1334,7 +1358,7 @@ impl Interp {
         // Instance fields run as a hidden initialiser: before the constructor
         // body in a base class, right after super() in a derived one.
         if !fields.is_empty() {
-            let init = Rc::new(Func { name: None, params: vec![], body: fields, arrow: false, expr_body: false, is_async: false, is_gen: false });
+            let init = Rc::new(Func { name: None, params: vec![], body: fields, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 });
             let f = self.closure(&init, sc);
             set_super(&f, parent.clone());
             if let Value::Obj(c) = &ctor {
@@ -1342,7 +1366,7 @@ impl Interp {
             }
         }
         if !statics.is_empty() {
-            let init = Rc::new(Func { name: None, params: vec![], body: statics, arrow: false, expr_body: false, is_async: false, is_gen: false });
+            let init = Rc::new(Func { name: None, params: vec![], body: statics, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 });
             let f = self.closure(&init, sc);
             self.call(&f, ctor.clone(), vec![])?;
         }

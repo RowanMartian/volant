@@ -218,3 +218,21 @@ fn broken_scripts_dont_stop_the_page() {
     let c = console(&mut rt);
     assert!(c.contains("ReferenceError") && c.contains("SyntaxError") && c.contains("couldn't load https://example.com/dir/missing.js") && c.contains("too long"), "{c}");
 }
+
+#[test]
+fn inserted_scripts_run_and_fire_load() {
+    let mut rt = page(
+        r#"<body><p id="ext"></p><p id="note"></p><script>
+          const s = document.createElement('script')
+          s.src = 'app.js'
+          s.onload = () => { document.getElementById('note').textContent = 'loaded ' + document.getElementById('ext').textContent }
+          document.head.appendChild(s)
+          const inline = document.createElement('script')
+          inline.textContent = 'window.fromInline = 7'
+          document.body.append(inline)
+          setTimeout(() => console.log('inline', window.fromInline), 5)
+        </script></body>"#,
+    );
+    assert_eq!(text_of(&rt, "note"), "loaded external ran");
+    assert_eq!(console(&mut rt), "inline 7");
+}

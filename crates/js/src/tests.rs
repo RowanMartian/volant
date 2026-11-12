@@ -287,3 +287,9 @@ fn generators_iterators_symbols() {
     "#;
     assert_eq!(out(src), "0 1 2 {\"value\":\"end\",\"done\":true} 0,1,2,3\n1\na,b,1,2\n1,2,3,4,5 symbol symbol\nv 0\nv 1\nv 2\na 1,2 2 0:1\nx 1");
 }
+
+#[test]
+fn for_with_expression_init() {
+    assert_eq!(out("let i, n; for (i = 5 > 3 ? (n = 1, 0) : 9; i < 3; i++) n += i; console.log(i, n)"), "3 4");
+    assert_eq!(out("let s = 'a.b', i, x; for (i = s.indexOf('.'), i === -1 ? (x = 0) : (x = i); x < 3;) x++; console.log(x)"), "3");
+}

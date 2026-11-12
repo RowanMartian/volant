@@ -83,6 +83,8 @@ pub enum Track {
 pub enum Display {
     Block,
     Inline,
+    /// An atomic inline box: laid out as a block, placed on a line like an image.
+    InlineBlock,
     ListItem,
     None,
     Flex,
@@ -199,6 +201,12 @@ pub struct Style {
     pub caption_bottom: bool,
     /// 0 (invisible) to 1.
     pub opacity: f32,
+    /// Painted through a CSS mask (icons): the background alone would be a solid square.
+    pub masked: bool,
+    /// A table's `cellpadding`, passed down to its cells.
+    pub cell_padding: Option<f32>,
+    /// Whether CSS set the padding (then `cellpadding` doesn't apply).
+    pub padding_set: bool,
     /// `overflow` other than `visible`: content is clipped to the padding box.
     pub overflow_clip: bool,
     /// `transform: translate(x, y)` (percentages of the box's own size).
@@ -271,6 +279,9 @@ impl Default for Style {
             border_box: false,
             caption_bottom: false,
             opacity: 1.0,
+            masked: false,
+            cell_padding: None,
+            padding_set: false,
             overflow_clip: false,
             translate: None,
             min_width: Len::Auto,
@@ -310,7 +321,7 @@ li { display: list-item }
 table { display: table }
 thead, tbody, tfoot { display: table-row-group }
 tr { display: table-row }
-td, th { display: table-cell; padding: 1px }
+td, th { display: table-cell }
 th { font-weight: bold; text-align: center }
 caption { display: table-caption; text-align: center }
 colgroup, col { display: none }
@@ -319,6 +330,7 @@ svg, iframe, object, embed, audio, map, dialog:not([open]), input[type=hidden], 
 button { padding: 1px 6px; background: #e9e9ed; border-radius: 4px }
 input, select, textarea { display: inline-block; border: 1px solid #8f8f9d; border-radius: 4px; padding: 2px 4px; background: #fff; color: #000; font-size: 13.3333px; white-space: pre; vertical-align: middle }
 input, select { min-width: 150px }
+select { white-space: nowrap }
 textarea { min-width: 180px; min-height: 2.6em; white-space: pre-wrap; font-family: monospace }
 input[type=submit], input[type=button], input[type=reset], input[type=image] { min-width: 0; background: #e9e9ed; padding: 1px 6px }
 input[type=checkbox], input[type=radio] { min-width: 0; width: 13px; height: 13px; padding: 0; text-align: center; line-height: 13px; font-size: 11px; border-radius: 3px }
@@ -351,6 +363,7 @@ s, strike, del { text-decoration: line-through }
 small, sub, sup { font-size: smaller }
 big { font-size: larger }
 center { text-align: center }
+center table { text-align: left; margin-left: auto; margin-right: auto }
 a:link { color: #0000ee; text-decoration: underline }
 hr { border-top: 1px solid #888; margin: .5em 0 }
 mark { background-color: yellow; color: black }
@@ -878,11 +891,15 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
     }
     let em = s.font_size;
     let len = |x: &str| parse_len(x, em, rem);
+    if d.name.starts_with("padding") {
+        s.padding_set = true;
+    }
     match d.name.as_str() {
         "display" => {
             s.display = match lower.as_str() {
                 "none" | "table-column" | "table-column-group" => Display::None,
-                "inline" | "inline-block" | "contents" => Display::Inline,
+                "inline" | "contents" => Display::Inline,
+                "inline-block" => Display::InlineBlock,
                 "list-item" => Display::ListItem,
                 "flex" | "inline-flex" | "-webkit-box" | "-webkit-flex" => Display::Flex,
                 "grid" | "inline-grid" => Display::Grid,
@@ -1011,6 +1028,7 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         "visibility" => s.hidden = lower == "hidden" || lower == "collapse",
         "box-sizing" => s.border_box = lower == "border-box",
         "caption-side" => s.caption_bottom = lower == "bottom",
+        "mask" | "mask-image" | "-webkit-mask" | "-webkit-mask-image" => s.masked = lower.contains("url(") || lower.contains("gradient("),
         "opacity" => {
             let t = lower.trim();
             let v = match t.strip_suffix('%') {
@@ -1590,9 +1608,43 @@ pub fn compute(dom: &Dom, author_css: &[String], env: &Env) -> Styled {
         if tag == "html" {
             rem = s.font_size;
         }
-        if let Some(w) = attr(attrs, "width").and_then(|w| w.trim().trim_end_matches("px").parse::<f32>().ok()) {
-            if matches!(tag, "td" | "th" | "table" | "col") && s.width == Len::Auto {
-                s.width = Len::Px(w);
+        if matches!(tag, "td" | "th" | "table" | "col" | "img" | "hr" | "iframe" | "canvas" | "video") && s.width == Len::Auto {
+            if let Some(w) = attr(attrs, "width").map(str::trim) {
+                if let Some(p) = w.strip_suffix('%').and_then(|p| p.trim().parse::<f32>().ok()) {
+                    s.width = Len::Pct(p);
+                } else if let Ok(px) = w.trim_end_matches("px").parse::<f32>() {
+                    s.width = Len::Px(px);
+                }
+            }
+        }
+        // bgcolor and friends, from before CSS.
+        if let Some(c) = attr(attrs, "bgcolor").and_then(parse_color) {
+            if s.background.a == 0 {
+                s.background = c;
+            }
+        }
+        if tag == "body" {
+            if let Some(c) = attr(attrs, "text").and_then(parse_color) {
+                s.color = c;
+            }
+        }
+        if tag == "table" {
+            if let Some(px) = attr(attrs, "cellpadding").and_then(|v| v.trim().parse::<f32>().ok()) {
+                s.cell_padding = Some(px);
+            }
+        }
+        if matches!(tag, "td" | "th") && !s.padding_set {
+            // cellpadding comes down through the row (and row group) to the cells; 1px otherwise.
+            s.padding = [Len::Px(parent.cell_padding.unwrap_or(1.0)); 4];
+        }
+        if matches!(tag, "tr" | "tbody" | "thead" | "tfoot") {
+            s.cell_padding = parent.cell_padding;
+        }
+        if matches!(tag, "td" | "th" | "tr" | "div" | "p" | "table") {
+            if let Some(a) = attr(attrs, "valign").map(|v| v.to_ascii_lowercase()) {
+                if a == "middle" || a == "center" {
+                    s.valign = VAlign::Middle;
+                }
             }
         }
         // Raised or lowered text: its own vertical-align plus its inline ancestors'.

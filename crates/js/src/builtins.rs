@@ -32,23 +32,47 @@ fn ctor(i: &mut Interp, name: &str, proto: &Obj, f: impl Fn(&mut Interp, Value, 
     fo
 }
 
-/// Runs `f` on the array behind `this`.
-fn with_array<T>(i: &Interp, this: &Value, f: impl FnOnce(&mut Vec<Value>) -> T) -> Res<T> {
-    if let Value::Obj(o) = this {
-        if let Kind::Array(a) = &mut o.borrow_mut().kind {
-            return Ok(f(a));
-        }
+/// Runs `f` on the array behind `this`; array-likes (`length` and indices,
+/// as jQuery objects are) are read into a vector and written back.
+fn with_array<T>(i: &mut Interp, this: &Value, f: impl FnOnce(&mut Vec<Value>) -> T) -> Res<T> {
+    let Value::Obj(o) = this else { return i.throw("TypeError", "not an array") };
+    if let Kind::Array(a) = &mut o.borrow_mut().kind {
+        return Ok(f(a));
     }
-    i.throw("TypeError", "not an array")
+    let len = i.get(this, "length")?;
+    let n = i.to_number(&len)?;
+    let n = if n.is_finite() && n > 0.0 { (n as usize).min(10_000_000) } else { 0 };
+    let mut v = Vec::with_capacity(n);
+    for k in 0..n {
+        v.push(i.get(this, &k.to_string())?);
+    }
+    let r = f(&mut v);
+    for (k, x) in v.iter().enumerate() {
+        i.set(this, &k.to_string(), x.clone())?;
+    }
+    for k in v.len()..n {
+        o.borrow_mut().delete(&k.to_string());
+    }
+    i.set(this, "length", Value::Num(v.len() as f64))?;
+    Ok(r)
 }
 
-fn items(i: &mut Interp, this: &Value) -> Res<Vec<Value>> {
-    if let Value::Obj(o) = this {
-        if let Kind::Array(a) = &o.borrow().kind {
-            return Ok(a.clone());
+/// The elements of an array or array-like (`length` and indices), as Array methods see them.
+pub fn items(i: &mut Interp, this: &Value) -> Res<Vec<Value>> {
+    match this {
+        Value::Obj(o) => {
+            if let Kind::Array(a) = &o.borrow().kind {
+                return Ok(a.clone());
+            }
+            let len = i.get(this, "length")?;
+            let n = i.to_number(&len)?;
+            let n = if n.is_finite() && n > 0.0 { (n as usize).min(10_000_000) } else { 0 };
+            (0..n).map(|k| i.get(this, &k.to_string())).collect()
         }
+        Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string().into())).collect()),
+        Value::Undefined | Value::Null => i.throw("TypeError", "Array method called on null or undefined"),
+        _ => Ok(Vec::new()),
     }
-    i.iterate(this)
 }
 
 fn int_arg(i: &mut Interp, a: &[Value], k: usize, default: f64) -> Res<f64> {
@@ -349,16 +373,36 @@ pub fn install(i: &mut Interp) {
             _ => false,
         }))
     });
-    def(i, &op, "toString", |_i, t, _a| {
-        Ok(Value::Str(
-            match &t {
-                Value::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)) => "[object Array]",
-                Value::Undefined => "[object Undefined]",
-                Value::Null => "[object Null]",
-                _ => "[object Object]",
+    def(i, &op, "toString", |i, t, _a| {
+        let tag: String = match &t {
+            Value::Undefined => "Undefined".into(),
+            Value::Null => "Null".into(),
+            Value::Bool(_) => "Boolean".into(),
+            Value::Num(_) => "Number".into(),
+            Value::Str(_) => "String".into(),
+            Value::Obj(o) => {
+                // An explicit [Symbol.toStringTag] wins (DOM objects, window, Math, JSON…).
+                if let Ok(Value::Str(tag)) = i.get(&t, "\0@toStringTag") {
+                    tag.to_string()
+                } else {
+                    match &o.borrow().kind {
+                        Kind::Array(_) => "Array".into(),
+                        Kind::Function(_) => "Function".into(),
+                        Kind::Error => "Error".into(),
+                        Kind::Date(_) => "Date".into(),
+                        Kind::RegExp(..) => "RegExp".into(),
+                        Kind::Map(_) => "Map".into(),
+                        Kind::Set(_) => "Set".into(),
+                        Kind::Promise(_) => "Promise".into(),
+                        Kind::Boxed(Value::Num(_)) => "Number".into(),
+                        Kind::Boxed(Value::Str(_)) => "String".into(),
+                        Kind::Boxed(Value::Bool(_)) => "Boolean".into(),
+                        _ => "Object".into(),
+                    }
+                }
             }
-            .into(),
-        ))
+        };
+        Ok(Value::Str(format!("[object {tag}]").into()))
     });
     def(i, &op, "valueOf", |_i, t, _a| Ok(t));
     def(i, &op, "isPrototypeOf", |_i, t, a| {
@@ -430,6 +474,17 @@ pub fn install(i: &mut Interp) {
         }
         Ok(o)
     });
+    def(i, &object, "hasOwn", |i, _t, a| {
+        let o = arg(&a, 0);
+        let k = i.key(&arg(&a, 1))?;
+        Ok(Value::Bool(match &o {
+            Value::Obj(ob) => {
+                let b = ob.borrow();
+                b.get_own(&k).is_some() || matches!(&b.kind, Kind::Array(arr) if k.parse::<usize>().map(|x| x < arr.len()).unwrap_or(false) || &*k == "length")
+            }
+            _ => false,
+        }))
+    });
     def(i, &object, "getPrototypeOf", |i, _t, a| i.get(&arg(&a, 0), "__proto__"));
     def(i, &object, "setPrototypeOf", |i, _t, a| {
         let o = arg(&a, 0);
@@ -484,11 +539,36 @@ pub fn install(i: &mut Interp) {
         let n = i.to_str(&n)?;
         Ok(Value::Str(format!("function {n}() {{ [code] }}").into()))
     });
-    let fv = i.native(|i, _t, _a| i.throw("Error", "creating functions from strings isn't supported"));
+    // new Function(a, b, body): compiled from source, in the global scope.
+    let fv = i.native(|i, _t, a| {
+        let mut parts = Vec::new();
+        for v in &a {
+            parts.push(i.to_str(v)?.to_string());
+        }
+        let body = parts.pop().unwrap_or_default();
+        let src = format!("(function anonymous({}\n) {{\n{body}\n}})", parts.join(","));
+        match i.run(&src) {
+            Ok(f) => Ok(f),
+            Err(e) => i.throw("SyntaxError", &e),
+        }
+    });
     if let Value::Obj(fo) = &fv {
         fo.borrow_mut().set_own("prototype", Value::Obj(fp.clone()));
     }
     global(i, "Function", fv);
+    // eval: indirect (global) eval, which is what most code needs.
+    let eval = i.native(|i, _t, a| match arg(&a, 0) {
+        Value::Str(code) => match i.run(&code) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let (name, msg) = e.split_once(": ").unwrap_or(("Error", &e));
+                let name = if ["SyntaxError", "TypeError", "ReferenceError", "RangeError"].contains(&name) { name.to_string() } else { "Error".to_string() };
+                i.throw(&name, msg)
+            }
+        },
+        other => Ok(other),
+    });
+    global(i, "eval", eval);
 
     // ---------------------------------------------------------- Array
     let ap = i.array_proto.clone();
@@ -1137,6 +1217,7 @@ pub fn install(i: &mut Interp) {
         seed.set(x);
         Ok(Value::Num((x >> 11) as f64 / (1u64 << 53) as f64))
     });
+    mo.borrow_mut().set_own("\0@toStringTag", Value::Str("Math".into()));
     global(i, "Math", math);
 
     // ---------------------------------------------------------- JSON
@@ -1160,6 +1241,7 @@ pub fn install(i: &mut Interp) {
             None => i.throw("SyntaxError", "JSON.parse: not valid JSON"),
         }
     });
+    jo.borrow_mut().set_own("\0@toStringTag", Value::Str("JSON".into()));
     global(i, "JSON", json);
 
     // ---------------------------------------------------------- errors

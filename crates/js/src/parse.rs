@@ -356,6 +356,8 @@ pub struct Func {
     pub is_async: bool,
     /// `function*`
     pub is_gen: bool,
+    /// Where it starts in the source (for error messages).
+    pub line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -778,11 +780,12 @@ impl Parser {
     fn func_rest(&mut self, name: Option<Rc<str>>) -> R<Rc<Func>> {
         let (is_async, is_gen) = (std::mem::take(&mut self.next_async), std::mem::take(&mut self.next_gen));
         let outer = std::mem::replace(&mut self.in_gen, is_gen);
+        let line = self.line();
         let r = (|| {
             self.expect("(")?;
             let params = self.params()?;
             let body = self.block()?;
-            Ok(Rc::new(Func { name, params, body, arrow: false, expr_body: false, is_async, is_gen }))
+            Ok(Rc::new(Func { name, params, body, arrow: false, expr_body: false, is_async, is_gen, line }))
         })();
         self.in_gen = outer;
         r
@@ -879,7 +882,13 @@ impl Parser {
     }
 
     fn continue_expr(&mut self, left: Expr) -> R<Expr> {
-        let e = self.assign_rest(left)?;
+        let assigns = ["=", "+=", "-=", "*=", "/=", "%=", "**=", "<<=", ">>=", ">>>=", "&=", "|=", "^=", "&&=", "||=", "??="].iter().any(|o| self.is(o));
+        let e = if assigns {
+            self.assign_rest(left)?
+        } else {
+            let b = self.binary_from(left, 0)?;
+            self.conditional_rest(b)?
+        };
         if self.is(",") {
             let mut list = vec![e];
             while self.eat(",") {
@@ -980,13 +989,14 @@ impl Parser {
     fn arrow_body(&mut self, params: Vec<Expr>) -> R<Expr> {
         let is_async = std::mem::take(&mut self.next_async);
         let outer = std::mem::replace(&mut self.in_gen, false);
+        let line = self.line();
         let r = (|| {
             if self.is("{") {
                 let body = self.block()?;
-                Ok(Expr::Func(Rc::new(Func { name: None, params, body, arrow: true, expr_body: false, is_async, is_gen: false })))
+                Ok(Expr::Func(Rc::new(Func { name: None, params, body, arrow: true, expr_body: false, is_async, is_gen: false, line })))
             } else {
                 let e = self.assign()?;
-                Ok(Expr::Func(Rc::new(Func { name: None, params, body: vec![Stmt::Return(Some(e))], arrow: true, expr_body: true, is_async, is_gen: false })))
+                Ok(Expr::Func(Rc::new(Func { name: None, params, body: vec![Stmt::Return(Some(e))], arrow: true, expr_body: true, is_async, is_gen: false, line })))
             }
         })();
         self.in_gen = outer;
@@ -995,6 +1005,10 @@ impl Parser {
 
     fn conditional(&mut self) -> R<Expr> {
         let c = self.binary(0)?;
+        self.conditional_rest(c)
+    }
+
+    fn conditional_rest(&mut self, c: Expr) -> R<Expr> {
         if self.eat("?") {
             let a = self.assign()?;
             self.expect(":")?;
@@ -1005,7 +1019,11 @@ impl Parser {
     }
 
     fn binary(&mut self, min: u8) -> R<Expr> {
-        let mut left = self.unary_and_postfix()?;
+        let left = self.unary_and_postfix()?;
+        self.binary_from(left, min)
+    }
+
+    fn binary_from(&mut self, mut left: Expr, min: u8) -> R<Expr> {
         loop {
             let op = match self.peek() {
                 Tok::Punct(p) => *p,
@@ -1233,6 +1251,7 @@ impl Parser {
                             expr_body: false,
                             is_async: false,
                             is_gen: false,
+                            line: 0,
                         }))),
                         vec![],
                         false,

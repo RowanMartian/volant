@@ -452,17 +452,17 @@ pub fn install(i: &mut Interp) {
     // Built-in collections hand out iterators.
     let ap = i.array_proto.clone();
     let array_values = i.native(|i, t, _a| {
-        let items = i.iterate(&t)?;
+        let items = crate::builtins::items(i, &t)?;
         Ok(make_iter(i, items))
     });
     ap.borrow_mut().set_own(SYM_ITERATOR, array_values.clone());
     ap.borrow_mut().set_own("values", array_values);
     def(i, &ap, "keys", |i, t, _a| {
-        let n = i.iterate(&t)?.len();
+        let n = crate::builtins::items(i, &t)?.len();
         Ok(make_iter(i, (0..n).map(|k| Value::Num(k as f64)).collect()))
     });
     def(i, &ap, "entries", |i, t, _a| {
-        let items = i.iterate(&t)?;
+        let items = crate::builtins::items(i, &t)?;
         let pairs = items.into_iter().enumerate().map(|(k, v)| i.array(vec![Value::Num(k as f64), v])).collect();
         Ok(make_iter(i, pairs))
     });
@@ -642,7 +642,12 @@ pub fn install(i: &mut Interp) {
     });
     global(i, "requestAnimationFrame", raf);
     let idle = i.native(|i, _t, a| {
-        let id = i.add_timer(arg(&a, 0), 1.0, vec![], false);
+        // The callback gets a deadline: plenty of idle time.
+        let deadline = i.obj(Kind::Plain);
+        let left = i.native(|_i, _t, _a| Ok(Value::Num(50.0)));
+        i.set(&deadline, "timeRemaining", left)?;
+        i.set(&deadline, "didTimeout", Value::Bool(false))?;
+        let id = i.add_timer(arg(&a, 0), 1.0, vec![deadline], false);
         Ok(Value::Num(id as f64))
     });
     global(i, "requestIdleCallback", idle);

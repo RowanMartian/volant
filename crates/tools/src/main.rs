@@ -12,6 +12,8 @@
 //!                                              draw a page with Volant's own engine
 //!                                              (--reader: as Reader view of URL; images
 //!                                              without a known size are drawn 3:2)
+//!     [--scripts URL] [--eval JS]              …after running the page's JavaScript as at URL
+//!                                              (other files fetched with curl; console printed)
 //! volant-tools js FILE.js                      run a script with Volant's own JavaScript engine
 //! ```
 
@@ -19,6 +21,35 @@ mod site;
 
 use std::path::{Path, PathBuf};
 use volant_core::{hash, macho, zip};
+
+/// The network for page scripts in previews: curl (where it's installed).
+struct CurlHost;
+
+impl volant_engine::script::Host for CurlHost {
+    fn fetch(&self, method: &str, url: &str, body: Option<&str>) -> Option<(u16, String, Vec<u8>)> {
+        if !url.starts_with("http") {
+            return None;
+        }
+        let mut cmd = std::process::Command::new("curl");
+        cmd.args(["-sL", "--max-time", "20", "-X", method, "-w", "\n%{http_code} %{content_type}", url]);
+        if let Some(b) = body {
+            cmd.args(["--data-binary", b]);
+        }
+        let out = cmd.output().ok()?;
+        let mut body = out.stdout;
+        let nl = body.iter().rposition(|&b| b == b'\n')?;
+        let tail = String::from_utf8_lossy(&body[nl + 1..]).to_string();
+        body.truncate(nl);
+        let (code, ty) = tail.split_once(' ').unwrap_or((&tail, ""));
+        // VOLANT_DUMP=dir keeps a copy of everything fetched (for debugging pages).
+        if let Ok(dir) = std::env::var("VOLANT_DUMP") {
+            let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+            let _ = std::fs::write(format!("{dir}/{n:03}.txt"), &body);
+            eprintln!("fetched {n:03}: {url}");
+        }
+        Some((code.parse().ok()?, ty.to_string(), body))
+    }
+}
 
 /// For previews: every image is a 1200 x 800 photo (nothing is downloaded).
 struct PreviewImages;
@@ -114,7 +145,42 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             let env = volant_engine::Env { width, dark: flag("--dark").is_some() };
             let started = std::time::Instant::now();
-            let page = volant_engine::render_in(&doc, &sheets, env, &volant_engine::ApproxFonts, &PreviewImages);
+            let page = match value("--scripts") {
+                Some(url) => {
+                    use volant_engine::script;
+                    let host: std::rc::Rc<dyn script::Host> = std::rc::Rc::new(CurlHost);
+                    let mut rt = script::Runtime::new(&doc, &url, env, host.clone());
+                    let setup = started.elapsed();
+                    rt.run_scripts();
+                    let ran = started.elapsed();
+                    if let Some(code) = value("--eval") {
+                        match rt.interp.run(&code) {
+                            Ok(v) => {
+                                let shown = rt.interp.to_str(&v).map(|s| s.to_string()).unwrap_or_default();
+                                println!("eval: {shown}");
+                            }
+                            Err(e) => println!("eval error: {e}"),
+                        }
+                    }
+                    for line in rt.take_console() {
+                        let n = line.chars().count();
+                        println!("console: {}", if n > 400 { format!("{}…{}", line.chars().take(120).collect::<String>(), line.chars().skip(n - 260).collect::<String>()) } else { line });
+                    }
+                    let snap = rt.snapshot();
+                    // Linked style sheets, fetched too (unless given with --css).
+                    if !args.iter().any(|a| a == "--css") {
+                        for (href, media) in script::stylesheet_links(&snap.dom, &snap.url) {
+                            if let Some((200..=299, _, b)) = host.fetch("GET", &href, None) {
+                                let text = String::from_utf8_lossy(&b).into_owned();
+                                sheets.push(if media.is_empty() || media == "all" { text } else { format!("@media {media} {{\n{text}\n}}") });
+                            }
+                        }
+                    }
+                    println!("scripts: set up in {:.0} ms, ran in {:.0} ms", setup.as_secs_f64() * 1000.0, (ran - setup).as_secs_f64() * 1000.0);
+                    script::render_snapshot(&snap, &sheets, env, &volant_engine::ApproxFonts, &PreviewImages)
+                }
+                None => volant_engine::render_in(&doc, &sheets, env, &volant_engine::ApproxFonts, &PreviewImages),
+            };
             let took = started.elapsed();
             write(out, volant_engine::svg::to_svg(&page).as_bytes())?;
             println!("{out}: {} x {} px, {} items, {} links, laid out in {:.1} ms", page.width, page.height.ceil(), page.items.len(), page.links.len(), took.as_secs_f64() * 1000.0);
@@ -126,7 +192,13 @@ fn run(args: &[String]) -> Result<(), String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(e) = run(&args) {
+    // Page scripts nest deeply: give them the stack a browser's content thread has.
+    let worker = std::thread::Builder::new().stack_size(volant_engine::script::STACK).spawn(move || run(&args));
+    let result = match worker {
+        Ok(h) => h.join().unwrap_or_else(|_| Err("crashed".into())),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = result {
         eprintln!("volant-tools: {e}");
         std::process::exit(1);
     }

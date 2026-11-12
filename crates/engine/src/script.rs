@@ -42,6 +42,8 @@ impl Host for NoHost {
 const WINDOW: NodeId = NodeId::MAX;
 const FRAGMENT: &str = "#document-fragment";
 const COMMENT: &str = "#comment";
+/// The native stack a thread running a [`Runtime`] needs.
+pub const STACK: usize = 512 << 20;
 /// The step budget for each script and each event (about a second of work).
 const BUDGET: u64 = 30_000_000;
 
@@ -77,6 +79,8 @@ pub struct State {
     pub navigate: Option<String>,
     cookies: Vec<(String, String)>,
     current_script: Option<NodeId>,
+    /// Scripts already run (or scheduled), so moving one doesn't run it again.
+    ran: std::collections::HashSet<NodeId>,
     host: Rc<dyn Host>,
     protos: Option<Protos>,
     /// Bumped on every change to the document (so the app knows to lay it out again).
@@ -302,6 +306,46 @@ fn import(dom: &mut Dom, src: &Dom) -> NodeId {
         copy(dom, src, c, frag);
     }
     frag
+}
+
+/// Makes sure there's an `html` with a `head` and a `body`, as browsers always build.
+fn ensure_structure(dom: &mut Dom) {
+    let el = |name: &str| Data::Element { name: name.into(), attrs: Vec::new() };
+    let html = match dom.find("html") {
+        Some(h) => h,
+        None => {
+            let h = new_node(dom, el("html"));
+            for c in dom.children(ROOT).to_vec() {
+                let _ = insert(dom, h, c, None);
+            }
+            let _ = insert(dom, ROOT, h, None);
+            h
+        }
+    };
+    let head = match dom.find("head") {
+        Some(h) => h,
+        None => {
+            let h = new_node(dom, el("head"));
+            let first = dom.children(html).first().copied();
+            let _ = insert(dom, html, h, first);
+            h
+        }
+    };
+    if dom.find("body").is_none() {
+        let b = new_node(dom, el("body"));
+        let head_like = |d: &Dom, n: NodeId| matches!(d.tag(n), Some("title" | "meta" | "link" | "base")) || matches!(&d.nodes[n as usize].data, Data::Text(t) if t.trim().is_empty());
+        for c in dom.children(html).to_vec() {
+            if c == head {
+                continue;
+            }
+            if head_like(dom, c) {
+                let _ = insert(dom, head, c, None);
+            } else {
+                let _ = insert(dom, b, c, None);
+            }
+        }
+        let _ = insert(dom, html, b, None);
+    }
 }
 
 const VOID: &[&str] = &["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"];
@@ -764,6 +808,81 @@ fn fire(i: &mut Interp, st: &S, target: NodeId, ty: &str, bubbles: bool) -> bool
     dispatch(i, st, target, &ev)
 }
 
+// ------------------------------------------------------------------ scripts
+
+fn is_js(dom: &Dom, id: NodeId) -> bool {
+    let ty = dom.attr(id, "type").unwrap_or("").trim().to_ascii_lowercase();
+    (ty.is_empty() || ty == "module" || ty.contains("javascript") || ty.contains("ecmascript")) && dom.attr(id, "nomodule").is_none()
+}
+
+/// A script's source: inline, or fetched from its `src`.
+fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
+    let (src, text, url, host) = {
+        let s = st.borrow();
+        (s.dom.attr(id, "src").map(|x| resolve_url(&s.url, x)), s.dom.text(id), s.url.clone(), s.host.clone())
+    };
+    let (code, origin) = match src {
+        Some(abs) => match host.fetch("GET", &abs, None) {
+            Some((200..=299, _, body)) => (String::from_utf8_lossy(&body).into_owned(), abs),
+            _ => return Err(format!("couldn't load {abs}")),
+        },
+        None => (text, format!("inline script in {url}")),
+    };
+    if code.contains("\nimport ") || code.trim_start().starts_with("import ") || code.contains("\nexport ") {
+        return Err(format!("{origin}: modules (import/export) aren't supported yet"));
+    }
+    Ok((code, origin))
+}
+
+/// Runs one script element now (fetching it if needed), then fires load or error at it.
+fn execute(i: &mut Interp, st: &S, id: NodeId) {
+    let ok = match script_source(st, id) {
+        Ok((code, origin)) => {
+            let prev = st.borrow_mut().current_script.replace(id);
+            let r = i.run(&code);
+            st.borrow_mut().current_script = prev;
+            if let Err(e) = r {
+                i.errors.push(format!("{origin}: {e}"));
+            }
+            true
+        }
+        Err(e) => {
+            i.errors.push(e);
+            false
+        }
+    };
+    fire(i, st, id, if ok { "load" } else { "error" }, false);
+}
+
+/// Scripts that just entered the document run soon after (as browsers do for inserted scripts).
+fn inserted(i: &mut Interp, st: &S, node: NodeId) {
+    let new: Vec<NodeId> = {
+        let s = st.borrow();
+        if !connected(&s.dom, node) {
+            return;
+        }
+        let mut all = vec![node];
+        all.extend(descendants(&s.dom, node));
+        all.into_iter().filter(|&n| s.dom.tag(n) == Some("script") && !s.ran.contains(&n) && is_js(&s.dom, n)).collect()
+    };
+    for n in new {
+        let empty = {
+            let s = st.borrow();
+            s.dom.attr(n, "src").is_none() && s.dom.text(n).trim().is_empty()
+        };
+        if empty {
+            continue; // its text may come later
+        }
+        st.borrow_mut().ran.insert(n);
+        let st2 = st.clone();
+        let job = i.native(move |i, _t, _a| {
+            execute(i, &st2, n);
+            Ok(Value::Undefined)
+        });
+        i.add_timer(job, 0.0, Vec::new(), false);
+    }
+}
+
 // ------------------------------------------------------------------ forms
 
 fn closest(dom: &Dom, mut id: NodeId, pred: impl Fn(&Dom, NodeId) -> bool) -> Option<NodeId> {
@@ -1081,6 +1200,12 @@ fn install(i: &mut Interp, st: &S) {
         i.global_obj.borrow_mut().set_own(name, f);
     }
 
+    // Object.prototype.toString tags (libraries tell plain objects from host objects by these).
+    for (o, tag) in [(&element, "HTMLElement"), (&text, "Text"), (&document, "HTMLDocument"), (&node, "Node"), (&event, "Event"), (&class_list, "DOMTokenList"), (&style_p, "CSSStyleDeclaration")] {
+        o.borrow_mut().set_own("\0@toStringTag", str_val(tag));
+    }
+    i.global_obj.borrow_mut().set_own("\0@toStringTag", str_val("Window"));
+
     // ---------------------------------------------------------- events
     def(i, &event, "preventDefault", |i, t, _a| {
         if matches!(i.get(&t, "cancelable"), Ok(Value::Bool(true))) {
@@ -1343,11 +1468,16 @@ fn install(i: &mut Interp, st: &S) {
     });
     fn insert_js(i: &mut Interp, st: &S, parent: NodeId, child: &Value, before: Option<NodeId>) -> Res<Value> {
         let Some(c) = node_of(child) else { return i.throw("TypeError", "the argument is not a Node") };
+        let is_frag = st.borrow().dom.tag(c) == Some(FRAGMENT);
+        let moved: Vec<NodeId> = if is_frag { st.borrow().dom.children(c).to_vec() } else { vec![c] };
         let r = insert(&mut st.borrow_mut().dom, parent, c, before);
         if let Err(e) = r {
             return i.throw("HierarchyRequestError", e);
         }
         changed(st);
+        for n in moved {
+            inserted(i, st, n);
+        }
         Ok(child.clone())
     }
     method(i, st, &node, "appendChild", |i, st, id, a| insert_js(i, st, id, &arg(&a, 0), None));
@@ -1394,12 +1524,21 @@ fn install(i: &mut Interp, st: &S) {
         Ok(out)
     }
     fn place(i: &mut Interp, st: &S, parent: NodeId, nodes: Vec<NodeId>, before: Option<NodeId>) -> Res<Value> {
+        let mut moved = Vec::new();
         for n in nodes {
+            if st.borrow().dom.tag(n) == Some(FRAGMENT) {
+                moved.extend(st.borrow().dom.children(n).to_vec());
+            } else {
+                moved.push(n);
+            }
             if let Err(e) = insert(&mut st.borrow_mut().dom, parent, n, before) {
                 return i.throw("HierarchyRequestError", e);
             }
         }
         changed(st);
+        for n in moved {
+            inserted(i, st, n);
+        }
         Ok(Value::Undefined)
     }
     method(i, st, &node, "append", |i, st, id, a| {
@@ -1747,6 +1886,7 @@ fn install(i: &mut Interp, st: &S) {
         if let Some(n) = node_of(&el) {
             adjacent(&mut st.borrow_mut().dom, id, &pos, n);
             changed(st);
+            inserted(i, st, n);
         }
         Ok(el)
     });
@@ -2455,7 +2595,8 @@ const PRELUDE: &str = include_str!("prelude.js");
 impl Runtime {
     /// Parses `html` (keeping scripts) and sets up the page's JavaScript world; runs nothing yet.
     pub fn new(html: &str, url: &str, env: Env, host: Rc<dyn Host>) -> Runtime {
-        let dom = html::parse_with_scripts(html);
+        let mut dom = html::parse_with_scripts(html);
+        ensure_structure(&mut dom);
         let state = Rc::new(RefCell::new(State {
             dom,
             url: url.to_string(),
@@ -2470,12 +2611,15 @@ impl Runtime {
             navigate: None,
             cookies: Vec::new(),
             current_script: None,
+            ran: std::collections::HashSet::new(),
             host,
             protos: None,
             generation: 1,
             computed: None,
         }));
         let mut interp = Interp::new();
+        // Real pages nest calls deeply (module loaders, jQuery); run on a big stack (see STACK).
+        interp.max_depth = 3000;
         install(&mut interp, &state);
         interp.reset_steps(BUDGET);
         if let Err(e) = interp.run(PRELUDE) {
@@ -2484,31 +2628,18 @@ impl Runtime {
         Runtime { interp, state, started: std::time::Instant::now() }
     }
 
-    /// The scripts to run, in order: (node, source text, where it came from).
-    fn scripts(&self) -> Vec<(NodeId, Option<String>, String)> {
+    /// The document's scripts, in the order they run (deferred ones last).
+    fn scripts(&self) -> Vec<NodeId> {
         let s = self.state.borrow();
-        let mut normal = Vec::new();
-        let mut deferred = Vec::new();
+        let (mut normal, mut deferred) = (Vec::new(), Vec::new());
         for id in descendants(&s.dom, ROOT) {
-            if s.dom.tag(id) != Some("script") {
+            if s.dom.tag(id) != Some("script") || !is_js(&s.dom, id) {
                 continue;
             }
-            let ty = s.dom.attr(id, "type").unwrap_or("").trim().to_ascii_lowercase();
-            let js = ty.is_empty() || ty == "module" || ty.contains("javascript") || ty.contains("ecmascript");
-            if !js || s.dom.attr(id, "nomodule").is_some() {
-                continue;
-            }
-            let entry = match s.dom.attr(id, "src") {
-                Some(src) => {
-                    let abs = resolve_url(&s.url, src);
-                    (id, None, abs)
-                }
-                None => (id, Some(s.dom.text(id)), format!("inline script {}", normal.len() + deferred.len() + 1)),
-            };
             if s.dom.attr(id, "defer").is_some() && s.dom.attr(id, "src").is_some() {
-                deferred.push(entry);
+                deferred.push(id);
             } else {
-                normal.push(entry);
+                normal.push(id);
             }
         }
         normal.extend(deferred);
@@ -2517,28 +2648,12 @@ impl Runtime {
 
     /// Runs the page's scripts, then DOMContentLoaded and load, then what they scheduled (about a second's worth).
     pub fn run_scripts(&mut self) {
-        let host = self.state.borrow().host.clone();
-        for (id, text, origin) in self.scripts() {
-            let src = match text {
-                Some(t) => t,
-                None => match host.fetch("GET", &origin, None) {
-                    Some((200..=299, _, body)) => String::from_utf8_lossy(&body).into_owned(),
-                    _ => {
-                        self.interp.errors.push(format!("couldn't load {origin}"));
-                        continue;
-                    }
-                },
-            };
-            if src.contains("\nimport ") || src.trim_start().starts_with("import ") || src.contains("\nexport ") {
-                self.interp.errors.push(format!("{origin}: modules (import/export) aren't supported yet"));
+        for id in self.scripts() {
+            if !self.state.borrow_mut().ran.insert(id) {
                 continue;
             }
-            self.state.borrow_mut().current_script = Some(id);
             self.interp.reset_steps(BUDGET);
-            if let Err(e) = self.interp.run(&src) {
-                self.interp.errors.push(format!("{origin}: {e}"));
-            }
-            self.state.borrow_mut().current_script = None;
+            execute(&mut self.interp, &self.state, id);
         }
         self.state.borrow_mut().current_script = None;
         self.interp.reset_steps(BUDGET);

@@ -32,6 +32,7 @@ pub fn run(src: &str) -> (Vec<String>, Result<(), String>) {
     let src = src.to_string();
     let spawned = std::thread::Builder::new().stack_size(256 << 20).spawn(move || {
         let mut i = Interp::new();
+        i.max_depth = 4000;
         let r = i.run(&src).map(|_| ());
         // Then the event loop: timers in order of their (virtual) due times.
         i.run_jobs(f64::INFINITY, 100_000);

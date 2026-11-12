@@ -155,6 +155,8 @@ enum Inline {
     Open(NodeId),
     Close(NodeId),
     Image { node: NodeId, img: Img, link: Option<usize> },
+    /// An inline-block.
+    Block(Box<BlockBox>, Option<usize>),
     Float(Box<BlockBox>),
     /// An absolutely positioned (or fixed) box, at its place in the flow.
     Abs(Box<BlockBox>),
@@ -358,11 +360,22 @@ impl Builder<'_> {
                     run.push(Inline::Float(Box::new(b)));
                     return;
                 }
-                if tag == Some("img") && s.display == Display::Inline {
+                if tag == Some("img") && matches!(s.display, Display::Inline | Display::InlineBlock) {
                     run.push(Inline::Image { node: id, img: self.img(id), link });
                     return;
                 }
                 match s.display {
+                    Display::InlineBlock => {
+                        let link = match (tag, self.dom.attr(id, "href")) {
+                            (Some("a"), Some(h)) => {
+                                self.hrefs.push(h.to_string());
+                                Some(self.hrefs.len() - 1)
+                            }
+                            _ => link,
+                        };
+                        let b = self.block(id, 0);
+                        run.push(Inline::Block(Box::new(b), link));
+                    }
                     Display::Inline => {
                         if tag == Some("br") {
                             run.push(Inline::Break { style: id });
@@ -426,6 +439,8 @@ enum Kind {
     Open,
     Close,
     Image,
+    /// An inline-block (geometry in `image`, the box in `float`).
+    Block,
     Float,
     Abs,
 }
@@ -443,11 +458,13 @@ struct Atom<'r> {
     /// Images: (left margin, width, height, src).
     image: Option<(f32, f32, f32, &'r str)>,
     float: Option<&'r BlockBox>,
+    /// How far an inline-block reaches below the baseline (its first line's baseline).
+    drop: f32,
 }
 
 impl Atom<'_> {
     fn content(&self) -> bool {
-        matches!(self.kind, Kind::Word | Kind::Space | Kind::Image)
+        matches!(self.kind, Kind::Word | Kind::Space | Kind::Image | Kind::Block)
     }
 }
 
@@ -731,6 +748,14 @@ impl<'r> Ctx<'_> {
         (min + frame, max.max(min) + frame)
     }
 
+    /// Whether a box has text in it (so it has a baseline).
+    fn has_text(&self, b: &BlockBox) -> bool {
+        b.children.iter().any(|c| match c {
+            Child::Inline(run) => run.iter().any(|i| matches!(i, Inline::Text { text, .. } if !text.trim().is_empty())),
+            Child::Block(cb) => self.has_text(cb),
+        })
+    }
+
     /// Each column's minimum and maximum width.
     fn columns(&mut self, t: &Table) -> (Vec<f32>, Vec<f32>) {
         let n = t.rows.iter().map(|(_, cells)| cells.iter().map(|c| c.1).sum::<usize>()).max().unwrap_or(0);
@@ -899,7 +924,7 @@ impl<'r> Ctx<'_> {
         let border_w = content_w + frame;
         // Background and borders go under the content: insert them before it.
         let mut under = Vec::new();
-        if s.background.a > 0 {
+        if s.background.a > 0 && !s.masked {
             under.push(Item::Rect { x: box_x, y, w: border_w, h: height, color: s.background, radius: s.radius });
         }
         let sides = [(box_x, y, border_w, bw[0]), (box_x + border_w - bw[1], y, bw[1], height), (box_x, y + height - bw[2], border_w, bw[2]), (box_x, y, bw[3], height)];
@@ -1025,11 +1050,12 @@ impl<'r> Ctx<'_> {
 
     /// A box's height when laid out `w` wide (border box), without painting anything.
     fn measure_block(&mut self, b: &BlockBox, w: f32) -> f32 {
-        let (ni, nl) = (self.items.len(), self.links.len());
+        let (ni, nl, nh) = (self.items.len(), self.links.len(), self.hits.len());
         let floats = self.floats.clone();
         let h = self.block(b, 0.0, 0.0, w, Opts { bfc: true, width: Some(w), ..Default::default() });
         self.items.truncate(ni);
         self.links.truncate(nl);
+        self.hits.truncate(nh);
         self.floats = floats;
         h
     }
@@ -1418,6 +1444,7 @@ impl<'r> Ctx<'_> {
             inside: inside.clone(),
             image: None,
             float: None,
+            drop: 0.0,
         };
         for item in run {
             match item {
@@ -1448,6 +1475,38 @@ impl<'r> Ctx<'_> {
                         atoms.push(a);
                         last_space = false;
                     }
+                }
+                Inline::Block(b, link) => {
+                    let s = self.styles[b.node as usize].clone();
+                    let (ml, mr) = (s.margin[3].resolve(cb_w), s.margin[1].resolve(cb_w));
+                    let pad: [f32; 4] = std::array::from_fn(|i| s.padding[i].resolve(cb_w));
+                    let frame = pad[1] + pad[3] + s.border_width[1] + s.border_width[3];
+                    let border_box = |l: Len| if s.border_box { l.resolve(cb_w) } else { l.resolve(cb_w) + frame };
+                    let mut w = if s.width != Len::Auto {
+                        border_box(s.width)
+                    } else {
+                        let (mn, mx) = self.intrinsic(b);
+                        if cb_w > 0.0 { mx.min(cb_w - ml - mr).max(mn) } else { mx }
+                    };
+                    if s.min_width != Len::Auto {
+                        w = w.max(border_box(s.min_width));
+                    }
+                    if let Len::Px(_) | Len::Pct(_) | Len::Mix(..) = s.max_width {
+                        if s.width == Len::Auto {
+                            w = w.min(border_box(s.max_width)).max(0.0);
+                        }
+                    }
+                    let h = self.measure_block(b, w);
+                    // Its baseline is its first line's: the bottom padding and border, plus the text's descent.
+                    let f = font_of(&s);
+                    let (asc, desc) = (self.fonts.ascent(&f), self.fonts.descent(&f));
+                    let drop = if self.has_text(b) { (pad[2] + s.border_width[2] + (s.line_height - asc - desc) / 2.0 + desc).min(h) } else { 0.0 };
+                    let mut a = atom(Kind::Block, String::new(), ml + w + mr, b.node, *link, &inside);
+                    a.image = Some((ml, w, h, ""));
+                    a.float = Some(b);
+                    a.drop = drop;
+                    atoms.push(a);
+                    last_space = false;
                 }
                 Inline::Float(b) => {
                     let mut a = atom(Kind::Float, String::new(), 0.0, b.node, None, &inside);
@@ -1508,7 +1567,7 @@ impl<'r> Ctx<'_> {
         let bs = self.styles[block as usize].clone();
         let atoms = self.atoms(run, width);
         let pre = |s: &Style| matches!(s.space, Space::Pre | Space::PreWrap);
-        if !atoms.iter().any(|a| matches!(a.kind, Kind::Word | Kind::Image | Kind::Break | Kind::Float | Kind::Abs) || (a.kind == Kind::Space && pre(&self.styles[a.style as usize]))) {
+        if !atoms.iter().any(|a| matches!(a.kind, Kind::Word | Kind::Image | Kind::Block | Kind::Break | Kind::Float | Kind::Abs) || (a.kind == Kind::Space && pre(&self.styles[a.style as usize]))) {
             return 0.0;
         }
         let mut queue: VecDeque<Atom<'r>> = atoms.into();
@@ -1518,7 +1577,7 @@ impl<'r> Ctx<'_> {
             // Too narrow beside the floats for the next word or image: go below them.
             let (mut left, mut right) = self.span(top, est, x, width);
             for _ in 0..64 {
-                let need = queue.iter().find(|a| matches!(a.kind, Kind::Word | Kind::Image)).map(|a| a.w).unwrap_or(0.0);
+                let need = queue.iter().find(|a| matches!(a.kind, Kind::Word | Kind::Image | Kind::Block)).map(|a| a.w).unwrap_or(0.0);
                 if need <= right - left + FIT {
                     break;
                 }
@@ -1589,7 +1648,7 @@ impl<'r> Ctx<'_> {
                     let mut head = Atom { text: piece, w: pw, ..a };
                     if !tail.is_empty() {
                         let tw = self.measure(&tail, &font);
-                        let more = Atom { kind: Kind::Word, text: tail, w: tw, style: head.style, link: head.link, inside: head.inside.clone(), image: None, float: None };
+                        let more = Atom { kind: Kind::Word, text: tail, w: tw, style: head.style, link: head.link, inside: head.inside.clone(), image: None, float: None, drop: 0.0 };
                         queue.push_front(more);
                         split = true;
                         head.kind = Kind::Word;
@@ -1646,14 +1705,14 @@ impl<'r> Ctx<'_> {
                     above = above.max(half + asc - s.shift);
                     below = below.max(half + desc + s.shift);
                 }
-                Kind::Image => {
+                Kind::Image | Kind::Block => {
                     let h = a.image.map(|i| i.2).unwrap_or(0.0);
                     if s.valign == VAlign::Middle {
                         above = above.max(h / 2.0 + mid);
                         below = below.max(h / 2.0 - mid);
                     } else {
-                        above = above.max(h - s.shift);
-                        below = below.max(s.shift);
+                        above = above.max(h - a.drop - s.shift);
+                        below = below.max(a.drop + s.shift);
                     }
                 }
                 _ => {}
@@ -1692,7 +1751,7 @@ impl<'r> Ctx<'_> {
             let y0 = baseline + s.shift - self.fonts.ascent(&f) - px_only(s.padding[0]) - s.border_width[0];
             let y1 = baseline + s.shift + self.fonts.descent(&f) + px_only(s.padding[2]) + s.border_width[2];
             self.hits.push(Hit { x: x0, y: y0.min(top), w: (x1 - x0).max(0.0), h: (y1 - y0).max(line_h), node: e });
-            if s.background.a == 0 {
+            if s.background.a == 0 || s.masked {
                 continue;
             }
             self.items.push(Item::Rect { x: x0, y: y0, w: (x1 - x0).max(0.0), h: y1 - y0, color: s.background, radius: s.radius });
@@ -1703,6 +1762,18 @@ impl<'r> Ctx<'_> {
         while i < line.len() {
             let a = &line[i];
             match a.kind {
+                Kind::Block => {
+                    let s = self.styles[a.style as usize].clone();
+                    if let (Some((ml, w, h, _)), Some(b)) = (a.image, a.float) {
+                        let y = if s.valign == VAlign::Middle { baseline - mid - h / 2.0 } else { baseline + s.shift + a.drop - h };
+                        let (x, link) = (xs[i] + ml, a.link);
+                        self.block(b, x, y, w, Opts { width: Some(w), bfc: true, ..Default::default() });
+                        if let Some(l) = link {
+                            self.links.push(Link { x, y, w, h, href: self.hrefs[l].clone() });
+                        }
+                    }
+                    i += 1;
+                }
                 Kind::Image => {
                     let s = &self.styles[a.style as usize];
                     if let Some((ml, w, h, src)) = a.image {
