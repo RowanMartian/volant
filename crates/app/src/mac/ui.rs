@@ -20,7 +20,10 @@ pub const SIDEBAR_W: f64 = 252.0;
 pub const INSET: f64 = 8.0;
 /// With the sidebar hidden, a slim strip above the page holds the window
 /// buttons and the button that brings the sidebar back.
-const STRIP_H: f64 = 40.0;
+/// The window buttons stay exactly where they are with the sidebar shown, and
+/// the Show Sidebar button sits beside them at the height of the sidebar's
+/// own buttons (y 13–41), so nothing moves when the sidebar hides.
+const STRIP_H: f64 = 50.0;
 const ROW_H: f64 = 34.0;
 const ROW_GAP: f64 = 2.0;
 const LIST_TOP: f64 = 136.0;
@@ -64,7 +67,7 @@ impl SiteIcon {
     }
 }
 
-const TILE_COLORS: [u32; 8] = [0x1f6bff, 0x7b5cf5, 0xe0457b, 0xf26b3a, 0xe2a400, 0x23a559, 0x0fa5a5, 0x5b6b82];
+const TILE_COLORS: [u32; 8] = [0x0088fe, 0x7b5cf5, 0xe0457b, 0xf26b3a, 0xe2a400, 0x23a559, 0x0fa5a5, 0x5b6b82];
 
 /// Same colour the internal pages pick for a host.
 pub fn tile_color(host: &str) -> Rgba {
@@ -231,7 +234,7 @@ impl Ui {
         root.addSubview(&content);
         let progress = Flipped::new(rect(0.0, 0.0, 0.0, 2.5), mtm);
         progress.setHidden(true);
-        let show_sidebar = IconButton::new(Kind::ShowSidebar, "sidebar.left", 14.0, rect(84.0, 6.0, 28.0, 28.0), "Show Sidebar (⌘S)", mtm);
+        let show_sidebar = IconButton::new(Kind::ShowSidebar, "sidebar.left", 14.0, rect(84.0, 13.0, 28.0, 28.0), "Show Sidebar (⌘S)", mtm);
         show_sidebar.hit.setHidden(true);
         root.addSubview(&show_sidebar.hit);
 
@@ -301,11 +304,11 @@ pub fn layout(b: &mut Browser) {
     let ui = &b.ui;
     ui.sidebar.setHidden(!show);
     ui.sidebar.setFrame(rect(0.0, 0.0, SIDEBAR_W, h));
-    // Lights line up with the sidebar's buttons, or centre in the strip when it's hidden.
-    place_traffic_lights(&b.window, true, if show { 20.0 } else { 13.0 });
+    // Same place whether or not the sidebar is showing.
+    place_traffic_lights(&b.window, true, 20.0);
     ui.show_sidebar.hit.setHidden(show);
     let full_screen = b.window.styleMask().contains(NSWindowStyleMask::FullScreen);
-    ui.show_sidebar.hit.setFrame(rect(if full_screen { 10.0 } else { 84.0 }, 6.0, 28.0, 28.0));
+    ui.show_sidebar.hit.setFrame(rect(if full_screen { 10.0 } else { 84.0 }, 13.0, 28.0, 28.0));
     let (cx, cy) = if show { (SIDEBAR_W, INSET) } else { (INSET, STRIP_H) };
     ui.content.setFrame(rect(cx, cy, w - cx - INSET, h - cy - INSET));
     let cb = ui.content.bounds();

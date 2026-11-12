@@ -50,8 +50,8 @@ pub const LIGHT: Theme = Theme {
     text: hex(0x1d1d1f),
     text2: hex(0x6e6e73),
     text3: hex(0xa1a1a6),
-    accent: hex(0x1f6bff),
-    accent_soft: alpha(hex(0x1f6bff), 0.10),
+    accent: hex(0x0078f0),
+    accent_soft: alpha(hex(0x0078f0), 0.10),
     scrim: alpha(Rgba(0.0, 0.0, 0.0, 1.0), 0.18),
 };
 
@@ -66,8 +66,8 @@ pub const DARK: Theme = Theme {
     text: hex(0xf5f5f7),
     text2: hex(0xa1a1a6),
     text3: hex(0x6e6e73),
-    accent: hex(0x4c8dff),
-    accent_soft: alpha(hex(0x4c8dff), 0.18),
+    accent: hex(0x1f95ff),
+    accent_soft: alpha(hex(0x1f95ff), 0.18),
     scrim: alpha(Rgba(0.0, 0.0, 0.0, 1.0), 0.42),
 };
 

@@ -1,5 +1,9 @@
-<p align="center"><img src="assets/logo.svg" width="96" alt="Volant"></p>
-<h1 align="center">Volant</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark-dark.svg">
+    <img src="assets/wordmark-light.svg" width="360" alt="Volant">
+  </picture>
+</p>
 <p align="center">A featherweight web browser for your Mac. Native, private, and out of your way.</p>
 
 ---
@@ -188,4 +192,4 @@ cargo test -p volant-core
 
 Flat and quiet: no borders, no shadows, no gradients. Surfaces are told apart by fill alone,
 everything you can click has rounded corners, and the system font does the talking.
-The mark is a V with a jet flying through it.
+The mark is a V with a jet breaking away from it, in Volant blue (#0088FE). In square icons the V sits dead centre and the jet flies off to the right.

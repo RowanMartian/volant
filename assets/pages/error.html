@@ -28,7 +28,7 @@ p{color:var(--text2);margin:8px 0 0;line-height:1.5;font-size:14px}
   <div class="actions"><button class="btn primary" id="retry">Try Again</button></div>
 </div>
 <script>
-$('#ic').innerHTML = logo();
+$('#ic').innerHTML = logo('var(--text3)');
 const HINTS = {
   '-1003': ['Can’t find this site', 'Check the address for typos, or search for it instead.'],
   '-1009': ['You’re offline', 'Check your Wi-Fi or network connection, then try again.'],

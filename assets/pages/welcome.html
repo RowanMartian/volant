@@ -15,11 +15,9 @@ body{display:grid;min-height:100vh;place-items:center;padding:40px 24px 56px;bac
 .step.on{display:block}
 @keyframes in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .hero{text-align:center}
-.hero .logo{margin:0 auto 18px;width:112px;height:112px}
-.hero .logo svg{animation:arrive .9s cubic-bezier(.2,.8,.2,1) both}
-.hero .logo svg use{animation:fly 1.1s .15s cubic-bezier(.2,.8,.2,1) both}
+.hero .wordmark{margin:0 auto 20px;width:min(320px,80vw)}
+.hero .wordmark svg{display:block;width:100%;height:auto;animation:arrive .9s cubic-bezier(.2,.8,.2,1) both}
 @keyframes arrive{from{transform:scale(.92);opacity:0}to{transform:none;opacity:1}}
-@keyframes fly{from{transform:translateX(-60px);opacity:0}to{transform:none;opacity:1}}
 h1{font-size:30px;font-weight:700;letter-spacing:-.02em;line-height:1.15}
 h2{font-size:22px;font-weight:700;letter-spacing:-.015em}
 .lead{font-size:15px;color:var(--text2);margin-top:8px;line-height:1.5}
@@ -49,8 +47,7 @@ h2{font-size:22px;font-weight:700;letter-spacing:-.015em}
   <div class="dots" id="dots"></div>
 
   <section class="step hero" data-step="hello">
-    <div class="logo" id="hero-logo"></div>
-    <h1>Welcome to Volant</h1>
+    <h1 class="wordmark" id="hero-logo" aria-label="Welcome to Volant"></h1>
     <p class="lead">A featherweight browser for your Mac.<br>Native, private, and out of your way.</p>
     <div class="facts">
       <div class="fact"><b id="f-size">~2 MB</b><small>to download</small></div>
@@ -112,7 +109,7 @@ function show(i) {
 }
 $$('[data-next]').forEach((b) => b.onclick = () => show(at + 1));
 $$('[data-back]').forEach((b) => b.onclick = () => show(at - 1));
-$('#hero-logo').innerHTML = logo();
+$('#hero-logo').innerHTML = wordmark();
 $('#def-logo').innerHTML = logo();
 if (V.binaryMB) $('#f-size').textContent = V.binaryMB;
 
