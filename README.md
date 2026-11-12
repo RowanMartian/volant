@@ -60,11 +60,13 @@ Today: CSS parsing (selectors with descendant/child/sibling combinators, attribu
 replaced elements (CSS size, attributes, intrinsic ratio, `max-width`); floats with text wrapping around them and
 `clear`; tables (row groups, `colspan`, min/max-content column sizing, equal-height rows, captions); a display list
 of rectangles, text and images. The app measures and draws with the system fonts, loads pictures over Volant's own
-HTTP, and searches the laid-out text for Find on page (`engine_view.rs`). `volant-tools render page.html out.svg
+HTTP, searches the laid-out text for Find on page, and selects and copies text (drag, double/triple-click, shift-click,
+⌘A, ⌘C, keyboard scrolling) through `select.rs`, which maps points to characters and rebuilds plain text with the right
+line and paragraph breaks (`engine_view.rs`). `volant-tools render page.html out.svg
 [--reader URL]` draws to SVG anywhere.
 
 It's used for an opt-in Reader (Settings → Experimental): the extracted article is laid out by the engine and drawn
-natively over the Reader page. Next chunks: text selection and copy, then flexbox and more of CSS, then JavaScript.
+natively over the Reader page. Next chunks: flexbox and more of CSS (enough for simple sites outside Reader), then JavaScript.
 
 ## Blocking engine
 

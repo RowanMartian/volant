@@ -358,7 +358,7 @@ pub fn smoke_test(b: &Browser) {
     let since_exec = super::SHOWN.with(|t| t.get()).unwrap_or_default();
     report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
     let (s1, s2, s3, s4, s5, s6, s7, s8) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone());
-    let (s9, s10, s11, s12) = (shot.clone(), shot.clone(), shot.clone(), shot);
+    let (s9, s10, s11, s12, s13) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
     let (m1, m2) = (mem.clone(), mem);
     let rep = report.clone();
     let dir2 = dir.clone();
@@ -447,7 +447,15 @@ pub fn smoke_test(b: &Browser) {
         rep2.lock().unwrap().push_str(&format!("engine find \"turbojet\": {status}\n"));
         s12("12-engine-find");
     }));
-    step(49.5, Box::new(move |_b| {
+    // Select a paragraph and copy it, as a triple-click and ⌘C would.
+    let rep3 = report.clone();
+    step(49.5, Box::new(move |b| {
+        super::find::close(b);
+        let copied = super::engine_view::select_and_copy(b, "Frank Whittle").unwrap_or_else(|| "(nothing)".into());
+        rep3.lock().unwrap().push_str(&format!("engine copy: {copied:?}\n"));
+    }));
+    step(51.0, Box::new(move |_b| s13("13-engine-select")));
+    step(51.5, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

@@ -18,11 +18,12 @@ pub mod css;
 pub mod fonts;
 pub mod layout;
 pub mod reader;
+pub mod select;
 pub mod style;
 pub mod svg;
 
 pub use fonts::{ApproxFonts, Font, Fonts};
-pub use layout::{Images, Item, Link, NoImages, Page};
+pub use layout::{After, Images, Item, Link, NoImages, Page};
 pub use style::{Color, Family};
 
 /// The `<style>` sheets in a document, in order.

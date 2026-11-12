@@ -35,7 +35,7 @@ pub fn to_svg(page: &Page) -> String {
                     esc(src)
                 ))
             }
-            Item::Text { x, y, text, font, color, underline, strike } => {
+            Item::Text { x, y, text, font, color, underline, strike, .. } => {
                 let family = match font.family {
                     Family::Sans => "Liberation Sans, Arial, Helvetica, sans-serif",
                     Family::Serif => "Liberation Serif, Times New Roman, Times, serif",

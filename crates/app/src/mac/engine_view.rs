@@ -16,13 +16,14 @@ use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, M
 use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSBezierPath, NSColor, NSCompositingOperation, NSCursor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSFontAttributeName, NSFontDescriptorSymbolicTraits,
     NSFontDescriptorSystemDesignSerif, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName,
-    NSScrollView, NSScrollerStyle, NSStrikethroughStyleAttributeName, NSUnderlineStyleAttributeName, NSView, NSWindowOrderingMode,
+    NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSScrollView, NSScrollerStyle, NSStrikethroughStyleAttributeName, NSUnderlineStyleAttributeName, NSView, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSAttributedString, NSData, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use volant_core::tabs::TabId;
+use volant_engine::select::{self, Pos};
 use volant_engine::{Family, Font, Fonts, Images, Item, Page};
 
 /// The most pictures one article loads.
@@ -170,6 +171,12 @@ pub struct EngineIvars {
     images: RefCell<HashMap<String, Retained<NSImage>>>,
     /// Find-on-page matches, and which one is current.
     hits: RefCell<(Vec<NSRect>, usize)>,
+    /// The selection: where it started and where it ends now.
+    sel: Cell<Option<(Pos, Pos)>>,
+    /// Its highlight rectangles.
+    sel_areas: RefCell<Vec<NSRect>>,
+    /// Whether the mouse moved since it went down (a drag selects; a click follows links).
+    dragged: Cell<bool>,
 }
 
 define_class!(
@@ -193,12 +200,51 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, dirty: NSRect) {
             if let Some(page) = self.ivars().page.borrow().as_ref() {
-                paint(page, dirty, &self.ivars().images.borrow(), &self.ivars().hits.borrow());
+                paint(page, dirty, &self.ivars().images.borrow(), &self.ivars().hits.borrow(), &self.ivars().sel_areas.borrow());
+            }
+        }
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, e: &NSEvent) {
+            if let Some(w) = self.window() {
+                w.makeFirstResponder(Some(self));
+            }
+            self.ivars().dragged.set(false);
+            let Some(at) = self.pos_for(e) else { return };
+            let shift = e.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Shift);
+            let page = self.ivars().page.borrow().clone();
+            let Some(page) = page else { return };
+            let sel = match (e.clickCount(), self.ivars().sel.get()) {
+                (_, Some((anchor, _))) if shift => (anchor, at),
+                (2, _) => select::word(&page, at),
+                (n, _) if n >= 3 => select::paragraph(&page, at),
+                _ => (at, at),
+            };
+            self.set_selection(Some(sel));
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, e: &NSEvent) {
+            self.autoscroll(e);
+            let Some(at) = self.pos_for(e) else { return };
+            if let Some((anchor, _)) = self.ivars().sel.get() {
+                self.ivars().dragged.set(true);
+                self.set_selection(Some((anchor, at)));
             }
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, e: &NSEvent) {
+            // A plain click (no drag, nothing selected) follows a link.
+            let selected = self.ivars().sel.get().map(|(a, b)| a != b).unwrap_or(false);
+            if self.ivars().dragged.get() || selected || e.clickCount() != 1 {
+                return;
+            }
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
             let href = self.ivars().page.borrow().as_ref().and_then(|page| {
                 page.links
@@ -211,8 +257,57 @@ define_class!(
             }
         }
 
+        #[unsafe(method(copy:))]
+        fn copy(&self, _sender: Option<&AnyObject>) {
+            let page = self.ivars().page.borrow().clone();
+            if let (Some(page), Some((a, b))) = (page, self.ivars().sel.get()) {
+                let text = select::text(&page, a, b);
+                if !text.is_empty() {
+                    let pb = NSPasteboard::generalPasteboard();
+                    pb.clearContents();
+                    pb.setString_forType(&ns(&text), unsafe { NSPasteboardTypeString });
+                }
+            }
+        }
+
+        #[unsafe(method(selectAll:))]
+        fn select_all(&self, _sender: Option<&AnyObject>) {
+            let all = self.ivars().page.borrow().as_ref().and_then(|p| select::all(p));
+            self.set_selection(all);
+        }
+
+        #[unsafe(method_id(menuForEvent:))]
+        fn menu_for_event(&self, _e: &NSEvent) -> Option<Retained<NSMenu>> {
+            let mtm = MainThreadMarker::from(self);
+            if let Some(w) = self.window() {
+                w.makeFirstResponder(Some(self));
+            }
+            let menu = NSMenu::new(mtm);
+            let copy = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns("Copy"), Some(objc2::sel!(copy:)), &ns("")) };
+            let all = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns("Select All"), Some(objc2::sel!(selectAll:)), &ns("")) };
+            menu.addItem(&copy);
+            menu.addItem(&all);
+            Some(menu)
+        }
+
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> objc2::runtime::Bool {
+            // Copy only when something is selected.
+            let ok = item.action() != Some(objc2::sel!(copy:)) || self.ivars().sel.get().map(|(a, b)| a != b).unwrap_or(false);
+            objc2::runtime::Bool::new(ok)
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, e: &NSEvent) {
+            if !self.scroll_key(e) {
+                let _: () = unsafe { msg_send![super(self), keyDown: e] };
+            }
+        }
+
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
+            // A text cursor over the page, a hand over links.
+            self.addCursorRect_cursor(self.visibleRect(), &NSCursor::IBeamCursor());
             let hand = NSCursor::pointingHandCursor();
             if let Some(page) = self.ivars().page.borrow().as_ref() {
                 for l in &page.links {
@@ -225,8 +320,61 @@ define_class!(
 
 impl EngineView {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(EngineIvars { page: RefCell::new(None), images: RefCell::new(HashMap::new()), hits: RefCell::new((Vec::new(), 0)) });
+        let this = Self::alloc(mtm).set_ivars(EngineIvars {
+            page: RefCell::new(None),
+            images: RefCell::new(HashMap::new()),
+            hits: RefCell::new((Vec::new(), 0)),
+            sel: Cell::new(None),
+            sel_areas: RefCell::new(Vec::new()),
+            dragged: Cell::new(false),
+        });
         unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 100.0, 100.0)] }
+    }
+}
+
+impl EngineView {
+    /// The text position under the mouse.
+    fn pos_for(&self, e: &NSEvent) -> Option<Pos> {
+        let p = self.convertPoint_fromView(e.locationInWindow(), None);
+        let page = self.ivars().page.borrow().clone()?;
+        select::hit(&page, &MacFonts, p.x as f32, p.y as f32)
+    }
+
+    fn set_selection(&self, sel: Option<(Pos, Pos)>) {
+        self.ivars().sel.set(sel);
+        let page = self.ivars().page.borrow().clone();
+        let areas = match (page, sel) {
+            (Some(page), Some((a, b))) if a != b => {
+                select::areas(&page, &MacFonts, a, b).into_iter().map(|r| rect(r.x as f64, r.y as f64, r.w as f64, r.h as f64)).collect()
+            }
+            _ => Vec::new(),
+        };
+        *self.ivars().sel_areas.borrow_mut() = areas;
+        self.setNeedsDisplay(true);
+    }
+
+    /// Space, arrows, Page Up/Down, Home and End scroll the article.
+    fn scroll_key(&self, e: &NSEvent) -> bool {
+        let Some(scroll) = self.enclosingScrollView() else { return false };
+        let key = e.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
+        let shift = e.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Shift);
+        let clip = scroll.contentView();
+        let page_h = clip.bounds().size.height - 40.0;
+        let max_y = (self.frame().size.height - clip.bounds().size.height).max(0.0);
+        let y = clip.bounds().origin.y;
+        let to = match key.chars().next() {
+            Some(' ') => y + if shift { -page_h } else { page_h },
+            Some('\u{f72d}') => y + page_h,     // Page Down
+            Some('\u{f72c}') => y - page_h,     // Page Up
+            Some('\u{f701}') => y + 40.0,       // Down
+            Some('\u{f700}') => y - 40.0,       // Up
+            Some('\u{f729}') => 0.0,            // Home
+            Some('\u{f72b}') => max_y,          // End
+            _ => return false,
+        };
+        clip.scrollToPoint(NSPoint::new(0.0, to.clamp(0.0, max_y)));
+        scroll.reflectScrolledClipView(&clip);
+        true
     }
 }
 
@@ -240,7 +388,7 @@ fn rounded(r: NSRect, radius: f64) -> Retained<NSBezierPath> {
 }
 
 /// Draws the part of the page inside `dirty`.
-fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>, hits: &(Vec<NSRect>, usize)) {
+fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>, hits: &(Vec<NSRect>, usize), selection: &[NSRect]) {
     ns_color(page.background).setFill();
     NSBezierPath::fillRect(dirty);
     for item in &page.items {
@@ -275,7 +423,7 @@ fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>
                 }
                 NSGraphicsContext::restoreGraphicsState_class();
             }
-            Item::Text { x, y, text, font, color, underline, strike } => {
+            Item::Text { x, y, text, font, color, underline, strike, .. } => {
                 let size = font.size as f64;
                 if !intersects(dirty, *x as f64, *y as f64 - size * 1.3, dirty.size.width + 1e6, size * 1.8) {
                     continue;
@@ -284,6 +432,15 @@ fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>
                 let s = attributed(text, &f, Some(&ns_color(*color)), *underline, *strike);
                 // In a flipped view a string's origin is the top of its line; the engine gives the baseline.
                 s.drawAtPoint(NSPoint::new(*x as f64, *y as f64 - f.ascender()));
+            }
+        }
+    }
+    // The selection, in the system's highlight colour.
+    if !selection.is_empty() {
+        NSColor::selectedTextBackgroundColor().colorWithAlphaComponent(0.55).setFill();
+        for r in selection {
+            if intersects(dirty, r.origin.x, r.origin.y, r.size.width, r.size.height) {
+                NSBezierPath::fillRect(*r);
             }
         }
     }
@@ -379,6 +536,8 @@ pub fn sync(b: &Browser) {
         scroll.setDrawsBackground(true);
         let height = (page.height as f64).max(scroll.contentSize().height);
         *view.ivars().page.borrow_mut() = Some(Rc::new(page));
+        // Positions changed with the layout: start a fresh selection.
+        view.set_selection(None);
         view.setFrameSize(NSSize::new(width as f64, height));
         view.setNeedsDisplay(true);
         if let Some(w) = view.window() {
@@ -492,4 +651,20 @@ pub fn clear_find(b: &Browser) {
             v.setNeedsDisplay(true);
         }
     }
+}
+
+/// For the smoke test: selects the paragraph that contains `needle` (as a
+/// triple-click would), copies it through the view's own Copy, and returns
+/// what landed on the pasteboard.
+pub fn select_and_copy(b: &Browser, needle: &str) -> Option<String> {
+    let view = b.engine.0.try_borrow().ok()?.view.clone()?;
+    let page = view.ivars().page.borrow().clone()?;
+    let item = page.items.iter().position(|i| matches!(i, Item::Text { text, .. } if text.contains(needle)))?;
+    let sel = select::paragraph(&page, Pos { item, offset: 0 });
+    view.set_selection(Some(sel));
+    if let Some(r) = view.ivars().sel_areas.borrow().first() {
+        view.scrollRectToVisible(rect(r.origin.x, r.origin.y - 60.0, r.size.width, r.size.height + 200.0));
+    }
+    let _: () = unsafe { msg_send![&*view, copy: std::ptr::null::<AnyObject>()] };
+    NSPasteboard::generalPasteboard().stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string())
 }

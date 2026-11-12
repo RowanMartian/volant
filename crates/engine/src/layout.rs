@@ -28,10 +28,22 @@ use volant_core::html::{Data, Dom, NodeId};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Rect { x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32 },
-    /// `y` is the baseline.
-    Text { x: f32, y: f32, text: String, font: Font, color: Color, underline: bool, strike: bool },
+    /// `y` is the baseline. `after` says what follows it, for copying text.
+    Text { x: f32, y: f32, text: String, font: Font, color: Color, underline: bool, strike: bool, after: After },
     /// An image, scaled to fill the box.
     Image { x: f32, y: f32, w: f32, h: f32, src: String, radius: f32 },
+}
+
+/// What comes after a piece of text: more on its line, a wrapped line, a
+/// forced break (`<br>`, a newline in `pre`), or the end of its block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum After {
+    Inline,
+    /// A space (after a list marker).
+    Space,
+    Wrap,
+    Break,
+    BlockEnd,
 }
 
 /// A clickable area.
@@ -717,7 +729,7 @@ impl<'r> Ctx<'_> {
             let w = self.measure(&marker, &font);
             let (asc, desc) = (self.fonts.ascent(&font), self.fonts.descent(&font));
             let baseline = content_y + (s.line_height - asc - desc) / 2.0 + asc;
-            under.push(Item::Text { x: content_x - w - font.size * 0.5, y: baseline, text: marker, font, color: s.color, underline: false, strike: false });
+            under.push(Item::Text { x: content_x - w - font.size * 0.5, y: baseline, text: marker, font, color: s.color, underline: false, strike: false, after: After::Space });
         }
         self.items.splice(paint_at..paint_at, under);
         height
@@ -915,6 +927,7 @@ impl<'r> Ctx<'_> {
             }
             let mut line: Vec<Atom<'r>> = Vec::new();
             let mut line_w = 0.0;
+            let mut split = false;
             while let Some(a) = queue.pop_front() {
                 let space = self.styles[a.style as usize].space;
                 let wraps = matches!(space, Space::Normal | Space::PreWrap);
@@ -969,6 +982,7 @@ impl<'r> Ctx<'_> {
                         let tw = self.measure(&tail, &font);
                         let more = Atom { kind: Kind::Word, text: tail, w: tw, style: head.style, link: head.link, inside: head.inside.clone(), image: None, float: None };
                         queue.push_front(more);
+                        split = true;
                         head.kind = Kind::Word;
                         line.push(head);
                         break;
@@ -981,14 +995,23 @@ impl<'r> Ctx<'_> {
                 line.push(a);
             }
             if line.iter().any(|a| a.content() || a.kind == Kind::Break) {
-                top += self.paint_line(line, top, left, right - left, &bs);
+                let end = if line.last().map(|a| a.kind == Kind::Break).unwrap_or(false) {
+                    After::Break
+                } else if split {
+                    After::Inline // a word broken across lines rejoins as one
+                } else if queue.iter().any(|a| a.content() || a.kind == Kind::Break) {
+                    After::Wrap
+                } else {
+                    After::BlockEnd
+                };
+                top += self.paint_line(line, top, left, right - left, &bs, end);
             }
         }
         top - y
     }
 
     /// Paints one line box; returns its height.
-    fn paint_line(&mut self, mut line: Vec<Atom<'r>>, top: f32, left: f32, avail: f32, bs: &Style) -> f32 {
+    fn paint_line(&mut self, mut line: Vec<Atom<'r>>, top: f32, left: f32, avail: f32, bs: &Style, end: After) -> f32 {
         // Trailing collapsible spaces go (also before closing edges and a break).
         loop {
             let last = line.iter().rposition(|a| !matches!(a.kind, Kind::Close | Kind::Break));
@@ -1065,6 +1088,7 @@ impl<'r> Ctx<'_> {
             self.items.push(Item::Rect { x: x0, y: y0, w: (x1 - x0).max(0.0), h: y1 - y0, color: s.background, radius: s.radius });
         }
         // Text (atoms sharing a style and link draw as one run) and images.
+        let mut last_text = None;
         let mut i = 0;
         while i < line.len() {
             let a = &line[i];
@@ -1094,7 +1118,8 @@ impl<'r> Ctx<'_> {
                     let s = &self.styles[style as usize];
                     let font = font_of(s);
                     if !s.hidden {
-                        self.items.push(Item::Text { x: xs[start], y: baseline + s.shift, text, font, color: s.color, underline: s.underline, strike: s.strike });
+                        last_text = Some(self.items.len());
+                        self.items.push(Item::Text { x: xs[start], y: baseline + s.shift, text, font, color: s.color, underline: s.underline, strike: s.strike, after: After::Inline });
                     }
                     if let Some(l) = link {
                         self.links.push(Link { x: xs[start], y: top, w, h: line_h, href: self.hrefs[l].clone() });
@@ -1102,6 +1127,9 @@ impl<'r> Ctx<'_> {
                 }
                 _ => i += 1,
             }
+        }
+        if let Some(Item::Text { after, .. }) = last_text.and_then(|k| self.items.get_mut(k)) {
+            *after = end;
         }
         line_h
     }
