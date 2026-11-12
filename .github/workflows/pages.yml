@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     paths: ["docs/**", "site/**", "scripts/build-site.py", ".github/workflows/pages.yml"]
+  # If the repository's Pages source is still "Deploy from a branch", GitHub's
+  # own build publishes the README over the site on every push. This runs after
+  # that build and puts the site back.
+  page_build:
   workflow_dispatch:
 
 permissions:
