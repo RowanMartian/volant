@@ -84,6 +84,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/release" && ditto -x -k "$RUNNER_TEMP/release.zip" "$RUNNER_TEMP/release"
           want=$(shasum -a 256 "$RUNNER_TEMP/release/Volant.app/Contents/MacOS/Volant" | cut -d' ' -f1)
           before=$(shasum -a 256 "$APPS/Volant.app/Contents/MacOS/Volant" | cut -d' ' -f1)
+          # Releases before 2026-11-12 crash on launch if WebKit's rule-list store holds another
+          # build's lists (as the steps above leave it); start them with a clean store.
+          BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' dist/Volant.app/Contents/Info.plist)
+          find "$HOME/Library" -maxdepth 6 -type d -name ContentRuleLists -path "*$BID*" -print -exec rm -rf {} + 2>/dev/null || true
           VOLANT_DATA_DIR="$RUNNER_TEMP/update-data" "$APPS/Volant.app/Contents/MacOS/Volant" --install-update &
           PID=$!
           for i in $(seq 1 60); do kill -0 $PID 2>/dev/null || break; sleep 1; done
