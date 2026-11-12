@@ -361,7 +361,9 @@ fn cleanup(b: &Browser, keep: Vec<String>) {
         for id in ids.iter() {
             let s = id.to_string();
             if s.starts_with("volant-") && !keep.contains(&s) {
-                unsafe { store2.removeContentRuleListForIdentifier_completionHandler(Some(&id), None) };
+                // WebKit calls this handler without checking it, so it must be a real block.
+                let removed = RcBlock::new(|_err: *mut NSError| {});
+                unsafe { store2.removeContentRuleListForIdentifier_completionHandler(Some(&id), Some(&removed)) };
             }
         }
     });

@@ -34,7 +34,16 @@ if xcrun --find actool >/dev/null 2>&1; then
       && [ -f build/icon/Assets.car ]; then
     cp build/icon/Assets.car "$APP/Contents/Resources/Assets.car"
     plutil -insert CFBundleIconName -string AppIcon "$APP/Contents/Info.plist"
+    # As Xcode does: the .icns actool rendered from the same document is the
+    # icon file too, so nothing ever falls back to the old flat artwork (which
+    # macOS 26 and later would shrink into a grey frame).
+    if [ -f build/icon/AppIcon.icns ]; then
+      cp build/icon/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+      rm -f "$APP/Contents/Resources/Volant.icns"
+      plutil -replace CFBundleIconFile -string AppIcon "$APP/Contents/Info.plist"
+    fi
     echo "Liquid Glass icon compiled."
+    cat build/icon/partial.plist
   else
     echo "warning: actool couldn't compile macos/AppIcon.icon; shipping the .icns only"
   fi

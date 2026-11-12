@@ -42,7 +42,10 @@ jobs:
         run: |
           mkdir -p smoke build
           swiftc -O scripts/bench/appicon.swift -o build/appicon
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$PWD/dist/Volant.app" || true
           build/appicon "$PWD/dist/Volant.app" smoke/appicon.png 1024
+          sw_vers; xcodebuild -version | head -1
+          xcrun assetutil --info dist/Volant.app/Contents/Resources/Assets.car | grep -E '"(Name|AssetType|RenditionName|Idiom|Appearance)"' | sort | uniq -c | head -30 || true
           echo "Assets.car: $(ls -la dist/Volant.app/Contents/Resources/Assets.car 2>/dev/null || echo missing)"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' dist/Volant.app/Contents/Info.plist || true
 
@@ -53,8 +56,8 @@ jobs:
           START=$(date +%s)
           ( dist/Volant.app/Contents/MacOS/Volant --smoke-test > smoke/log.txt 2>&1; echo "exit $?" >> smoke/log.txt ) &
           PID=$!
-          for i in $(seq 1 90); do kill -0 $PID 2>/dev/null || break; sleep 1; done
-          kill -0 $PID 2>/dev/null && { echo "still running after 90s" >> smoke/log.txt; pkill -f "Volant --smoke-test" || true; }
+          for i in $(seq 1 100); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          kill -0 $PID 2>/dev/null && { echo "still running after 100s" >> smoke/log.txt; pkill -f "Volant --smoke-test" || true; }
           echo "ran for $(( $(date +%s) - START ))s" >> smoke/log.txt
           cat smoke/log.txt smoke/report.txt 2>/dev/null || true
           ls -la smoke

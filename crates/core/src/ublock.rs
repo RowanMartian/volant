@@ -434,6 +434,9 @@ fn regex_to_webkit(re: &str) -> Option<String> {
             ']' if in_class => in_class = false,
             '|' | '{' | '}' if !in_class => return None,
             '(' if !in_class && b.get(i + 1) == Some(&b'?') => return None,
+            // WebKit only takes the anchors at the very ends of an expression.
+            '$' if !in_class && i + 1 != b.len() => return None,
+            '^' if !in_class && i != 0 => return None,
             _ => {}
         }
         out.push(c);
@@ -1219,19 +1222,32 @@ fn cosmetic_split(line: &str) -> Option<(usize, &'static str)> {
 }
 
 fn split_options(body: &str) -> (&str, Option<&str>) {
-    if body.starts_with('/') {
-        // A regex filter: options follow the closing slash.
-        if let Some(end) = body.rfind("/$") {
-            if end > 0 {
-                return (&body[..end + 1], Some(&body[end + 2..]));
-            }
+    // Options start at the first `$` followed by something shaped like an
+    // option (`script`, `~third-party`, `domain=...`), so a `$` in a regex
+    // pattern, or inside an option's own value (`header=x:/^y$/`), is left alone.
+    let looks_like_options = |opts: &str| {
+        let o = opts.strip_prefix('~').unwrap_or(opts);
+        let name_len = o.bytes().take_while(|c| c.is_ascii_alphanumeric() || *c == b'-' || *c == b'_').count();
+        name_len > 0 && matches!(o.as_bytes().get(name_len), None | Some(b'=') | Some(b','))
+    };
+    let mut from = 0;
+    while let Some(off) = body[from..].find('$') {
+        let i = from + off;
+        // A regex pattern runs to its closing slash.
+        let pattern = &body[..i];
+        let open_regex = pattern.starts_with('/') && pattern.len() > 1 && !pattern.ends_with('/') && looks_like_regex(pattern);
+        if i > 0 && !open_regex && looks_like_options(&body[i + 1..]) {
+            return (pattern, Some(&body[i + 1..]));
         }
-        return (body, None);
+        from = i + 1;
     }
-    match body.rfind('$') {
-        Some(i) if !body[i + 1..].contains('/') || body[i + 1..].starts_with("domain=") || body[i + 1..].contains("domain=") => (&body[..i], Some(&body[i + 1..])),
-        _ => (body, None),
-    }
+    (body, None)
+}
+
+/// Whether a pattern that starts with `/` is a regex still being written (as
+/// opposed to a path like `/ads/banner.js`).
+fn looks_like_regex(pattern: &str) -> bool {
+    pattern.contains(['\\', '(', '[', '|', '^', '+', '{']) || pattern.contains(".*")
 }
 
 /// Compiles filter lists (`(list id, text)`) into WebKit rule lists and the site index.
@@ -1361,6 +1377,12 @@ mod tests {
         assert!(all.contains("tracker\\\\.a") && all.contains("tracker\\\\.b"), "to= expands");
         assert!(all.contains("ad[0-9]+\\\\.js"), "regex kept: {all}");
         assert_eq!(c.stats.skipped, 2, "removeparam and the alternation regex");
+        assert_eq!(split_options("/_static/delivery.js?nonce=$script,1p,header=server:/^openresty\\/$/"), ("/_static/delivery.js?nonce=", Some("script,1p,header=server:/^openresty\\/$/")));
+        assert_eq!(split_options("/ads[0-9]+$/$script"), ("/ads[0-9]+$/", Some("script")));
+        assert_eq!(split_options("||a.example^$~third-party"), ("||a.example^", Some("~third-party")));
+        assert_eq!(split_options("||a.example/x$y^$image"), ("||a.example/x$y^", Some("image")));
+        assert_eq!(split_options("/banner/ad.js"), ("/banner/ad.js", None));
+        assert!(regex_to_webkit("a$b").is_none() && regex_to_webkit("a^b").is_none() && regex_to_webkit("^ab$").is_some());
     }
 
     #[test]

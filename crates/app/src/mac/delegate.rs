@@ -336,7 +336,7 @@ pub fn smoke_test(b: &Browser) {
     let since_exec = super::SHOWN.with(|t| t.get()).unwrap_or_default();
     report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
     let (s1, s2, s3, s4, s5, s6, s7, s8) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone());
-    let s9 = shot;
+    let (s9, s10) = (shot.clone(), shot);
     let (m1, m2) = (mem.clone(), mem);
     let rep = report.clone();
     let dir2 = dir.clone();
@@ -395,7 +395,15 @@ pub fn smoke_test(b: &Browser) {
     step(37.0, Box::new(move |_b| s8("8-home-edit")));
     step(37.5, Box::new(actions::toggle_sidebar));
     step(39.0, Box::new(move |_b| s9("9-no-sidebar")));
-    step(40.0, Box::new(move |_b| {
+    // The blocker's own page, in dark (for the website).
+    step(39.5, Box::new(|b| {
+        actions::toggle_sidebar(b);
+        super::theme::apply_appearance(volant_core::store::Appearance::Dark, b.mtm);
+        super::theme::refresh(b);
+        actions::open_or_switch(b, "volant://blocker");
+    }));
+    step(42.5, Box::new(move |_b| s10("10-blocker")));
+    step(43.0, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);
