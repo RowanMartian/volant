@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     # The website and README don't change the app.
-    paths-ignore: ["docs/**", "site/**", "scripts/build-site.py", "README.md"]
+    paths-ignore: ["docs/**", "site/**", "scripts/build-site.py", "README.md", ".github/workflows/pages.yml"]
   pull_request:
   workflow_dispatch:
 
@@ -139,7 +139,13 @@ jobs:
         run: |
           # Never let an older, delayed run replace a newer build.
           git fetch --quiet origin main
-          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then echo "main has moved on; not publishing"; exit 0; fi
+          tip=$(git rev-parse origin/main)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            # Later commits that only touch the website or README don't change the app.
+            changed=$(git diff --name-only "$GITHUB_SHA" "$tip" | grep -Ev '^(docs/|site/|scripts/build-site\.py$|README\.md$|\.github/workflows/pages\.yml$)' || true)
+            if [ -n "$changed" ]; then echo "main has moved on; not publishing"; exit 0; fi
+            echo "main has moved on, but only the website changed; publishing"
+          fi
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest dist/Volant.dmg dist/Volant-mac.zip \
             --title "Volant — latest build" \
