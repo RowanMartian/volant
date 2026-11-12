@@ -5,8 +5,8 @@ on:
     branches: [main]
     paths: ["docs/**", "site/**", "scripts/build-site.py", ".github/workflows/pages.yml"]
   # If the repository's Pages source is still "Deploy from a branch", GitHub's
-  # own build publishes the README over the site on every push. This runs after
-  # that build and puts the site back.
+  # own build publishes the README over the site on every push. This runs when
+  # that build starts, waits for it, and puts the site back.
   page_build:
   workflow_dispatch:
 
@@ -14,6 +14,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: pages
@@ -27,6 +28,17 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - name: Let GitHub's branch build finish first, so this deploy lands last
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 72); do
+            busy=$(gh run list -R "$GITHUB_REPOSITORY" --limit 20 --json name,status \
+              --jq '[.[] | select(.name == "pages build and deployment" and .status != "completed")] | length' || echo 0)
+            [ "$busy" = "0" ] && break
+            echo "waiting for pages build and deployment ($busy running)"
+            sleep 5
+          done
       - name: Build the pages from site/
         run: python3 scripts/build-site.py
       - uses: actions/configure-pages@v5

@@ -100,5 +100,6 @@ select.field{appearance:none;-webkit-appearance:none;padding-right:30px;backgrou
 .site-ic.has-img b{display:none}
 .site-ic.has-img img{opacity:1}
 .site-ic.full img{inset:0;width:100%;height:100%;object-fit:cover}
+@media (prefers-color-scheme: light){.site-ic.full.pale img{mix-blend-mode:multiply}}
 .field:focus-visible{outline:none}
 .select .field{width:100%!important}

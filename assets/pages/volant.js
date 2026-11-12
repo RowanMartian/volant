@@ -93,7 +93,7 @@ function iconFailed(img) {
 function iconLoaded(img) {
   const tile = img.parentNode;
   tile.classList.add('has-img');
-  let full = false;
+  let full = false, pale = false;
   if (img.naturalWidth >= 100 && Math.abs(img.naturalWidth - img.naturalHeight) <= 2) {
     try {
       const c = document.createElement('canvas');
@@ -101,10 +101,14 @@ function iconLoaded(img) {
       const g = c.getContext('2d');
       g.drawImage(img, 0, 0, 16, 16);
       const d = g.getImageData(0, 0, 16, 16).data;
-      full = [0, 15, 240, 255].every((p) => d[p * 4 + 3] > 250);
+      const corners = [0, 15, 240, 255].map((p) => d.slice(p * 4, p * 4 + 4));
+      full = corners.every((px) => px[3] > 250);
+      // A white square would vanish on a light page: it takes the tile's grey instead.
+      pale = full && corners.every((px) => px[0] > 235 && px[1] > 235 && px[2] > 235);
     } catch {}
   }
   tile.classList.toggle('full', full);
+  tile.classList.toggle('pale', pale);
 }
 /* Volant saved a sharper icon for `key`: swap it in wherever it's shown. */
 window.volantIconReady = (key) => {
