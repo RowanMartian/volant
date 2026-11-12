@@ -45,6 +45,34 @@ pub enum Display {
     Inline,
     ListItem,
     None,
+    Table,
+    TableRowGroup,
+    TableRow,
+    TableCell,
+    TableCaption,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Float {
+    None,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clear {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VAlign {
+    Baseline,
+    Super,
+    Sub,
+    Middle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -113,7 +141,16 @@ pub struct Style {
     pub border_color: [Color; 4],
     pub width: Len,
     pub max_width: Len,
+    pub height: Len,
     pub hidden: bool,
+    pub float: Float,
+    pub clear: Clear,
+    pub valign: VAlign,
+    /// How far this text's baseline sits below its line's (negative: raised),
+    /// from `vertical-align` on it and its inline ancestors.
+    pub shift: f32,
+    /// `border-radius`, in px.
+    pub radius: f32,
 }
 
 impl Default for Style {
@@ -139,7 +176,13 @@ impl Default for Style {
             border_color: [Color::BLACK; 4],
             width: Len::Auto,
             max_width: Len::Auto,
+            height: Len::Auto,
             hidden: false,
+            float: Float::None,
+            clear: Clear::None,
+            valign: VAlign::Baseline,
+            shift: 0.0,
+            radius: 0.0,
         }
     }
 }
@@ -148,10 +191,19 @@ impl Default for Style {
 pub const UA: &str = r#"
 html, address, blockquote, body, center, dialog, div, figure, figcaption, footer, form, header, hr, legend, listing,
 main, p, plaintext, pre, xmp, search, details, summary, dl, dt, dd, ol, ul, menu, dir, h1, h2, h3, h4, h5, h6, hgroup,
-article, aside, nav, section, fieldset, table, caption, thead, tbody, tfoot, tr, td, th, picture, video, canvas { display: block }
+article, aside, nav, section, fieldset, picture, video, canvas { display: block }
 li { display: list-item }
+table { display: table }
+thead, tbody, tfoot { display: table-row-group }
+tr { display: table-row }
+td, th { display: table-cell; padding: 1px }
+th { font-weight: bold; text-align: center }
+caption { display: table-caption; text-align: center }
+colgroup, col { display: none }
 head, script, style, title, meta, link, base, template, noscript, area, datalist, param, source, track, [hidden],
-img, svg, iframe, object, embed, audio, input, button, select, textarea, map { display: none }
+svg, iframe, object, embed, audio, input, button, select, textarea, map { display: none }
+sup { vertical-align: super }
+sub { vertical-align: sub }
 body { margin: 8px }
 p, dl, multicol { margin: 1em 0 }
 blockquote, figure { margin: 1em 40px }
@@ -410,9 +462,14 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
     match d.name.as_str() {
         "display" => {
             s.display = match lower.as_str() {
-                "none" => Display::None,
+                "none" | "table-column" | "table-column-group" => Display::None,
                 "inline" | "inline-block" | "inline-flex" | "inline-grid" | "contents" => Display::Inline,
                 "list-item" => Display::ListItem,
+                "table" | "inline-table" => Display::Table,
+                "table-row-group" | "table-header-group" | "table-footer-group" => Display::TableRowGroup,
+                "table-row" => Display::TableRow,
+                "table-cell" => Display::TableCell,
+                "table-caption" => Display::TableCaption,
                 _ => Display::Block,
             }
         }
@@ -531,6 +588,39 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
             s.strike = lower.contains("line-through");
         }
         "visibility" => s.hidden = lower == "hidden" || lower == "collapse",
+        "float" => {
+            s.float = match lower.as_str() {
+                "left" | "inline-start" => Float::Left,
+                "right" | "inline-end" => Float::Right,
+                _ => Float::None,
+            }
+        }
+        "clear" => {
+            s.clear = match lower.as_str() {
+                "left" | "inline-start" => Clear::Left,
+                "right" | "inline-end" => Clear::Right,
+                "both" => Clear::Both,
+                _ => Clear::None,
+            }
+        }
+        "vertical-align" => {
+            s.valign = match lower.as_str() {
+                "super" | "text-top" | "top" => VAlign::Super,
+                "sub" | "text-bottom" | "bottom" => VAlign::Sub,
+                "middle" => VAlign::Middle,
+                _ => VAlign::Baseline,
+            }
+        }
+        "border-radius" => {
+            if let Some(l) = split_spaces(v).first().and_then(|p| len(p)) {
+                s.radius = l.resolve(0.0);
+            }
+        }
+        "height" => {
+            if let Some(l) = len(v) {
+                s.height = l
+            }
+        }
         "width" => {
             if let Some(l) = len(v) {
                 s.width = l
@@ -801,6 +891,23 @@ pub fn compute(dom: &Dom, author_css: &[String]) -> Vec<Style> {
         }
         if tag == "html" {
             rem = s.font_size;
+        }
+        if let Some(w) = attr(attrs, "width").and_then(|w| w.trim().trim_end_matches("px").parse::<f32>().ok()) {
+            if matches!(tag, "td" | "th" | "table" | "col") && s.width == Len::Auto {
+                s.width = Len::Px(w);
+            }
+        }
+        // Raised or lowered text: its own vertical-align plus its inline ancestors'.
+        let inherited_shift = if parent.display == Display::Inline { parent.shift } else { 0.0 };
+        let own = match s.valign {
+            VAlign::Super => -0.4 * parent.font_size,
+            VAlign::Sub => 0.2 * parent.font_size,
+            _ => 0.0,
+        };
+        s.shift = if s.display == Display::Inline { inherited_shift + own } else { 0.0 };
+        if s.valign != VAlign::Baseline && matches!(tag, "sup" | "sub") && s.display == Display::Inline {
+            // Superscripts don't make their line taller.
+            s.line_height = s.line_height.min(parent.line_height);
         }
         styles.push(s);
     }

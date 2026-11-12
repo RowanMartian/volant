@@ -56,11 +56,15 @@ Today: CSS parsing (selectors with descendant/child/sibling combinators, attribu
 `!important`, screen `@media`), the cascade with a user-agent sheet, inheritance and `em`/`rem`/`%` units; block layout
 (margins with sibling collapsing, padding, borders, `width`/`max-width`, auto-margin centring) and inline layout
 (whitespace collapsing, `pre`/`pre-wrap`/`nowrap`, wrapping with long-word breaking, baselines from font metrics,
-`text-align`, list markers, links); a display list of rectangles and text. The app measures and draws with the system
-fonts (`engine_view.rs`); `volant-tools render page.html out.svg [--reader URL]` draws to SVG anywhere.
+`vertical-align`, `text-align`, list markers, links) with real inline boxes (padding, backgrounds, radius); images as
+replaced elements (CSS size, attributes, intrinsic ratio, `max-width`); floats with text wrapping around them and
+`clear`; tables (row groups, `colspan`, min/max-content column sizing, equal-height rows, captions); a display list
+of rectangles, text and images. The app measures and draws with the system fonts, loads pictures over Volant's own
+HTTP, and searches the laid-out text for Find on page (`engine_view.rs`). `volant-tools render page.html out.svg
+[--reader URL]` draws to SVG anywhere.
 
 It's used for an opt-in Reader (Settings → Experimental): the extracted article is laid out by the engine and drawn
-natively over the Reader page. Next chunks: images, floats, tables, inline boxes, then more of CSS.
+natively over the Reader page. Next chunks: text selection and copy, then flexbox and more of CSS, then JavaScript.
 
 ## Blocking engine
 

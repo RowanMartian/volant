@@ -48,20 +48,24 @@ h1.title {{ font: 700 {title}px/1.15 {face}; margin: 0 0 28px; color: {text} }}
 .content h3 {{ font-size: 1.12em }}
 .content h4, .content h5, .content h6 {{ font-size: 1em }}
 .content a {{ color: {accent}; text-decoration: none }}
+.content img {{ display: block; max-width: 100%; margin: 1.4em auto; border-radius: 12px }}
 .content figure {{ margin: 1.6em 0 }}
+.content figure img {{ margin: 0 auto }}
 .content figcaption {{ font: 13px/1.45 -apple-system, sans-serif; color: {text2}; margin-top: 8px; text-align: center }}
-.content blockquote {{ margin: 1.4em 0; padding: 16px 20px; background: {fill} }}
+.content blockquote {{ margin: 1.4em 0; padding: 16px 20px; background: {fill}; border-radius: 12px }}
 .content blockquote p:last-child {{ margin-bottom: 0 }}
-.content pre {{ font: 13.5px/1.55 ui-monospace, Menlo, monospace; background: {fill}; padding: 14px 16px; white-space: pre-wrap }}
-.content code {{ font-family: ui-monospace, Menlo, monospace; font-size: .85em; background: {fill} }}
-.content pre code {{ background: transparent; font-size: 13.5px }}
+.content pre {{ font: 13.5px/1.55 ui-monospace, Menlo, monospace; background: {fill}; padding: 14px 16px; white-space: pre-wrap; border-radius: 12px }}
+.content code {{ font-family: ui-monospace, Menlo, monospace; font-size: .85em; background: {fill}; padding: 1px 5px; border-radius: 5px }}
+.content pre code {{ background: transparent; padding: 0; font-size: 13.5px }}
 .content ul, .content ol {{ padding-left: 1.4em; margin: 0 0 1.1em }}
 .content li {{ margin: .3em 0 }}
 .content hr {{ border-top: 1px solid {fill}; margin: 2em 0 }}
-.content table {{ font: 14px/1.45 -apple-system, sans-serif; margin: 1.4em 0 }}
+.content table {{ font: 14px/1.45 -apple-system, sans-serif; margin: 1.4em 0; width: 100% }}
 .content th {{ background: {fill}; font-weight: 600 }}
-.content th, .content td {{ padding: 8px 10px }}
-.content sup {{ font-size: .65em }}
+.content th, .content td {{ padding: 8px 10px; text-align: left }}
+.content caption {{ color: {text2}; font-size: 13px; padding-bottom: 6px }}
+.content sup, .content sub {{ font-size: .65em }}
+.content sup a {{ color: {text3} }}
 .end {{ margin-top: 48px; color: {text3}; font-size: 12px }}
 ",
         title = (size * 1.8).round(),
@@ -77,7 +81,7 @@ mod tests {
     fn reader_document_renders() {
         let a = Article { title: "How jets fly".into(), byline: "Ada Wright".into(), site: "Sky Weekly".into(), html: "<p>A jet engine pulls in air.</p><h2>Wings</h2><ul><li>Turbofans</li></ul><pre><code>thrust = m * v</code></pre>".into(), words: 600 };
         let (html, css) = document(&a, "sky.example", &Options { dark: true, size: 20.0, serif: true });
-        let page = crate::render(&html, &css, 900.0, &crate::ApproxFonts);
+        let page = crate::render(&html, &css, 900.0, &crate::ApproxFonts, &crate::NoImages);
         assert_eq!(page.background, crate::Color::rgb(0x1c, 0x1c, 0x1e));
         let svg = crate::svg::to_svg(&page);
         for want in ["How jets fly", "Sky Weekly · sky.example · Ada Wright · 2 min read", "Wings", "Turbofans", "thrust = m * v", "•"] {

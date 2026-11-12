@@ -10,13 +10,23 @@
 //! volant-tools sha256 FILE...                  SHA-256 of each file
 //! volant-tools render IN.html OUT.svg [--width N] [--reader URL] [--dark] [--sans]
 //!                                              draw a page with Volant's own engine
-//!                                              (--reader: as Reader view of URL)
+//!                                              (--reader: as Reader view of URL; images
+//!                                              without a known size are drawn 3:2)
 //! ```
 
 mod site;
 
 use std::path::{Path, PathBuf};
 use volant_core::{hash, macho, zip};
+
+/// For previews: every image is a 1200 x 800 photo (nothing is downloaded).
+struct PreviewImages;
+
+impl volant_engine::Images for PreviewImages {
+    fn size(&self, src: &str) -> Option<(f32, f32)> {
+        (!src.is_empty()).then_some((1200.0, 800.0))
+    }
+}
 
 fn read(p: &str) -> Result<Vec<u8>, String> {
     std::fs::read(p).map_err(|e| format!("{p}: {e}"))
@@ -84,7 +94,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 None => (html, String::new()),
             };
             let started = std::time::Instant::now();
-            let page = volant_engine::render(&doc, &css, width, &volant_engine::ApproxFonts);
+            let page = volant_engine::render(&doc, &css, width, &volant_engine::ApproxFonts, &PreviewImages);
             let took = started.elapsed();
             write(out, volant_engine::svg::to_svg(&page).as_bytes())?;
             println!("{out}: {} x {} px, {} items, {} links, laid out in {:.1} ms", page.width, page.height.ceil(), page.items.len(), page.links.len(), took.as_secs_f64() * 1000.0);

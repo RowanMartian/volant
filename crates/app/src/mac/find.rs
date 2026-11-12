@@ -14,7 +14,7 @@ use std::ptr::NonNull;
 pub struct FindBar {
     panel: Retained<Hit>,
     pub field: Retained<NSTextField>,
-    status: Retained<NSTextField>,
+    pub status: Retained<NSTextField>,
     prev: IconButton,
     next: IconButton,
     close: IconButton,
@@ -103,6 +103,7 @@ pub fn close(b: &mut Browser) {
     b.find.open = false;
     b.find.panel.setHidden(true);
     set_text(&b.find.status, "");
+    super::engine_view::clear_find(b);
     if let Some(w) = b.tabs.active.and_then(|id| b.webs.get(&id)) {
         unsafe { w.web.evaluateJavaScript_completionHandler(&ns("getSelection().removeAllRanges()"), None) };
         b.window.makeFirstResponder(Some(&w.web));
@@ -130,6 +131,17 @@ pub fn step(b: &mut Browser, backwards: bool) {
 
 fn search(b: &mut Browser, backwards: bool, fresh: bool) {
     let text = b.find.field.stringValue().to_string();
+    // Reader drawn by Volant's own engine: search what it laid out.
+    if super::engine_view::is_active(b) {
+        if text.is_empty() {
+            set_text(&b.find.status, "");
+            super::engine_view::clear_find(b);
+            return;
+        }
+        let (current, total) = super::engine_view::find(b, &text, backwards, fresh);
+        set_text(&b.find.status, &if total == 0 { "Not found".to_string() } else { format!("{current} of {total}") });
+        return;
+    }
     let Some(w) = b.tabs.active.and_then(|id| b.webs.get(&id)) else { return };
     if text.is_empty() {
         set_text(&b.find.status, "");

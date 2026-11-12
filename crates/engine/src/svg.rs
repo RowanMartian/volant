@@ -25,7 +25,16 @@ pub fn to_svg(page: &Page) -> String {
     );
     for item in &page.items {
         match item {
-            Item::Rect { x, y, w, h, color } => out.push_str(&format!(r#"<rect x="{x:.2}" y="{y:.2}" width="{w:.2}" height="{h:.2}" fill="{}"/>"#, css(*color))),
+            Item::Rect { x, y, w, h, color, radius } => {
+                out.push_str(&format!(r#"<rect x="{x:.2}" y="{y:.2}" width="{w:.2}" height="{h:.2}" rx="{radius:.2}" fill="{}"/>"#, css(*color)))
+            }
+            Item::Image { x, y, w, h, src, radius } => {
+                // A placeholder under the picture, so its place shows even where it can't load.
+                out.push_str(&format!(
+                    r##"<rect x="{x:.2}" y="{y:.2}" width="{w:.2}" height="{h:.2}" rx="{radius:.2}" fill="#d8d8dc"/><image href="{}" x="{x:.2}" y="{y:.2}" width="{w:.2}" height="{h:.2}" preserveAspectRatio="xMidYMid slice"/>"##,
+                    esc(src)
+                ))
+            }
             Item::Text { x, y, text, font, color, underline, strike } => {
                 let family = match font.family {
                     Family::Sans => "Liberation Sans, Arial, Helvetica, sans-serif",
