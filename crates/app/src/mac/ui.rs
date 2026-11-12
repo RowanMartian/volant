@@ -269,7 +269,11 @@ impl Ui {
 }
 
 /// Moves the window's traffic lights so they line up with the sidebar's buttons.
-fn place_traffic_lights(window: &NSWindow, visible: bool, inset_y: f64) {
+/// Puts the window's traffic lights on the same line as Volant's own top
+/// buttons (centred `center_y` points from the top of the window), in both
+/// layouts. The buttons are placed explicitly rather than trusting AppKit's
+/// internal offsets, which is what used to leave them sitting high.
+fn place_traffic_lights(window: &NSWindow, visible: bool, center_y: f64) {
     let buttons: Vec<Retained<objc2_app_kit::NSButton>> =
         [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton].iter().filter_map(|&k| window.standardWindowButton(k)).collect();
     if buttons.len() != 3 {
@@ -283,16 +287,20 @@ fn place_traffic_lights(window: &NSWindow, visible: bool, inset_y: f64) {
     }
     let inset_x = 18.0;
     let close = &buttons[0];
-    let Some(container) = unsafe { close.superview() }.and_then(|v| unsafe { v.superview() }) else { return };
-    let close_frame = close.frame();
-    let bar_h = close_frame.size.height + inset_y;
+    let Some(titlebar) = (unsafe { close.superview() }) else { return };
+    let Some(container) = (unsafe { titlebar.superview() }) else { return };
+    // A title bar exactly twice the centre line tall, pinned to the top of the window…
+    let bar_h = center_y * 2.0;
     let mut bar = container.frame();
     bar.size.height = bar_h;
     bar.origin.y = window.frame().size.height - bar_h;
     container.setFrame(bar);
-    let gap = buttons[1].frame().origin.x - close_frame.origin.x;
+    titlebar.setFrame(rect(0.0, 0.0, bar.size.width, bar_h));
+    // …with the buttons vertically centred in it.
+    let gap = buttons[1].frame().origin.x - close.frame().origin.x;
     for (i, b) in buttons.iter().enumerate() {
-        b.setFrameOrigin(NSPoint::new(inset_x + gap * i as f64, b.frame().origin.y));
+        let bh = b.frame().size.height;
+        b.setFrameOrigin(NSPoint::new(inset_x + gap * i as f64, ((bar_h - bh) / 2.0).round()));
     }
 }
 
@@ -305,7 +313,8 @@ pub fn layout(b: &mut Browser) {
     ui.sidebar.setHidden(!show);
     ui.sidebar.setFrame(rect(0.0, 0.0, SIDEBAR_W, h));
     // Same place whether or not the sidebar is showing.
-    place_traffic_lights(&b.window, true, 20.0);
+    // The sidebar's back/forward/reload and the Show Sidebar button are 28 tall at y 13: centre 27.
+    place_traffic_lights(&b.window, true, 27.0);
     ui.show_sidebar.hit.setHidden(show);
     let full_screen = b.window.styleMask().contains(NSWindowStyleMask::FullScreen);
     ui.show_sidebar.hit.setFrame(rect(if full_screen { 10.0 } else { 84.0 }, 13.0, 28.0, 28.0));
