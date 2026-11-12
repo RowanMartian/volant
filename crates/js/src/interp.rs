@@ -560,6 +560,12 @@ impl Interp {
     }
 
     /// Runs a whole script in the global scope; returns the last expression statement's value.
+    /// Starts a fresh step budget (for each script and each event a page handles).
+    pub fn reset_steps(&mut self, budget: u64) {
+        self.steps = 0;
+        self.max_steps = budget;
+    }
+
     /// A RegExp object for a literal (compiled once per pattern).
     pub fn regexp(&mut self, body: &Rc<str>, flags: &Rc<str>) -> Res<Value> {
         let key = (body.clone(), flags.clone());

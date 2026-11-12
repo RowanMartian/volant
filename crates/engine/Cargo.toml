@@ -9,3 +9,4 @@ publish = false
 
 [dependencies]
 volant-core = { path = "../core" }
+volant-js = { path = "../js" }

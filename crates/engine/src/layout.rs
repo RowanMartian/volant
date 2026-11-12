@@ -32,6 +32,19 @@ pub enum Item {
     Text { x: f32, y: f32, text: String, font: Font, color: Color, underline: bool, strike: bool, after: After },
     /// An image, scaled to fill the box.
     Image { x: f32, y: f32, w: f32, h: f32, src: String, radius: f32 },
+    /// Clips what follows, up to the matching `Unclip`, to a (rounded) rectangle (`overflow`).
+    Clip { x: f32, y: f32, w: f32, h: f32, radius: f32 },
+    Unclip,
+}
+
+/// Where a node was drawn, for finding what a click hit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hit {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub node: NodeId,
 }
 
 /// What comes after a piece of text: more on its line, a wrapped line, a
@@ -65,6 +78,19 @@ pub struct Page {
     pub background: Color,
     pub items: Vec<Item>,
     pub links: Vec<Link>,
+    /// The boxes of elements and runs of text, for hit testing.
+    pub hits: Vec<Hit>,
+}
+
+impl Page {
+    /// The innermost node drawn at (x, y): the smallest box containing the point.
+    pub fn hit(&self, x: f32, y: f32) -> Option<NodeId> {
+        self.hits
+            .iter()
+            .filter(|h| x >= h.x && x < h.x + h.w && y >= h.y && y < h.y + h.h)
+            .min_by(|a, b| (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|h| h.node)
+    }
 }
 
 /// Image sizes, as far as they're known (loaded, or still loading: `None`).
@@ -453,6 +479,7 @@ struct Ctx<'a> {
     hrefs: Vec<String>,
     items: Vec<Item>,
     links: Vec<Link>,
+    hits: Vec<Hit>,
     cache: HashMap<(FontKey, String), f32>,
     floats: Vec<FloatBox>,
     /// Containing blocks for absolutely positioned boxes: (x, y, width) of each
@@ -795,6 +822,7 @@ impl<'r> Ctx<'_> {
         let content_y = y + bw[0] + pad[0];
         let paint_at = self.items.len();
         let links_at = self.links.len();
+        let hits_at = self.hits.len();
         let positioned = s.position != Position::Static;
         if positioned {
             self.cbs.push((box_x + bw[3], y + bw[0], content_w + pad[1] + pad[3]));
@@ -894,30 +922,66 @@ impl<'r> Ctx<'_> {
             let baseline = content_y + (s.line_height - asc - desc) / 2.0 + asc;
             under.push(Item::Text { x: content_x - w - font.size * 0.5, y: baseline, text: marker, font, color: s.color, underline: false, strike: false, after: After::Space });
         }
+        let n_under = under.len();
         self.items.splice(paint_at..paint_at, under);
         if positioned {
             self.cbs.pop();
         }
-        // position: relative moves the box (and everything in it) after layout.
-        if s.position == Position::Relative {
-            let dx = if s.inset[3] != Len::Auto { s.inset[3].resolve(cb_w) } else if s.inset[1] != Len::Auto { -s.inset[1].resolve(cb_w) } else { 0.0 };
-            let dy = if s.inset[0] != Len::Auto { s.inset[0].resolve(cb_w) } else if s.inset[2] != Len::Auto { -s.inset[2].resolve(cb_w) } else { 0.0 };
-            if dx != 0.0 || dy != 0.0 {
+        self.hits.push(Hit { x: box_x, y, w: border_w, h: height, node: b.node });
+        // overflow: the content (not the box's own background and borders) is clipped to the padding box.
+        if s.overflow_clip && self.items.len() > paint_at + n_under {
+            let (cx, cy) = (box_x + bw[3], y + bw[0]);
+            let (cw, ch) = ((border_w - bw[1] - bw[3]).max(0.0), (height - bw[0] - bw[2]).max(0.0));
+            self.items.insert(paint_at + n_under, Item::Clip { x: cx, y: cy, w: cw, h: ch, radius: s.radius });
+            self.items.push(Item::Unclip);
+        }
+        if s.opacity < 1.0 {
+            if s.opacity <= 0.01 {
+                self.items.truncate(paint_at);
+                self.links.truncate(links_at);
+            } else {
                 for it in &mut self.items[paint_at..] {
-                    match it {
-                        Item::Rect { x, y, .. } | Item::Text { x, y, .. } | Item::Image { x, y, .. } => {
-                            *x += dx;
-                            *y += dy;
-                        }
+                    if let Item::Rect { color, .. } | Item::Text { color, .. } = it {
+                        color.a = (color.a as f32 * s.opacity).round() as u8;
                     }
-                }
-                for l in &mut self.links[links_at..] {
-                    l.x += dx;
-                    l.y += dy;
                 }
             }
         }
+        // position: relative and transform: translate move the box (and everything in it) after layout.
+        let (mut dx, mut dy) = (0.0, 0.0);
+        if s.position == Position::Relative {
+            dx += if s.inset[3] != Len::Auto { s.inset[3].resolve(cb_w) } else if s.inset[1] != Len::Auto { -s.inset[1].resolve(cb_w) } else { 0.0 };
+            dy += if s.inset[0] != Len::Auto { s.inset[0].resolve(cb_w) } else if s.inset[2] != Len::Auto { -s.inset[2].resolve(cb_w) } else { 0.0 };
+        }
+        if let Some((tx, ty)) = s.translate {
+            dx += tx.resolve(border_w);
+            dy += ty.resolve(height);
+        }
+        if dx != 0.0 || dy != 0.0 {
+            self.shift(paint_at, links_at, hits_at, dx, dy);
+        }
         height
+    }
+
+    /// Moves everything drawn since the given indices.
+    fn shift(&mut self, items_at: usize, links_at: usize, hits_at: usize, dx: f32, dy: f32) {
+        for it in &mut self.items[items_at..] {
+            match it {
+                Item::Rect { x, y, .. } | Item::Text { x, y, .. } | Item::Image { x, y, .. } | Item::Clip { x, y, .. } => {
+                    *x += dx;
+                    *y += dy;
+                }
+                Item::Unclip => {}
+            }
+        }
+        for l in &mut self.links[links_at..] {
+            l.x += dx;
+            l.y += dy;
+        }
+        for h in &mut self.hits[hits_at..] {
+            h.x += dx;
+            h.y += dy;
+        }
     }
 
     /// Places an absolutely positioned (or fixed) box against its containing
@@ -1622,14 +1686,15 @@ impl<'r> Ctx<'_> {
         boxes.sort_by_key(|b| b.0);
         for (_, e, i0, i1) in boxes {
             let s = self.styles[e as usize].clone();
-            if s.background.a == 0 {
-                continue;
-            }
             let x0 = xs[i0] + if line[i0].kind == Kind::Open && line[i0].style == e { px_only(s.margin[3]) } else { 0.0 };
             let x1 = xs[i1] + line[i1].w - if line[i1].kind == Kind::Close && line[i1].style == e { px_only(s.margin[1]) } else { 0.0 };
             let f = font_of(&s);
             let y0 = baseline + s.shift - self.fonts.ascent(&f) - px_only(s.padding[0]) - s.border_width[0];
             let y1 = baseline + s.shift + self.fonts.descent(&f) + px_only(s.padding[2]) + s.border_width[2];
+            self.hits.push(Hit { x: x0, y: y0.min(top), w: (x1 - x0).max(0.0), h: (y1 - y0).max(line_h), node: e });
+            if s.background.a == 0 {
+                continue;
+            }
             self.items.push(Item::Rect { x: x0, y: y0, w: (x1 - x0).max(0.0), h: y1 - y0, color: s.background, radius: s.radius });
         }
         // Text (atoms sharing a style and link draw as one run) and images.
@@ -1645,6 +1710,7 @@ impl<'r> Ctx<'_> {
                         if !s.hidden && !src.is_empty() {
                             self.items.push(Item::Image { x: xs[i] + ml, y, w, h, src: src.to_string(), radius: s.radius });
                         }
+                        self.hits.push(Hit { x: xs[i] + ml, y, w, h, node: a.style });
                         if let Some(l) = a.link {
                             self.links.push(Link { x: xs[i] + ml, y, w, h, href: self.hrefs[l].clone() });
                         }
@@ -1666,6 +1732,7 @@ impl<'r> Ctx<'_> {
                         last_text = Some(self.items.len());
                         self.items.push(Item::Text { x: xs[start], y: baseline + s.shift, text, font, color: s.color, underline: s.underline, strike: s.strike, after: After::Inline });
                     }
+                    self.hits.push(Hit { x: xs[start], y: top, w, h: line_h, node: style });
                     if let Some(l) = link {
                         self.links.push(Link { x: xs[start], y: top, w, h: line_h, href: self.hrefs[l].clone() });
                     }
@@ -1687,12 +1754,12 @@ pub fn layout(dom: &Dom, styled: &css_style::Styled, width: f32, fonts: &dyn Fon
     let root = builder.block(0, 0);
     let mut all: Vec<Style> = styles.clone();
     all.extend(std::mem::take(&mut builder.anon));
-    let mut ctx = Ctx { styles: &all, fonts, images, hrefs: builder.hrefs, items: Vec::new(), links: Vec::new(), cache: HashMap::new(), floats: Vec::new(), cbs: vec![(0.0, 0.0, width)] };
+    let mut ctx = Ctx { styles: &all, fonts, images, hrefs: builder.hrefs, items: Vec::new(), links: Vec::new(), hits: Vec::new(), cache: HashMap::new(), floats: Vec::new(), cbs: vec![(0.0, 0.0, width)] };
     // The canvas takes the root's background, or else the body's.
     let bg_of = |tag: &str| dom.find(tag).map(|id| styles[id as usize].background).filter(|c| c.a > 0);
     let background = bg_of("html").or_else(|| bg_of("body")).unwrap_or(Color::rgb(255, 255, 255));
     let height = ctx.block(&root, 0.0, 0.0, width, Opts { bfc: true, ..Default::default() });
-    Page { width, height, background, items: ctx.items, links: ctx.links }
+    Page { width, height, background, items: ctx.items, links: ctx.links, hits: ctx.hits }
 }
 
 #[cfg(test)]
@@ -1871,6 +1938,26 @@ mod tests {
         // A narrow container wraps cell text instead of overflowing.
         let narrow = page("<table><tr><td>alpha beta gamma delta</td><td>x</td></tr></table>", &css, 60.0);
         assert!(texts(&narrow).len() > 2);
+    }
+
+    #[test]
+    fn opacity_overflow_transform() {
+        let css = format!("{BASE} .clip {{ height: 20px; overflow: hidden }} .ghost {{ opacity: 0 }} .half {{ opacity: .5; color: #000 }} .moved {{ transform: translate(10px, 50%); height: 40px }}");
+        let p = page("<div class=clip>a<br>b<br>c</div><p class=ghost>gone</p><p class=half>faint</p><div class=moved>m</div>", &css, 300.0);
+        // The clipped box's content is wrapped in Clip/Unclip.
+        let clip = p.items.iter().position(|i| matches!(i, Item::Clip { h, .. } if *h == 20.0)).expect("a clip");
+        let unclip = p.items.iter().position(|i| matches!(i, Item::Unclip)).expect("an unclip");
+        assert!(clip < unclip);
+        let t = texts(&p);
+        assert!(!t.iter().any(|x| x.0 == "gone"), "opacity: 0 draws nothing");
+        let faint = p.items.iter().find_map(|i| match i {
+            Item::Text { text, color, .. } if text == "faint" => Some(color.a),
+            _ => None,
+        });
+        assert_eq!(faint, Some(128));
+        let m = t.iter().find(|x| x.0 == "m").unwrap();
+        assert_eq!(m.1, 10.0, "translateX");
+        assert!(p.hit(m.1 + 1.0, m.2 - 2.0).is_some());
     }
 
     fn rects(p: &Page) -> Vec<(f32, f32, f32, f32)> {

@@ -197,6 +197,12 @@ pub struct Style {
     pub border_box: bool,
     /// `caption-side: bottom` (inherited).
     pub caption_bottom: bool,
+    /// 0 (invisible) to 1.
+    pub opacity: f32,
+    /// `overflow` other than `visible`: content is clipped to the padding box.
+    pub overflow_clip: bool,
+    /// `transform: translate(x, y)` (percentages of the box's own size).
+    pub translate: Option<(Len, Len)>,
     pub min_width: Len,
     pub min_height: Len,
     /// Custom properties (`--name`), inherited.
@@ -264,6 +270,9 @@ impl Default for Style {
             radius: 0.0,
             border_box: false,
             caption_bottom: false,
+            opacity: 1.0,
+            overflow_clip: false,
+            translate: None,
             min_width: Len::Auto,
             min_height: Len::Auto,
             vars: Rc::new(HashMap::new()),
@@ -306,8 +315,18 @@ th { font-weight: bold; text-align: center }
 caption { display: table-caption; text-align: center }
 colgroup, col { display: none }
 head, script, style, title, meta, link, base, template, noscript, area, datalist, param, source, track, [hidden],
-svg, iframe, object, embed, audio, input, select, textarea, map, dialog:not([open]) { display: none }
+svg, iframe, object, embed, audio, map, dialog:not([open]), input[type=hidden], datalist, option, optgroup { display: none }
 button { padding: 1px 6px; background: #e9e9ed; border-radius: 4px }
+input, select, textarea { display: inline-block; border: 1px solid #8f8f9d; border-radius: 4px; padding: 2px 4px; background: #fff; color: #000; font-size: 13.3333px; white-space: pre; vertical-align: middle }
+input, select { min-width: 150px }
+textarea { min-width: 180px; min-height: 2.6em; white-space: pre-wrap; font-family: monospace }
+input[type=submit], input[type=button], input[type=reset], input[type=image] { min-width: 0; background: #e9e9ed; padding: 1px 6px }
+input[type=checkbox], input[type=radio] { min-width: 0; width: 13px; height: 13px; padding: 0; text-align: center; line-height: 13px; font-size: 11px; border-radius: 3px }
+input[type=radio] { border-radius: 50% }
+input[type=checkbox][checked], input[type=radio][checked] { background: #0a66d8; border-color: #0a66d8; color: #fff }
+.-volant-placeholder { color: #757575 }
+input[type=range] { min-width: 120px; height: 4px; padding: 0; background: #ddd; border: 0; margin: 8px 0 }
+progress, meter { display: inline-block; width: 160px; height: 8px; background: #ddd; border-radius: 4px }
 sup { vertical-align: super }
 sub { vertical-align: sub }
 body { margin: 8px }
@@ -992,6 +1011,60 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         "visibility" => s.hidden = lower == "hidden" || lower == "collapse",
         "box-sizing" => s.border_box = lower == "border-box",
         "caption-side" => s.caption_bottom = lower == "bottom",
+        "opacity" => {
+            let t = lower.trim();
+            let v = match t.strip_suffix('%') {
+                Some(p) => p.trim().parse::<f32>().ok().map(|p| p / 100.0),
+                None => t.parse::<f32>().ok(),
+            };
+            if let Some(v) = v {
+                s.opacity = v.clamp(0.0, 1.0);
+            }
+        }
+        "overflow" | "overflow-x" | "overflow-y" => {
+            let clip = lower.split_whitespace().any(|w| matches!(w, "hidden" | "clip" | "auto" | "scroll"));
+            if clip || d.name == "overflow" {
+                s.overflow_clip = clip;
+            }
+        }
+        "transform" => {
+            s.translate = None;
+            let mut dx = Len::Px(0.0);
+            let mut dy = Len::Px(0.0);
+            let mut any = false;
+            let mut rest = lower.as_str();
+            while let Some(open) = rest.find('(') {
+                let fname = rest[..open].trim().trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+                let Some(close) = rest[open..].find(')') else { break };
+                let args: Vec<&str> = rest[open + 1..open + close].split(|c: char| c == ',' || c.is_whitespace()).filter(|a| !a.is_empty()).collect();
+                let l = |k: usize| args.get(k).and_then(|a| len(a));
+                match fname {
+                    "translate" | "translate3d" => {
+                        dx = l(0).unwrap_or(Len::Px(0.0));
+                        dy = l(1).unwrap_or(Len::Px(0.0));
+                        any = true;
+                    }
+                    "translatex" => {
+                        dx = l(0).unwrap_or(Len::Px(0.0));
+                        any = true;
+                    }
+                    "translatey" => {
+                        dy = l(0).unwrap_or(Len::Px(0.0));
+                        any = true;
+                    }
+                    "matrix" if args.len() == 6 => {
+                        dx = Len::Px(args[4].parse().unwrap_or(0.0));
+                        dy = Len::Px(args[5].parse().unwrap_or(0.0));
+                        any = true;
+                    }
+                    _ => {}
+                }
+                rest = &rest[open + close + 1..];
+            }
+            if any {
+                s.translate = Some((dx, dy));
+            }
+        }
         "min-width" => {
             if let Some(l) = len(v) {
                 s.min_width = l

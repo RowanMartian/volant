@@ -204,6 +204,15 @@ fn find_ci(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 
 /// Parses a whole document.
 pub fn parse(html: &str) -> Dom {
+    parse_opts(html, false)
+}
+
+/// Like [`parse`], but keeps the text of `<script>` elements (for running them).
+pub fn parse_with_scripts(html: &str) -> Dom {
+    parse_opts(html, true)
+}
+
+fn parse_opts(html: &str, scripts: bool) -> Dom {
     let bytes = html.as_bytes();
     let mut b = Builder { nodes: Vec::with_capacity(html.len() / 40 + 16), stack: Vec::with_capacity(64) };
     b.nodes.push(Node { parent: ROOT, children: Vec::new(), data: Data::Document });
@@ -311,11 +320,16 @@ pub fn parse(html: &str) -> Dom {
             if RAW.contains(&name.as_str()) {
                 let close = format!("</{name}");
                 let end = find_ci(bytes, i, close.as_bytes()).unwrap_or(n);
-                let keep = KEEP_RAW.contains(&name.as_str());
+                let script = scripts && name == "script";
+                let keep = KEEP_RAW.contains(&name.as_str()) || script;
                 let id = b.add(Data::Element { name: name.clone().into_boxed_str(), attrs });
                 if keep && end > i {
                     let mut t = String::new();
-                    decode_into(&html[i..end], &mut t);
+                    if script {
+                        t.push_str(&html[i..end]); // script text isn't entity-decoded
+                    } else {
+                        decode_into(&html[i..end], &mut t);
+                    }
                     let tid = b.nodes.len() as NodeId;
                     b.nodes.push(Node { parent: id, children: Vec::new(), data: Data::Text(t) });
                     b.nodes[id as usize].children.push(tid);

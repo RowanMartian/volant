@@ -272,6 +272,7 @@ name = "volant-engine"
 version = "0.1.0"
 dependencies = [
  "volant-core",
+ "volant-js",
 ]
 
 [[package]]

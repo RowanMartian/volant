@@ -16,14 +16,16 @@
 
 pub mod css;
 pub mod fonts;
+pub mod forms;
 pub mod layout;
 pub mod reader;
+pub mod script;
 pub mod select;
 pub mod style;
 pub mod svg;
 
 pub use fonts::{ApproxFonts, Font, Fonts};
-pub use layout::{After, Images, Item, Link, NoImages, Page};
+pub use layout::{After, Hit, Images, Item, Link, NoImages, Page};
 pub use css::Env;
 pub use style::{Color, Family};
 
@@ -42,7 +44,8 @@ pub fn render(html: &str, extra_css: &str, width: f32, fonts: &dyn Fonts, images
 /// Like [`render`], with any number of extra style sheets (a page's linked
 /// sheets, in order) and the viewport's `@media` facts (width, dark mode).
 pub fn render_in(html: &str, sheets: &[String], env: css::Env, fonts: &dyn Fonts, images: &dyn Images) -> Page {
-    let dom = volant_core::html::parse(html);
+    let mut dom = volant_core::html::parse(html);
+    forms::prepare(&mut dom);
     let mut all = style_sheets(&dom);
     all.extend(sheets.iter().filter(|s| !s.is_empty()).cloned());
     let styled = style::compute(&dom, &all, &env);

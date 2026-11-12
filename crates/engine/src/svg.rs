@@ -23,8 +23,16 @@ pub fn to_svg(page: &Page) -> String {
         w = page.width,
         bg = css(page.background)
     );
+    let mut clips = 0;
     for item in &page.items {
         match item {
+            Item::Clip { x, y, w, h, radius } => {
+                clips += 1;
+                out.push_str(&format!(
+                    r#"<clipPath id="c{clips}"><rect x="{x:.2}" y="{y:.2}" width="{w:.2}" height="{h:.2}" rx="{radius:.2}"/></clipPath><g clip-path="url(#c{clips})">"#
+                ));
+            }
+            Item::Unclip => out.push_str("</g>"),
             Item::Rect { x, y, w, h, color, radius } => {
                 out.push_str(&format!(r#"<rect x="{x:.2}" y="{y:.2}" width="{w:.2}" height="{h:.2}" rx="{radius:.2}" fill="{}"/>"#, css(*color)))
             }
