@@ -109,4 +109,5 @@ pub fn refresh(b: &mut Browser) {
     let t = if is_dark(b.mtm) { DARK } else { LIGHT };
     CURRENT.with(|c| c.set(t));
     ui::repaint(b);
+    ui::relight_soon();
 }

@@ -78,6 +78,27 @@ define_class!(
         fn did_exit_full_screen(&self, _n: &NSNotification) {
             with(ui::layout);
         }
+
+        // Each of these makes AppKit redo the title bar; put the lights back after it.
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn did_become_key(&self, _n: &NSNotification) {
+            ui::relight_soon();
+        }
+
+        #[unsafe(method(windowDidResignKey:))]
+        fn did_resign_key(&self, _n: &NSNotification) {
+            ui::relight_soon();
+        }
+
+        #[unsafe(method(windowDidEndLiveResize:))]
+        fn did_end_live_resize(&self, _n: &NSNotification) {
+            ui::relight_soon();
+        }
+
+        #[unsafe(method(windowDidChangeBackingProperties:))]
+        fn did_change_backing(&self, _n: &NSNotification) {
+            ui::relight_soon();
+        }
     }
 
     unsafe impl NSControlTextEditingDelegate for Delegate {

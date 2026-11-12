@@ -304,6 +304,14 @@ fn place_traffic_lights(window: &NSWindow, visible: bool, center_y: f64) {
     }
 }
 
+/// macOS lays the title bar out again on its own (appearance changes, the
+/// window gaining or losing focus, resizes), which puts the traffic lights
+/// back where it likes them. Re-placing them on the next turn of the run loop
+/// lands after that.
+pub fn relight_soon() {
+    super::later(|| super::with(|b| place_traffic_lights(&b.window, true, 27.0)));
+}
+
 /// Positions everything for the current window size.
 pub fn layout(b: &mut Browser) {
     let size = b.ui.root.frame().size;

@@ -59,6 +59,19 @@ select.field{appearance:none;-webkit-appearance:none;padding-right:30px;backgrou
 .switch input:checked + i::after{transform:translateX(16px)}
 
 .logo{width:72px;height:72px;display:grid;place-items:center}
+
+/* Glitter in the wordmark: white glints on dark letters, pale blue on light ones. */
+:root{--glint:#ffffff}
+@media (prefers-color-scheme: dark){:root{--glint:#4aa6ff}}
+.wordmark-live{display:block;width:100%;height:auto;overflow:visible}
+.glitter .glint{fill:var(--glint);opacity:0;transform-box:fill-box;transform-origin:center;
+  animation-name:glint;animation-timing-function:ease-in-out;animation-iteration-count:infinite;will-change:opacity,transform}
+@keyframes glint{
+  0%{opacity:0;transform:translate(0,3px) scale(calc(var(--s) * .25))}
+  40%{opacity:var(--o);transform:translate(var(--dx),0) scale(var(--s))}
+  65%{opacity:calc(var(--o) * .55);transform:translate(calc(var(--dx) * 1.5),-2px) scale(calc(var(--s) * .8))}
+  100%{opacity:0;transform:translate(calc(var(--dx) * 2),-4px) scale(calc(var(--s) * .3))}}
+@media (prefers-reduced-motion: reduce){.glitter{display:none}}
 .logo svg{width:100%;height:100%;display:block}
 .muted{color:var(--text2)}
 .spin{width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:spin .7s linear infinite;flex:none;display:inline-block}

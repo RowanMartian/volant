@@ -109,7 +109,7 @@ function show(i) {
 }
 $$('[data-next]').forEach((b) => b.onclick = () => show(at + 1));
 $$('[data-back]').forEach((b) => b.onclick = () => show(at - 1));
-$('#hero-logo').innerHTML = wordmark();
+mountWordmark($('#hero-logo'), 18);
 $('#def-logo').innerHTML = logo();
 if (V.binaryMB) $('#f-size').textContent = V.binaryMB;
 

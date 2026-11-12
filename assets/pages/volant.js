@@ -13,6 +13,39 @@ function wordmark() {
   return `<svg viewBox="0 0 ${WORD.w} 120" role="img" aria-label="Volant"><path fill="var(--brand)" fill-rule="evenodd" d="${WORD.v}"/><path fill="var(--text)" fill-rule="evenodd" d="${WORD.letters}"/></svg>`;
 }
 
+/* The wordmark with a slow glitter drifting through "OLANT". Each glint is
+   placed on a letter (tested against the letters' shape) and clipped to them,
+   so it only ever shows on the type. Pure CSS opacity/transform animation:
+   the compositor runs it, with no script per frame. */
+let glitterId = 0;
+const GLINT = 'M0-1C.12-.12.12-.12 1 0 .12.12.12.12 0 1-.12.12-.12.12-1 0-.12-.12-.12-.12 0-1Z';
+function mountWordmark(el, count = 14) {
+  const id = 'olant' + (++glitterId);
+  el.innerHTML = `<svg class="wordmark-live" viewBox="0 0 ${WORD.w} 120" role="img" aria-label="Volant">` +
+    `<defs><clipPath id="${id}"><path d="${WORD.letters}"/></clipPath></defs>` +
+    `<path fill="var(--brand)" fill-rule="evenodd" d="${WORD.v}"/>` +
+    `<path class="letters" fill="var(--text)" fill-rule="evenodd" d="${WORD.letters}"/>` +
+    `<g class="glitter" clip-path="url(#${id})" aria-hidden="true"></g></svg>`;
+  const svg = el.firstElementChild;
+  const letters = svg.querySelector('.letters');
+  const box = letters.getBBox();
+  // Seeded, so the pattern is the same calm one on every new tab.
+  let seed = 11;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const pt = svg.createSVGPoint();
+  let glints = '';
+  for (let i = 0, tries = 0; i < count && tries < 2000; tries++) {
+    pt.x = box.x + rnd() * box.width;
+    pt.y = box.y + rnd() * box.height;
+    if (letters.isPointInFill && !letters.isPointInFill(pt)) continue;
+    const style = `--s:${(3.6 + rnd() * 4).toFixed(2)};--o:${(0.5 + rnd() * 0.35).toFixed(2)};--dx:${(2 + rnd() * 5).toFixed(1)}px;` +
+      `animation-duration:${(5.5 + rnd() * 5).toFixed(1)}s;animation-delay:-${(rnd() * 10).toFixed(1)}s`;
+    glints += `<g transform="translate(${pt.x.toFixed(1)} ${pt.y.toFixed(1)})"><path class="glint" style="${style}" d="${GLINT}"/></g>`;
+    i++;
+  }
+  svg.querySelector('.glitter').innerHTML = glints;
+}
+
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
