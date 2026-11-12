@@ -910,6 +910,15 @@ fn arrived(b: &Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec<Str
             return; // an older page
         }
         let url = e.session.as_ref().map(|s| s.url.clone()).unwrap_or_default();
+        // A different page starts at its top.
+        let new_page = e.page.as_ref().map(|p| p.url != url).unwrap_or(true);
+        if new_page {
+            if let Some(scroll) = &e.scroll {
+                let clip = scroll.contentView();
+                clip.scrollToPoint(NSPoint::new(0.0, 0.0));
+                scroll.reflectScrolledClipView(&clip);
+            }
+        }
         e.tab = Some(tab);
         e.page = Some(SimplePage { url, snap, sheets });
         e.focused = focused;
