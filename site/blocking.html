@@ -7,19 +7,28 @@ nav: blocking
   <span class="pill">{{icon:shield-fill}}Powered by uBlock</span>
   <h1>Block ads and trackers. <em>Built into the browser.</em></h1>
   <p class="lead">Volant runs uBlock Origin's filter lists, with the same defaults and the same filter syntax, compiled into the content blocker inside WebKit. There's nothing to install and no extension to keep updated. It's on from the first launch, and one switch turns it off.</p>
-  <div class="shot small"><img src="screens/blocker.png" alt="Volant's Block ads and trackers page, powered by uBlock: the main switch, settings, filter lists, My filters and trusted sites" loading="lazy"></div>
+  <div class="bdemo" data-demo="blocker">
+    <div class="pagecard"></div>
+    <div class="side-panel">
+      <button class="master" type="button" aria-pressed="false"><span class="sh">{{icon:shield-fill}}</span><span class="tx"><b>Block ads and trackers</b><small>Powered by uBlock</small></span><span class="sw"></span></button>
+      <div class="stats"><div><b class="n-blocked">0</b><span>requests blocked</span></div><div><b class="n-ads">0</b><span>ads hidden</span></div></div>
+      <div class="log" aria-live="off"></div>
+    </div>
+  </div>
+  <p class="note" style="text-align:center;max-width:none">A live model of the page above. Flip the switch to load it with and without blocking.</p>
 </div></header>
 
 <section class="tight" id="how"><div class="wrap">
   <div class="kicker">How it works</div>
   <h2>uBlock's filters, at the engine's speed.</h2>
   <p class="lead">Blockers that run as extensions inspect each request in JavaScript. Volant compiles the filters ahead of time, so WebKit can match them natively before a request leaves your Mac.</p>
-  <ol class="steps">
-    <li><b>The lists.</b> Volant downloads the filter lists uBlock Origin starts with: uBlock's own filters, EasyList, EasyPrivacy, Peter Lowe's list and the Online Malicious URL Blocklist. It refreshes them every four days.</li>
-    <li><b>The compiler.</b> Volant's own Rust compiler reads uBlock Origin's filter syntax and turns about 240,000 network filters into WebKit content rules. That takes under a second.</li>
-    <li><b>The engine.</b> WebKit compiles those rules into the content blocker built into every Mac. Ads, trackers and malware domains are stopped inside the engine, before the request is sent.</li>
-    <li><b>The page.</b> As each page starts loading, Volant adds only that site's cosmetic filters, procedural filters and scriptlets. The other 26,000 sites' fixes stay out of the page.</li>
-  </ol>
+  <div class="pipe">
+    <div class="flow" aria-hidden="true"><i></i><i></i><i></i></div>
+    <div class="node"><div class="n">1</div><h3>The lists</h3><p>uBlock Origin's default lists: uBlock filters, EasyList, EasyPrivacy, Peter Lowe's list and the Online Malicious URL Blocklist. Refreshed every four days.</p><div class="big" data-count="9">9<small>lists</small></div></div>
+    <div class="node"><div class="n">2</div><h3>Volant's compiler</h3><p>Rust that reads uBlock Origin's filter syntax and writes WebKit content rules, sharded into lists WebKit can take.</p><div class="big" data-count="0.9" data-dec="1">0.9<small>s for 240k rules</small></div></div>
+    <div class="node"><div class="n">3</div><h3>WebKit</h3><p>Compiles the rules into the content blocker built into macOS, once. Requests to ads, trackers and malware stop inside the engine.</p><div class="big" data-count="0">0<small>scripts per request</small></div></div>
+    <div class="node"><div class="n">4</div><h3>The page</h3><p>As a page starts, Volant adds only that site's cosmetic filters, procedural filters and scriptlets.</p><div class="big" data-count="26800">26,800<small>sites with fixes</small></div></div>
+  </div>
 </div></section>
 
 <section id="controls"><div class="wrap">
@@ -40,15 +49,9 @@ nav: blocking
     <div>
       <div class="kicker">Settings</div>
       <h2>The settings uBlock Origin has.</h2>
-      <p class="lead">Under <b>Volant → Blocker Settings…</b>, next to the main switch.</p>
+      <p class="lead">Under <b>Volant → Blocker Settings…</b>, next to the main switch: hide page elements, hyperlink auditing, WebRTC, remote fonts and JavaScript, plus the filter lists, My filters and trusted sites.</p>
     </div>
-    <div class="mock" aria-hidden="false">
-      <div class="switchrow"><div class="tx"><b>Hide page elements</b><small>Cosmetic filtering: removes the empty boxes and banners ads leave behind</small></div><span class="toggle" role="img" aria-label="On by default"></span></div>
-      <div class="switchrow"><div class="tx"><b>Disable hyperlink auditing</b><small>Stops links from reporting your clicks with &lt;a ping&gt;</small></div><span class="toggle" role="img" aria-label="On by default"></span></div>
-      <div class="switchrow"><div class="tx"><b>Prevent WebRTC from leaking local IP addresses</b><small>Some video calls may stop working</small></div><span class="toggle off" role="img" aria-label="Off by default"></span></div>
-      <div class="switchrow"><div class="tx"><b>Block remote fonts</b><small>Faster pages and less tracking; some icons may become letters</small></div><span class="toggle off" role="img" aria-label="Off by default"></span></div>
-      <div class="switchrow"><div class="tx"><b>Disable JavaScript</b><small>Everywhere except trusted sites</small></div><span class="toggle off" role="img" aria-label="Off by default"></span></div>
-    </div>
+    <div class="shot" style="margin:0"><img src="screens/blocker.png" alt="A real screenshot of Volant's Block ads and trackers page, powered by uBlock: the main switch, settings, filter lists, My filters and trusted sites" loading="lazy"></div>
   </div>
 </div></section>
 
@@ -116,7 +119,7 @@ nav: blocking
 </div></section>
 
 <section class="final"><div class="wrap">
-  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
+  <div class="mark"><img src="appicon.png" alt="" width="128" height="128"></div>
   <h2>Cleaner pages, from the first launch.</h2>
   <div class="ctas" style="justify-content:center">
     <a class="btn primary" href="{{dmg}}">{{icon:download}}Download Volant</a>

@@ -7,7 +7,10 @@ nav: features
   <div class="kicker">Features</div>
   <h1>Everything you need. <em>Nothing in the way.</em></h1>
   <p class="lead">Volant keeps the browser small and quiet so the page gets the room. Here's everything it does, and where to find it.</p>
-  <div class="shot small"><img src="screens/browsing.png" alt="Volant showing a Wikipedia article, with the tab sidebar on the left and the shield in the address bar" loading="lazy"></div>
+  <div class="hero" style="padding:0;text-align:center"><div class="live" style="margin-top:44px">
+    <div data-demo="hero" role="img" aria-label="Volant at work: the command bar, blocking with the shield, Reader and sleeping tabs"></div>
+    <div class="caption"><span data-k="cmd">Command bar</span><span data-k="block">Powered by uBlock</span><span data-k="reader">Reader</span><span data-k="sleep">Sleeping tabs</span></div>
+  </div></div>
 </div></header>
 
 <section id="tabs" class="tight"><div class="wrap">
@@ -22,7 +25,13 @@ nav: features
     <div class="feat"><div class="ic">{{icon:keyboard}}</div><h3>Keyboard first</h3><p><kbd>⌘1</kbd>–<kbd>⌘9</kbd> jump to a tab, <kbd>⌃Tab</kbd> cycles them. <a href="help.html#shortcuts">All shortcuts</a>.</p></div>
     <div class="feat"><div class="ic">{{icon:box}}</div><h3>Background tabs</h3><p><kbd>⌘</kbd>-click or middle-click a link to open it behind the page you're reading.</p></div>
   </div>
-  <div class="shot small"><img src="screens/no-sidebar.png" alt="Volant with the sidebar hidden: the page fills the window" loading="lazy"></div>
+  <div class="split even" style="align-items:center">
+    <div class="mini"><div class="sleep" data-demo="sleep"></div></div>
+    <div>
+      <h3 style="font-size:24px;letter-spacing:-.02em;margin:0 0 8px">Watch the memory come back.</h3>
+      <p class="lead" style="font-size:16px">A tab you haven't looked at for a while (20 minutes by default) puts its page to sleep and hands its memory back to your Mac. Its title, place and history stay in the sidebar, and it wakes where you left off when you click it.</p>
+    </div>
+  </div>
 </div></section>
 
 <section id="command-bar"><div class="wrap">
@@ -33,7 +42,7 @@ nav: features
       <p class="lead">Press <kbd>⌘L</kbd> or <kbd>⌘T</kbd> and type. Addresses, searches, pages from your history and tabs you already have open, all in one list that updates as fast as you type.</p>
       <p class="note">History search is Volant's own index, sorted by how often and how recently you visit: under a millisecond per keystroke across 100,000 pages.</p>
     </div>
-    <div class="shot" style="margin:0"><img src="screens/command-bar.png" alt="The command bar open over a page, listing suggestions" loading="lazy"></div>
+    <div class="mini"><div data-demo="cmd" role="img" aria-label="Typing in Volant's command bar: suggestions from history and open tabs update with every letter"></div></div>
   </div>
 </div></section>
 
@@ -43,6 +52,7 @@ nav: features
     <div>
       <div class="kicker">Home page</div>
       <h2>Your sites, and the weather.</h2>
+      <p class="note" style="margin:0 0 10px">A real screenshot.</p>
       <p class="lead">New tabs open on a clean search field under the Volant wordmark. Click the pencil in the corner to add favourite sites, drag them into order, and turn on the weather.</p>
       <p class="note">Weather comes from Open-Meteo, free and without an account. Only the city you choose is sent, and only while the widget is on.</p>
     </div>
@@ -57,7 +67,7 @@ nav: features
       <p class="lead">Press <kbd>⇧⌘R</kbd> on any article and Volant lays out the text alone, set in New York, in light or dark.</p>
       <p class="note">Reader runs on Volant's own HTML parser, written in Rust: it parses a 590 KB Wikipedia page in 4 ms and finds the article in 8.</p>
     </div>
-    <div class="shot" style="margin:0"><img src="screens/reader.png" alt="An article in Volant's Reader" loading="lazy"></div>
+    <div class="mini"><div data-demo="reader" role="img" aria-label="An article switching into Volant's Reader and back"></div></div>
   </div>
 </div></section>
 
@@ -81,11 +91,12 @@ nav: features
     <div class="feat"><div class="ic">{{icon:search}}</div><h3>Your search engine</h3><p>DuckDuckGo, Google, Brave Search, Kagi, Bing or Ecosia, set in Settings or during setup.</p></div>
     <div class="feat"><div class="ic">{{icon:lock}}</div><h3>Private by default</h3><p>No accounts, no sync, no telemetry. <a href="privacy.html">What Volant keeps, and where</a>.</p></div>
   </div>
-  <div class="shot small"><img src="screens/dark.png" alt="Volant in dark appearance" loading="lazy"></div>
+  <div class="shot small"><img src="screens/dark.png" alt="A real screenshot of Volant in dark appearance" loading="lazy"></div>
+  <p class="note" style="text-align:center;max-width:none">The real thing, in dark, screenshotted by the test that runs on every build.</p>
 </div></section>
 
 <section class="final"><div class="wrap">
-  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
+  <div class="mark"><img src="appicon.png" alt="" width="128" height="128"></div>
   <h2>Try it. It's 1.3 MB.</h2>
   <div class="ctas" style="justify-content:center">
     <a class="btn primary" href="{{dmg}}">{{icon:download}}Download Volant</a>

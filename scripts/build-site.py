@@ -69,11 +69,14 @@ HEAD = """<!doctype html>
 <meta property="og:site_name" content="Volant">
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{description}">
-<meta property="og:image" content="{site}readme/hero.png">
+<meta property="og:image" content="{site}og.png">
 <meta property="og:url" content="{site}{canonical}">
 <link rel="canonical" href="{site}{canonical}">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="motion.css">
+<script src="brand.js" defer></script>
+<script src="motion.js" defer></script>
 </head>
 <body>
 """

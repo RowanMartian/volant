@@ -1,148 +1,109 @@
-<!-- The panels below are rendered from the landing page in docs/ (docs/readme/*.png). -->
-<p align="center">
-  <a href="https://rowanmartian.github.io/volant/"><img src="docs/readme/hero.png" alt="Volant: the featherweight browser for your Mac. A 1.3 MB download, on screen in a third of a second." width="100%"></a>
-</p>
-<p align="center">
-  <a href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><img src="docs/readme/screenshot.png" alt="Volant's home page: the Volant wordmark above a search field, favourite sites below, the tab sidebar on the left" width="100%"></a>
-</p>
-<p align="center">
-  <img src="docs/readme/numbers.png" alt="1.3 MB to download. 0.3 s from launch to window. 240k ad and tracker rules, powered by uBlock. 100% open source." width="100%">
-</p>
-<p align="center">
-  <a href="https://rowanmartian.github.io/volant/blocking.html"><img src="docs/readme/blocking.png" alt="Powered by uBlock. Block ads and trackers, built in: uBlock Origin's filter lists, defaults and filter syntax compiled into WebKit's own content blocker. 240,000 network rules, 10,000+ site fixes and scriptlets, one click to turn it off for a site." width="100%"></a>
-</p>
-<p align="center">
-  <img src="docs/readme/speed.png" alt="Launch to window: Volant 0.30 s, Chrome 1.47 s, Firefox 2.31 s, Safari 3.64 s. App size: Volant 2 MB, Safari 29 MB, Firefox 521 MB, Chrome 732 MB. Memory with five pages: Safari 169 MB, Volant 320 MB, Chrome 515 MB, Firefox 821 MB." width="100%">
-</p>
-<p align="center">
-  <img src="docs/readme/rust.png" alt="Written in Rust from scratch: the whole interface, the tab engine, search as you type, the uBlock filter compiler, the HTML parser and Reader, the updater, history and settings. Borrowed from macOS: WebKit and AppKit." width="100%">
-</p>
-<p align="center">
-  <img src="docs/readme/features.png" alt="Blocking powered by uBlock, Reader, sleeping tabs, command bar, updates itself, private by default." width="100%">
-</p>
-<p align="center">
-  <a href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><img src="docs/readme/download.png" alt="Download Volant" width="100%"></a>
-</p>
+# Volant
 
-<p align="center">
-  <a href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><b>Download Volant.dmg</b></a> &nbsp;·&nbsp; <a href="https://rowanmartian.github.io/volant/">Website</a> &nbsp;·&nbsp; <a href="https://github.com/RowanMartian/volant/releases/tag/latest">Release notes</a> &nbsp;·&nbsp; MIT License
-</p>
+A native macOS browser in Rust. AppKit for the interface, the system WebKit for pages, and everything in
+between written from scratch. Ad and tracker blocking is built in, powered by uBlock Origin's filter lists.
 
----
+[![Build](https://github.com/RowanMartian/volant/actions/workflows/build-macos.yml/badge.svg)](https://github.com/RowanMartian/volant/actions/workflows/build-macos.yml)
+&nbsp;[Website](https://rowanmartian.github.io/volant/) · [Download](https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg) · macOS 12+, universal (arm64 + x86_64) · MIT
 
-## Install
+| | Volant | Safari | Chrome | Firefox |
+| --- | --- | --- | --- | --- |
+| Launch to window | **0.30 s** | 3.64 s | 1.47 s | 2.31 s |
+| App size | **2 MB** (1.3 MB download) | 29 MB | 732 MB | 521 MB |
+| Memory, 5 pages | 320 MB | 169 MB | 515 MB | 821 MB |
 
-1. Go to **Releases** → **Volant — latest build** and download **Volant.dmg**.
-2. Open it and drag **Volant** onto **Applications**.
-3. The first time, macOS warns that it can't verify the developer, because Volant isn't notarized by Apple.
-   Go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**. Or run this once:
-   ```bash
-   xattr -cr /Applications/Volant.app
-   ```
+<sub>Latest CI benchmark on GitHub's Apple Silicon runners (`scripts/bench/run.sh`): median of 3 launches after a warm-up,
+memory footprint summed over every process each browser starts. Shared runners vary; across runs Volant launched in 0.29–1.04 s.</sub>
 
-Volant needs macOS 12 Monterey or later, on Apple Silicon or Intel.
+## Architecture
 
-## Keyboard
+```
+crates/core   volant-core: platform-independent, zero dependencies, builds and tests on any OS
+crates/app    volant: the macOS shell (objc2 bindings to AppKit and WebKit)
+assets/       Volant's own pages (volant://) and the scripts the blocker injects
+```
 
-| | |
-| --- | --- |
-| ⌘T | New tab, ready to search or type an address |
-| ⌘L | The command bar: addresses, searches, history and open tabs |
-| ⌘S | Show or hide the sidebar |
-| ⌘D | Pin or unpin the current tab |
-| ⇧⌘T | Reopen the last tab you closed |
-| ⌘W | Close tab |
-| ⌘1 – ⌘9 | Jump to a tab (⌘9 is always the last one) |
-| ⌃Tab, ⇧⌘] / ⇧⌘[ | Next / previous tab |
-| ⌘F, ⌘G, ⇧⌘G | Find on page, next, previous |
-| ⌥⌘B | Block an element on the page |
-| ⇧⌘R | Reader |
-| ⌘[ / ⌘] | Back / forward |
-| ⌘+ / ⌘- / ⌘0 | Zoom in / out / actual size |
-| ⌘Y | History |
-| ⌘, | Settings |
+**volant-core** (no dependencies)
+- `omnibox`, `search`, `fuzzy`: address/search classification and the command bar's ranking.
+- `history`: an append-only log plus an in-memory frecency index; under 1 ms per keystroke at 100k pages.
+- `html`, `reader`: an HTML tokenizer/tree builder and article extraction (590 KB page: 4 ms parse, 8 ms extract).
+- `ublock`: the filter compiler described below.
+- `tabs`, `store`, `json`: the tab model with sleep and restore, settings and favourites as plain text, and a JSON writer.
 
-⌘-click or middle-click a link to open it in a background tab (add ⇧ to switch to it). Right-click a tab to pin, duplicate, copy its link or close others.
+**volant** (objc2, objc2-app-kit, objc2-web-kit, block2, dispatch2)
+- A single `Browser` state on the main thread. AppKit and WebKit callbacks reach it through a re-entrancy-safe
+  `with()`, which runs the closure immediately, or on the next run-loop turn if the state is already borrowed.
+- The window is ordered front before WebKit is touched; the first tab's `WKWebView` is created on the next turn.
+- One `WKWebViewConfiguration` is copied per tab, each tab with its own `WKUserContentController`.
+- Background tabs idle past a threshold (20 min by default) drop their web view and keep only URL, title and history.
+- In-place updater: polls the `latest` release, downloads `Volant-mac.zip`, `ditto -x`, `codesign --verify --deep --strict`,
+  then swaps the bundle after quit and relaunches with the session.
 
-### The home page
+## Blocking engine
 
-Click the pencil in the bottom-right corner to add your favourite sites (drag to reorder) and to turn on the weather widget.
-Weather comes from [Open-Meteo](https://open-meteo.com), free and without an account; only the city you choose is sent, and only while the widget is on.
+Volant compiles uBlock Origin's lists (the uBO catalogue and default selection) into WebKit's native content blocker,
+with no extension runtime.
 
-### Updates
+1. **Preprocess** each list: `!#if` evaluated as uBO on Safari (`env_safari`, `ext_ublock`, `cap_user_stylesheet`).
+2. **Network filters** → `WKContentRuleList` JSON: anchors, `$domain`, `$to`, resource types, 1p/3p, `match-case`,
+   `$badfilter`, and regexes translated into WebKit's subset. Rules are sharded at 60k per list. Every shard gets all
+   `ignore-previous-rules` exceptions, and `$important` blocks are placed after the exceptions, so they win as in uBO.
+   `$redirect` becomes a block; `$removeparam`, `$csp`, `$header` and HTML filters are skipped.
+3. **Cosmetic filters**: selectors WebKit accepts become `css-display-none` rules (generic ones batched, site ones
+   grouped per domain). The rest go into a `SiteIndex` keyed by host and entity (`example.*`), together with
+   procedural filters, scriptlets and `$generichide`/`$elemhide`/`$specifichide`/`$document` exceptions.
+4. **Per navigation**, `webView:decidePolicyForNavigationAction:preferences:` sets the tab's rule lists (none on
+   trusted sites), a document-start main-frame `WKUserScript` with that host's scriptlets and procedural filters, and
+   `allowsContentJavaScript` for the no-script option.
 
-Volant checks GitHub for a newer build at launch and every few hours, or when you choose **Volant → Check for Updates…**.
-Updating downloads the new app, checks its signature, swaps it in when Volant quits, and reopens it. If Volant can't write to the folder it's in, it opens the download page instead.
+uBO defaults (9 lists) produce 239,704 network rules, 30,201 cosmetic filters, 10,362 scriptlets and 1,332 procedural
+filters across ~26.8k sites. On the CI Mac that takes about 1 s in Rust and about 19 s in WebKit, once; compiled
+lists are then looked up by key at launch. `assets/ublock/` holds the page-side code: 33 scriptlets, a procedural
+engine (`:has-text`, `:upward`, `:matches-css`, `:xpath`, `:remove`, `:style`, …) and the element picker.
 
-### Block ads and trackers (Powered by uBlock)
+uBlock Origin is by Raymond Hill and contributors (GPLv3); Volant is independent and not endorsed by them.
 
-Volant's blocker runs [uBlock Origin](https://github.com/gorhill/uBlock)'s filter lists, with uBlock Origin's
-default selection and filter syntax, built into the browser. It's on from the first launch; one switch in
-Settings turns it off.
-
-- Network filters are compiled by Volant (in Rust) into WebKit's native content blocker: about 240,000 rules
-  from the default lists, in under a second. Requests are stopped inside WebKit before they're sent.
-- Cosmetic filters, procedural filters (`:has-text`, `:upward`, `:xpath`, …) and 33 of uBlock Origin's
-  scriptlets are added to each page for its site only.
-- **The shield** in the address bar turns blocking off (and back on) for the site you're on.
-  Right-click it, or press ⌥⌘B, to **block an element** with the picker.
-- **Volant → Blocker Settings…** has uBlock Origin's settings: hide page elements, hyperlink auditing,
-  WebRTC, remote fonts, JavaScript, the whole filter list catalogue, My filters and trusted sites.
-- Lists refresh every four days. `$redirect` filters block instead; `$removeparam`, `$csp`, `$header`
-  and HTML filters are skipped, because WebKit's content blocker can't rewrite requests or pages.
-
-uBlock Origin is by Raymond Hill and contributors (GPLv3). Volant is an independent project, not made or
-endorsed by them. [More about blocking](https://rowanmartian.github.io/volant/blocking.html).
-
-### Where things live
-
-Settings, your open tabs and history are plain text files in `~/Library/Application Support/Volant`.
-Downloads go to your Downloads folder.
-
-## Build it yourself
-
-GitHub builds Volant on every push (`.github/workflows/build-macos.yml`): it runs the tests, builds a
-universal app, drives it through a smoke test with screenshots, installs the previous release over a
-copy of itself to test the updater, benchmarks it against Safari, Chrome and Firefox, and publishes
-**Volant.dmg**.
-
-On a Mac with Rust installed:
+## Build
 
 ```bash
 bash scripts/bundle-macos.sh
 ```
 
-```bash
-open dist/Volant.app
-```
-
-The engine pieces build and test on any OS:
+This builds a universal release binary (`lto = "fat"`, `codegen-units = 1`, `panic = "abort"`), compiles the Liquid
+Glass icon (`macos/AppIcon.icon`) with `actool`, ad-hoc signs, and writes `dist/Volant.app`, `Volant.dmg` and
+`Volant-mac.zip`.
 
 ```bash
 cargo test -p volant-core
 ```
 
 ```bash
-cargo run --release -p volant-core --example bench
+cargo run --release -p volant-core --example compile_lists -- easylist.txt easyprivacy.txt
 ```
 
-| Folder | What's in it |
-| --- | --- |
-| `crates/core` | Everything platform-independent, with zero dependencies: address bar logic, history and its search index, the HTML parser and Reader, the uBlock filter compiler, the tab model, settings. |
-| `crates/app` | The macOS app: AppKit window and sidebar, command bar, find bar, menus, web views, downloads, blocking, updater. |
-| `assets/pages` | Volant's own pages: welcome, home, settings, blocker, history, Reader, errors. |
-| `assets/ublock` | The scripts the blocker adds to pages: scriptlets, cosmetic and procedural filtering, the element picker. |
-| `site` | The website's pages; `python3 scripts/build-site.py` builds them into `docs`. |
-| `docs` | The built website (GitHub Pages), and the panels at the top of this page. |
-| `scripts/bench` | The browser comparison CI runs. |
+`compile_lists` takes `OUT=dir` to write the rule lists and `LOOKUP=host` to print what a page on that host gets.
+`bench` and `fuzz` are the other examples.
 
-Benchmarks vary on shared build machines; across runs Volant launched in 0.29–1.04 s, Safari 2.1–3.6 s,
-Chrome 0.60–1.5 s and Firefox 1.3–2.3 s. Memory with five pages: Volant 253–320 MB, Safari 160–308 MB,
-Chrome 515–527 MB, Firefox 805–823 MB.
+## CI
 
-## Design
+`.github/workflows/build-macos.yml`, on every push to `main`:
 
-Flat and quiet: no borders, no shadows, no gradients. Surfaces are told apart by fill alone, everything
-you can click has rounded corners, and the system font does the talking. The mark is a V with a jet
-breaking away from it, in Volant blue (#0088FE); in square icons the V sits dead centre and the jet
-flies off to the right.
+1. Run core tests, build the app, and render its icon as macOS draws it.
+2. Smoke test: launch, browse, screenshot ten views, and record memory.
+3. uBlock self-test: download the default lists, compile them into WebKit, then check network, generic and site
+   cosmetic, procedural and scriptlet filtering on a live page, and check that trusting the site disables all of it.
+4. Updater test: install the current release over a copy of this build and verify it relaunches.
+5. Benchmark against Safari, Chrome and Firefox, then publish the `latest` release if this commit is still the tip.
+
+The website is `site/` → `python3 scripts/build-site.py` → `docs/`, deployed by `.github/workflows/pages.yml`.
+
+## Install
+
+Open `Volant.dmg` and drag Volant to Applications. Volant isn't notarized, so the first launch needs
+**System Settings → Privacy & Security → Open Anyway**, or:
+
+```bash
+xattr -cr /Applications/Volant.app
+```
+
+Data lives in `~/Library/Application Support/Volant` as plain text.

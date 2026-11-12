@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     # The website and README don't change the app.
-    paths-ignore: ["docs/**", "README.md"]
+    paths-ignore: ["docs/**", "site/**", "scripts/build-site.py", "README.md"]
   pull_request:
   workflow_dispatch:
 

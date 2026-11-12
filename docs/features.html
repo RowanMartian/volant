@@ -10,11 +10,14 @@
 <meta property="og:site_name" content="Volant">
 <meta property="og:title" content="Features — Volant">
 <meta property="og:description" content="Everything Volant does: a calm tab sidebar, a command bar for everything, sleeping tabs, Reader, a home page with favourites and weather, blocking powered by uBlock, and updates that install themselves.">
-<meta property="og:image" content="https://rowanmartian.github.io/volant/readme/hero.png">
+<meta property="og:image" content="https://rowanmartian.github.io/volant/og.png">
 <meta property="og:url" content="https://rowanmartian.github.io/volant/features.html">
 <link rel="canonical" href="https://rowanmartian.github.io/volant/features.html">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="motion.css">
+<script src="brand.js" defer></script>
+<script src="motion.js" defer></script>
 </head>
 <body>
 <nav><div class="wrap">
@@ -26,7 +29,10 @@
   <div class="kicker">Features</div>
   <h1>Everything you need. <em>Nothing in the way.</em></h1>
   <p class="lead">Volant keeps the browser small and quiet so the page gets the room. Here's everything it does, and where to find it.</p>
-  <div class="shot small"><img src="screens/browsing.png" alt="Volant showing a Wikipedia article, with the tab sidebar on the left and the shield in the address bar" loading="lazy"></div>
+  <div class="hero" style="padding:0;text-align:center"><div class="live" style="margin-top:44px">
+    <div data-demo="hero" role="img" aria-label="Volant at work: the command bar, blocking with the shield, Reader and sleeping tabs"></div>
+    <div class="caption"><span data-k="cmd">Command bar</span><span data-k="block">Powered by uBlock</span><span data-k="reader">Reader</span><span data-k="sleep">Sleeping tabs</span></div>
+  </div></div>
 </div></header>
 
 <section id="tabs" class="tight"><div class="wrap">
@@ -41,7 +47,13 @@
     <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="3"/><path d="M6.5 10h1M10.5 10h1M14.5 10h1M8 14h8"/></svg></div><h3>Keyboard first</h3><p><kbd>⌘1</kbd>–<kbd>⌘9</kbd> jump to a tab, <kbd>⌃Tab</kbd> cycles them. <a href="help.html#shortcuts">All shortcuts</a>.</p></div>
     <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10M7.5 9.5 12 14l4.5-4.5M5 19h14"/></svg></div><h3>Background tabs</h3><p><kbd>⌘</kbd>-click or middle-click a link to open it behind the page you're reading.</p></div>
   </div>
-  <div class="shot small"><img src="screens/no-sidebar.png" alt="Volant with the sidebar hidden: the page fills the window" loading="lazy"></div>
+  <div class="split even" style="align-items:center">
+    <div class="mini"><div class="sleep" data-demo="sleep"></div></div>
+    <div>
+      <h3 style="font-size:24px;letter-spacing:-.02em;margin:0 0 8px">Watch the memory come back.</h3>
+      <p class="lead" style="font-size:16px">A tab you haven't looked at for a while (20 minutes by default) puts its page to sleep and hands its memory back to your Mac. Its title, place and history stay in the sidebar, and it wakes where you left off when you click it.</p>
+    </div>
+  </div>
 </div></section>
 
 <section id="command-bar"><div class="wrap">
@@ -52,7 +64,7 @@
       <p class="lead">Press <kbd>⌘L</kbd> or <kbd>⌘T</kbd> and type. Addresses, searches, pages from your history and tabs you already have open, all in one list that updates as fast as you type.</p>
       <p class="note">History search is Volant's own index, sorted by how often and how recently you visit: under a millisecond per keystroke across 100,000 pages.</p>
     </div>
-    <div class="shot" style="margin:0"><img src="screens/command-bar.png" alt="The command bar open over a page, listing suggestions" loading="lazy"></div>
+    <div class="mini"><div data-demo="cmd" role="img" aria-label="Typing in Volant's command bar: suggestions from history and open tabs update with every letter"></div></div>
   </div>
 </div></section>
 
@@ -62,6 +74,7 @@
     <div>
       <div class="kicker">Home page</div>
       <h2>Your sites, and the weather.</h2>
+      <p class="note" style="margin:0 0 10px">A real screenshot.</p>
       <p class="lead">New tabs open on a clean search field under the Volant wordmark. Click the pencil in the corner to add favourite sites, drag them into order, and turn on the weather.</p>
       <p class="note">Weather comes from Open-Meteo, free and without an account. Only the city you choose is sent, and only while the widget is on.</p>
     </div>
@@ -76,7 +89,7 @@
       <p class="lead">Press <kbd>⇧⌘R</kbd> on any article and Volant lays out the text alone, set in New York, in light or dark.</p>
       <p class="note">Reader runs on Volant's own HTML parser, written in Rust: it parses a 590 KB Wikipedia page in 4 ms and finds the article in 8.</p>
     </div>
-    <div class="shot" style="margin:0"><img src="screens/reader.png" alt="An article in Volant's Reader" loading="lazy"></div>
+    <div class="mini"><div data-demo="reader" role="img" aria-label="An article switching into Volant's Reader and back"></div></div>
   </div>
 </div></section>
 
@@ -100,11 +113,12 @@
     <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg></div><h3>Your search engine</h3><p>DuckDuckGo, Google, Brave Search, Kagi, Bing or Ecosia, set in Settings or during setup.</p></div>
     <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div><h3>Private by default</h3><p>No accounts, no sync, no telemetry. <a href="privacy.html">What Volant keeps, and where</a>.</p></div>
   </div>
-  <div class="shot small"><img src="screens/dark.png" alt="Volant in dark appearance" loading="lazy"></div>
+  <div class="shot small"><img src="screens/dark.png" alt="A real screenshot of Volant in dark appearance" loading="lazy"></div>
+  <p class="note" style="text-align:center;max-width:none">The real thing, in dark, screenshotted by the test that runs on every build.</p>
 </div></section>
 
 <section class="final"><div class="wrap">
-  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
+  <div class="mark"><img src="appicon.png" alt="" width="128" height="128"></div>
   <h2>Try it. It's 1.3 MB.</h2>
   <div class="ctas" style="justify-content:center">
     <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download Volant</a>

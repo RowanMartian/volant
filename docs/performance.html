@@ -10,11 +10,14 @@
 <meta property="og:site_name" content="Volant">
 <meta property="og:title" content="Performance — Volant">
 <meta property="og:description" content="How fast Volant is, and how it's measured: launch time, app size and memory against Safari, Chrome and Firefox, benchmarked on every build.">
-<meta property="og:image" content="https://rowanmartian.github.io/volant/readme/hero.png">
+<meta property="og:image" content="https://rowanmartian.github.io/volant/og.png">
 <meta property="og:url" content="https://rowanmartian.github.io/volant/performance.html">
 <link rel="canonical" href="https://rowanmartian.github.io/volant/performance.html">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="motion.css">
+<script src="brand.js" defer></script>
+<script src="motion.js" defer></script>
 </head>
 <body>
 <nav><div class="wrap">
@@ -29,8 +32,8 @@
 </div></header>
 
 <section class="tight"><div class="wrap">
-  <div class="charts" style="margin-top:0">
-    <div class="chart"><h3>Launch to window</h3><p>Seconds. Shorter is better.</p><div id="c-launch"></div></div>
+  <div class="race" data-demo="race" style="margin-top:0"></div>
+  <div class="charts two" style="margin-top:14px">
     <div class="chart"><h3>App size</h3><p>Megabytes on disk. Smaller is better.</p><div id="c-size"></div></div>
     <div class="chart"><h3>Memory, five pages</h3><p>Megabytes, all processes. Lower is better.</p><div id="c-mem"></div></div>
   </div>
@@ -58,9 +61,9 @@
   <p class="lead">Everything around the page is Volant's own Rust, so it's measured too.</p>
   <div class="numbers" style="margin-top:44px">
     <div class="num"><b>&lt;1<small>ms</small></b><span>per keystroke to search 100,000 pages of history.</span></div>
-    <div class="num"><b>4<small>ms</small></b><span>to parse a 590 KB Wikipedia page for Reader.</span></div>
-    <div class="num"><b>0.9<small>s</small></b><span>to compile uBlock's 240,000 default network filters.</span></div>
-    <div class="num"><b>110<small>k</small></b><span>random inputs fuzzed through the parsers without a crash.</span></div>
+    <div class="num"><b data-count="4">4<small>ms</small></b><span>to parse a 590 KB Wikipedia page for Reader.</span></div>
+    <div class="num"><b data-count="0.9" data-dec="1">0.9<small>s</small></b><span>to compile uBlock's 240,000 default network filters.</span></div>
+    <div class="num"><b data-count="110">110<small>k</small></b><span>random inputs fuzzed through the parsers without a crash.</span></div>
   </div>
 </div></section>
 
@@ -90,7 +93,7 @@
 </div></section>
 
 <section class="final"><div class="wrap">
-  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
+  <div class="mark"><img src="appicon.png" alt="" width="128" height="128"></div>
   <h2>See for yourself.</h2>
   <div class="ctas" style="justify-content:center">
     <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download Volant</a>
@@ -109,6 +112,5 @@
   </div>
   <p class="legal">Blocking is powered by uBlock: Volant uses uBlock Origin's filter lists and filter syntax. uBlock Origin is by Raymond Hill and contributors; Volant is an independent project, not made or endorsed by them. Mac, macOS, Safari and WebKit are trademarks of Apple Inc.</p>
 </div></footer>
-<script src="charts.js"></script>
 </body>
 </html>

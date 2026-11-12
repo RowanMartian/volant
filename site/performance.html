@@ -10,8 +10,8 @@ nav: performance
 </div></header>
 
 <section class="tight"><div class="wrap">
-  <div class="charts" style="margin-top:0">
-    <div class="chart"><h3>Launch to window</h3><p>Seconds. Shorter is better.</p><div id="c-launch"></div></div>
+  <div class="race" data-demo="race" style="margin-top:0"></div>
+  <div class="charts two" style="margin-top:14px">
     <div class="chart"><h3>App size</h3><p>Megabytes on disk. Smaller is better.</p><div id="c-size"></div></div>
     <div class="chart"><h3>Memory, five pages</h3><p>Megabytes, all processes. Lower is better.</p><div id="c-mem"></div></div>
   </div>
@@ -39,9 +39,9 @@ nav: performance
   <p class="lead">Everything around the page is Volant's own Rust, so it's measured too.</p>
   <div class="numbers" style="margin-top:44px">
     <div class="num"><b>&lt;1<small>ms</small></b><span>per keystroke to search 100,000 pages of history.</span></div>
-    <div class="num"><b>4<small>ms</small></b><span>to parse a 590 KB Wikipedia page for Reader.</span></div>
-    <div class="num"><b>0.9<small>s</small></b><span>to compile uBlock's 240,000 default network filters.</span></div>
-    <div class="num"><b>110<small>k</small></b><span>random inputs fuzzed through the parsers without a crash.</span></div>
+    <div class="num"><b data-count="4">4<small>ms</small></b><span>to parse a 590 KB Wikipedia page for Reader.</span></div>
+    <div class="num"><b data-count="0.9" data-dec="1">0.9<small>s</small></b><span>to compile uBlock's 240,000 default network filters.</span></div>
+    <div class="num"><b data-count="110">110<small>k</small></b><span>random inputs fuzzed through the parsers without a crash.</span></div>
   </div>
 </div></section>
 
@@ -71,11 +71,9 @@ nav: performance
 </div></section>
 
 <section class="final"><div class="wrap">
-  <div class="mark"><img src="logo.svg" alt="" width="86" height="86"></div>
+  <div class="mark"><img src="appicon.png" alt="" width="128" height="128"></div>
   <h2>See for yourself.</h2>
   <div class="ctas" style="justify-content:center">
     <a class="btn primary" href="{{dmg}}">{{icon:download}}Download Volant</a>
   </div>
 </div></section>
-<!-- scripts -->
-<script src="charts.js"></script>
