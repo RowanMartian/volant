@@ -19,6 +19,7 @@ memory footprint summed over every process each browser starts. Shared runners v
 
 ```
 crates/core   volant-core: platform-independent, zero dependencies, builds and tests on any OS
+crates/engine volant-engine: Volant's own web engine (CSS, style, layout, paint), built chunk by chunk
 crates/app    volant: the macOS shell (objc2 bindings to AppKit and WebKit)
 crates/tools  volant-tools: website builder, lipo and zip, used by the build (depends only on volant-core)
 assets/       Volant's own pages (volant://) and the scripts the blocker injects
@@ -47,6 +48,19 @@ assets/       Volant's own pages (volant://) and the scripts the blocker injects
 - In-place updater: reads the `latest` release from GitHub's API, downloads `Volant-mac.zip`, checks it against the
   SHA-256 GitHub publishes for the asset, unpacks it in Rust, then re-runs its own binary as `--finish-update` to swap
   the bundle after quit and relaunch with the session. No `ditto`, `codesign` or shell.
+
+## Volant's own engine
+
+`crates/engine` is a web engine written from scratch, growing in chunks; WebKit still renders web pages.
+Today: CSS parsing (selectors with descendant/child/sibling combinators, attribute operators, structural pseudo-classes,
+`!important`, screen `@media`), the cascade with a user-agent sheet, inheritance and `em`/`rem`/`%` units; block layout
+(margins with sibling collapsing, padding, borders, `width`/`max-width`, auto-margin centring) and inline layout
+(whitespace collapsing, `pre`/`pre-wrap`/`nowrap`, wrapping with long-word breaking, baselines from font metrics,
+`text-align`, list markers, links); a display list of rectangles and text. The app measures and draws with the system
+fonts (`engine_view.rs`); `volant-tools render page.html out.svg [--reader URL]` draws to SVG anywhere.
+
+It's used for an opt-in Reader (Settings → Experimental): the extracted article is laid out by the engine and drawn
+natively over the Reader page. Next chunks: images, floats, tables, inline boxes, then more of CSS.
 
 ## Blocking engine
 

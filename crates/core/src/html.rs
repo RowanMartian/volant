@@ -35,7 +35,7 @@ const VOID: &[&str] = &["area", "base", "br", "col", "embed", "hr", "img", "inpu
 /// Elements whose content is raw text up to the matching end tag.
 const RAW: &[&str] = &["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "template", "svg", "math"];
 /// Raw elements whose text is worth keeping.
-const KEEP_RAW: &[&str] = &["title", "textarea"];
+const KEEP_RAW: &[&str] = &["title", "textarea", "style"];
 /// Starting one of these closes an open `<p>`.
 const CLOSES_P: &[&str] = &[
     "address", "article", "aside", "blockquote", "details", "div", "dl", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",

@@ -350,6 +350,7 @@ pub fn layout(b: &mut Browser) {
     update_progress(b);
     super::command::layout(b);
     super::find::layout(b);
+    super::engine_view::sync(b);
 }
 
 fn layout_rows(b: &Browser) {
@@ -507,6 +508,7 @@ pub fn update_chrome(b: &Browser) {
     ui.reload.hit.setToolTip(Some(&ns(if loading { "Stop (⌘.)" } else { "Reload (⌘R)" })));
     let title = tab.map(tab_title).unwrap_or_else(|| "Volant".into());
     b.window.setTitle(&ns(&title));
+    super::engine_view::sync(b);
 }
 
 /// The thin loading line along the top of the page.

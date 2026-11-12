@@ -358,7 +358,7 @@ pub fn smoke_test(b: &Browser) {
     let since_exec = super::SHOWN.with(|t| t.get()).unwrap_or_default();
     report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
     let (s1, s2, s3, s4, s5, s6, s7, s8) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone());
-    let (s9, s10) = (shot.clone(), shot);
+    let (s9, s10, s11) = (shot.clone(), shot.clone(), shot);
     let (m1, m2) = (mem.clone(), mem);
     let rep = report.clone();
     let dir2 = dir.clone();
@@ -425,7 +425,16 @@ pub fn smoke_test(b: &Browser) {
         actions::open_or_switch(b, "volant://blocker");
     }));
     step(42.5, Box::new(move |_b| s10("10-blocker")));
-    step(43.0, Box::new(move |_b| {
+    // Experimental: the Jet aircraft article in Reader, drawn by Volant's own engine.
+    step(43.0, Box::new(|b| {
+        super::theme::apply_appearance(volant_core::store::Appearance::Light, b.mtm);
+        super::theme::refresh(b);
+        b.settings.engine_reader = true;
+        actions::select_index(b, 0);
+        super::engine_view::sync(b);
+    }));
+    step(45.5, Box::new(move |_b| s11("11-engine-reader")));
+    step(46.0, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

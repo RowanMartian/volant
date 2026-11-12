@@ -8,6 +8,7 @@
 
 use crate::html::{self, Data, Dom, NodeId, ROOT};
 
+#[derive(Clone, Debug, Default)]
 pub struct Article {
     pub title: String,
     pub byline: String,

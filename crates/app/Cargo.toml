@@ -7,6 +7,7 @@ description = "Volant: a featherweight web browser for macOS"
 
 [dependencies]
 volant-core = { path = "../core" }
+volant-engine = { path = "../engine" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

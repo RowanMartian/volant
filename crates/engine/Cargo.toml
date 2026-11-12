@@ -1,0 +1,11 @@
+[package]
+name = "volant-engine"
+description = "Volant's own web engine: CSS, style, layout and painting, written from scratch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+volant-core = { path = "../core" }

@@ -75,6 +75,12 @@ h2{font-size:12px;font-weight:600;color:var(--text3);margin:26px 0 8px 14px}
       <button class="btn primary" id="make-default">Make Default</button></div>
   </div>
 
+  <h2>EXPERIMENTAL</h2>
+  <div class="group">
+    <div class="row"><div class="tx"><b>Draw Reader with Volant's own engine</b><small>Reader view set by Volant's from-scratch engine, natively, instead of WebKit. Early days: no images or tables yet.</small></div>
+      <label class="switch"><input type="checkbox" id="engine-reader"><i></i></label></div>
+  </div>
+
   <h2>ABOUT</h2>
   <div class="group">
     <div class="about"><div class="logo" id="logo2"></div>
@@ -105,6 +111,8 @@ $('#engine').innerHTML = (V.engines || []).map(([id, name]) => `<option value="$
 $('#engine').onchange = (e) => { volant.send('set', 'engine=' + e.target.value); toast('Search engine changed'); };
 $('#restore').checked = S.restore_session !== false;
 $('#restore').onchange = (e) => volant.send('set', 'restore_session=' + (e.target.checked ? 1 : 0));
+$('#engine-reader').checked = !!S.engine_reader;
+$('#engine-reader').onchange = (e) => volant.send('set', 'engine_reader=' + (e.target.checked ? 1 : 0));
 $('#suspend').value = String(S.suspend_minutes ?? 20);
 $('#suspend').onchange = (e) => volant.send('set', 'suspend_minutes=' + e.target.value);
 

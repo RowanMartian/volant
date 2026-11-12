@@ -347,6 +347,8 @@ pub fn toggle_reader(b: &mut Browser) {
                         let base = NSURL::URLWithString(&ns("volant://reader"));
                         unsafe { w.web.loadHTMLString_baseURL(&ns(&page), base.as_deref()) };
                     }
+                    // Experimental: Volant's own engine draws the article over that page.
+                    super::engine_view::show(b, id, a, &url);
                 });
             });
         });

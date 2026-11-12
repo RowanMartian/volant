@@ -110,4 +110,5 @@ pub fn refresh(b: &mut Browser) {
     CURRENT.with(|c| c.set(t));
     ui::repaint(b);
     ui::relight_soon();
+    super::engine_view::sync(b);
 }

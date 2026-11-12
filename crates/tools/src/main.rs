@@ -8,6 +8,9 @@
 //! volant-tools zip SRC_DIR OUT.zip             zip a folder, keeping it as the top level
 //! volant-tools unzip IN.zip DIR                unpack (as Volant's updater does)
 //! volant-tools sha256 FILE...                  SHA-256 of each file
+//! volant-tools render IN.html OUT.svg [--width N] [--reader URL] [--dark] [--sans]
+//!                                              draw a page with Volant's own engine
+//!                                              (--reader: as Reader view of URL)
 //! ```
 
 mod site;
@@ -64,6 +67,27 @@ fn run(args: &[String]) -> Result<(), String> {
             for p in &args[1..] {
                 println!("{}  {p}", hash::hex(&hash::sha256(&read(p)?)));
             }
+        }
+        "render" => {
+            let html = String::from_utf8_lossy(&read(arg(1)?)?).into_owned();
+            let out = arg(2)?;
+            let flag = |name: &str| args.iter().position(|a| a == name);
+            let value = |name: &str| flag(name).and_then(|i| args.get(i + 1)).cloned();
+            let width: f32 = value("--width").map(|w| w.parse().map_err(|_| "bad --width")).transpose()?.unwrap_or(900.0);
+            let (doc, css) = match value("--reader") {
+                Some(url) => {
+                    let a = volant_core::reader::extract(&html, &url).ok_or("no article found on that page")?;
+                    let host = volant_core::omnibox::host(&url).to_string();
+                    let o = volant_engine::reader::Options { dark: flag("--dark").is_some(), size: 20.0, serif: flag("--sans").is_none() };
+                    volant_engine::reader::document(&a, &host, &o)
+                }
+                None => (html, String::new()),
+            };
+            let started = std::time::Instant::now();
+            let page = volant_engine::render(&doc, &css, width, &volant_engine::ApproxFonts);
+            let took = started.elapsed();
+            write(out, volant_engine::svg::to_svg(&page).as_bytes())?;
+            println!("{out}: {} x {} px, {} items, {} links, laid out in {:.1} ms", page.width, page.height.ceil(), page.items.len(), page.links.len(), took.as_secs_f64() * 1000.0);
         }
         other => return Err(format!("unknown command {other:?}; see the top of crates/tools/src/main.rs")),
     }

@@ -33,6 +33,7 @@ fn settings_json(b: &Browser) -> String {
         .str("appearance", s.appearance.as_str())
         .bool("restore_session", s.restore_session)
         .num("suspend_minutes", s.suspend_minutes)
+        .bool("engine_reader", s.engine_reader)
         .done()
 }
 
@@ -176,6 +177,7 @@ pub fn handle(b: &mut Browser, tab: Option<TabId>, cmd: &str, value: &str) {
                 // These apply from the next page load.
                 "ublock_noscript" | "ublock_webrtc" => blocking::push_status(b),
                 "sidebar" => ui::layout(b),
+                "engine_reader" | "reader_size" | "reader_font" => super::engine_view::sync(b),
                 _ => {}
             }
         }

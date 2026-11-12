@@ -57,6 +57,8 @@ pub struct Settings {
     /// Reader text size in points, and "serif" or "sans".
     pub reader_size: u32,
     pub reader_font: String,
+    /// Experimental: Reader drawn by Volant's own engine (volant-engine) instead of WebKit.
+    pub engine_reader: bool,
 }
 
 impl Default for Settings {
@@ -82,6 +84,7 @@ impl Default for Settings {
             weather_unit: "c".into(),
             reader_size: 20,
             reader_font: "serif".into(),
+            engine_reader: false,
         }
     }
 }
@@ -119,6 +122,7 @@ impl Settings {
                 "suspend_minutes" => s.suspend_minutes = v.parse().unwrap_or(s.suspend_minutes),
                 "lists_updated" => s.lists_updated = v.parse().unwrap_or(0),
                 "reader_size" => s.reader_size = v.parse::<u32>().map(|n| n.clamp(14, 30)).unwrap_or(s.reader_size),
+                "engine_reader" => s.engine_reader = v == "1",
                 "reader_font" => s.reader_font = if v == "sans" { "sans".into() } else { "serif".into() },
                 "weather" => s.weather = v == "1",
                 "weather_place" => s.weather_place = v.to_string(),
@@ -135,7 +139,7 @@ impl Settings {
     pub fn serialize(&self) -> String {
         let b = |x: bool| if x { "1" } else { "0" };
         format!(
-            "engine={}\nublock={}\nublock_lists={}\nublock_cosmetic={}\nublock_fonts={}\nublock_noscript={}\nublock_pings={}\nublock_webrtc={}\nappearance={}\nonboarded={}\nrestore_session={}\nsidebar={}\nsuspend_minutes={}\nlists_updated={}\nreader_size={}\nreader_font={}\nweather={}\nweather_place={}\nweather_at={}\nweather_unit={}\n",
+            "engine={}\nublock={}\nublock_lists={}\nublock_cosmetic={}\nublock_fonts={}\nublock_noscript={}\nublock_pings={}\nublock_webrtc={}\nappearance={}\nonboarded={}\nrestore_session={}\nsidebar={}\nsuspend_minutes={}\nlists_updated={}\nreader_size={}\nreader_font={}\nengine_reader={}\nweather={}\nweather_place={}\nweather_at={}\nweather_unit={}\n",
             self.engine,
             b(self.ublock),
             self.ublock_lists.join(","),
@@ -152,6 +156,7 @@ impl Settings {
             self.lists_updated,
             self.reader_size,
             self.reader_font,
+            b(self.engine_reader),
             b(self.weather),
             self.weather_place,
             self.weather_at.map(|(a, o)| format!("{a},{o}")).unwrap_or_default(),
@@ -173,7 +178,7 @@ impl Settings {
         *self = Self::parse(&format!("{}{key}={value}\n", self.serialize()));
         *self != before
             || key.starts_with("ublock")
-            || matches!(key, "engine" | "blocking" | "appearance" | "onboarded" | "restore_session" | "sidebar" | "suspend_minutes" | "reader_size" | "reader_font" | "weather" | "weather_place" | "weather_at" | "weather_unit")
+            || matches!(key, "engine" | "blocking" | "appearance" | "onboarded" | "restore_session" | "sidebar" | "suspend_minutes" | "reader_size" | "reader_font" | "engine_reader" | "weather" | "weather_place" | "weather_at" | "weather_unit")
     }
 }
 
