@@ -38,6 +38,14 @@ jobs:
           VOLANT_REPO: ${{ github.repository }}
         run: bash scripts/bundle-macos.sh
 
+      - name: Icon as macOS draws it
+        run: |
+          mkdir -p smoke build
+          swiftc -O scripts/bench/appicon.swift -o build/appicon
+          build/appicon dist/Volant.app smoke/appicon.png 1024
+          echo "Assets.car: $(ls -la dist/Volant.app/Contents/Resources/Assets.car 2>/dev/null || echo missing)"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' dist/Volant.app/Contents/Info.plist || true
+
       - name: Smoke test (launch, browse, screenshot, quit)
         run: |
           export VOLANT_DATA_DIR="$RUNNER_TEMP/volant-data" VOLANT_SMOKE_DIR="$PWD/smoke"

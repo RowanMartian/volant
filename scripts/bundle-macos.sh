@@ -21,6 +21,25 @@ sed "s/__VERSION__/$VERSION/g" macos/Info.plist > "$APP/Contents/Info.plist"
 cp macos/Volant.icns "$APP/Contents/Resources/Volant.icns"
 plutil -lint "$APP/Contents/Info.plist"
 
+# The Liquid Glass icon (macOS 26 and later): the Icon Composer document in
+# macos/AppIcon.icon compiled into an asset catalog. Volant.icns above stays as
+# the icon for macOS 12–25.
+if xcrun --find actool >/dev/null 2>&1; then
+  rm -rf build/icon && mkdir -p build/icon
+  if xcrun actool macos/AppIcon.icon --compile build/icon --app-icon AppIcon \
+      --platform macosx --target-device mac --minimum-deployment-target 12.0 \
+      --enable-on-demand-resources NO --development-region en \
+      --output-partial-info-plist build/icon/partial.plist \
+      --output-format human-readable-text --notices --warnings --errors \
+      && [ -f build/icon/Assets.car ]; then
+    cp build/icon/Assets.car "$APP/Contents/Resources/Assets.car"
+    plutil -insert CFBundleIconName -string AppIcon "$APP/Contents/Info.plist"
+    echo "Liquid Glass icon compiled."
+  else
+    echo "warning: actool couldn't compile macos/AppIcon.icon; shipping the .icns only"
+  fi
+fi
+
 # Ad-hoc signature (no Apple developer account needed). Required on Apple Silicon.
 codesign --force --deep --sign - "$APP"
 codesign --verify --verbose "$APP"
