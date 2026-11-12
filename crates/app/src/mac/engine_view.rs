@@ -3,6 +3,13 @@
 //! view is laid out by volant-engine and drawn natively by this view, instead
 //! of by WebKit.
 //!
+//! View → Simple Page goes further: the page is loaded, scripted, laid out and
+//! drawn by Volant alone. A session thread fetches the HTML, scripts and style
+//! sheets with Volant's own HTTP and runs the page's JavaScript with
+//! volant-js; this view draws the snapshots it sends, and sends back clicks
+//! and typing. Links and forms navigate the tab (so history works), and the
+//! next page opens in the engine too, until Simple Page is turned off.
+//!
 //! Reader itself works exactly as before: the article still loads as the
 //! `volant://reader` page, so history, Back and the Reader toolbar behave the
 //! same. This view sits over that page's content, just under its toolbar, so
@@ -44,6 +51,13 @@ struct Inner {
     article: Option<volant_core::reader::Article>,
     /// Simple Page: a whole page drawn by the engine (`toggle_page`).
     page: Option<SimplePage>,
+    /// The tab Simple Page is on for (it stays on across navigations).
+    sticky: Option<TabId>,
+    /// The page's script thread.
+    session: Option<Session>,
+    serial: u64,
+    /// The page has a text field focused (typing goes to it).
+    focused: bool,
     /// What the current layout was made for: (width, dark, size, serif, simple page).
     laid: Option<(i64, bool, u32, bool, bool)>,
     /// The article's pictures: loading, loaded (with their size) or failed.
@@ -55,11 +69,51 @@ struct Inner {
     find_current: usize,
 }
 
-/// A page as WebKit has it after its scripts ran: its HTML and linked style sheets.
+/// A page loaded and run by Volant's own engine: its latest snapshot and linked style sheets.
 struct SimplePage {
+    /// The tab's address it belongs to.
     url: String,
-    html: String,
+    snap: Snapshot,
     sheets: Vec<String>,
+}
+
+use volant_engine::script::{self, Snapshot};
+
+/// What the view sends the session thread.
+enum Cmd {
+    Click(u32),
+    Type(String),
+    Key(&'static str),
+    Width(f32, bool),
+    /// Runs JavaScript in the page (for tests).
+    Eval(String),
+}
+
+/// A page's JavaScript world, running on its own thread.
+struct Session {
+    tx: std::sync::mpsc::Sender<Cmd>,
+    url: String,
+}
+
+/// Page requests (scripts, style sheets, fetch) over Volant's own HTTP.
+struct NetHost;
+
+/// What Volant's engine says it is to web servers (so they send their ordinary pages).
+const PAGE_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15 Volant/1.0";
+
+impl script::Host for NetHost {
+    fn fetch(&self, method: &str, url: &str, _body: Option<&str>) -> Option<(u16, String, Vec<u8>)> {
+        if method != "GET" || !(url.starts_with("https://") || url.starts_with("http://")) {
+            return None; // only GET so far
+        }
+        let mut opts = super::net::options();
+        opts.user_agent = PAGE_UA.into();
+        opts.limit = 16 << 20;
+        opts.deadline = std::time::Duration::from_secs(20);
+        let r = super::net::get(url, &opts).ok()?;
+        let ty = r.header("content-type").unwrap_or("").to_string();
+        Some((r.status, ty, r.body))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -188,6 +242,11 @@ pub struct EngineIvars {
     dragged: Cell<bool>,
     /// The address relative links and images resolve against.
     base: RefCell<String>,
+    /// Simple Page: maps the laid-out document's nodes to the page's own (for clicks).
+    map: RefCell<Vec<u32>>,
+    /// Clicks and typing go to a live page's scripts.
+    live: Cell<bool>,
+    focused: Cell<bool>,
 }
 
 define_class!(
@@ -257,6 +316,15 @@ define_class!(
                 return;
             }
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            if self.ivars().live.get() {
+                // The page's own scripts decide what a click does (links included).
+                let node = self.ivars().page.borrow().as_ref().and_then(|page| page.hit(p.x as f32, p.y as f32));
+                let target = node.and_then(|n| self.ivars().map.borrow().get(n as usize).copied());
+                if let Some(t) = target {
+                    with(move |b| send(b, Cmd::Click(t)));
+                }
+                return;
+            }
             let href = self.ivars().page.borrow().as_ref().and_then(|page| {
                 page.links
                     .iter()
@@ -312,6 +380,23 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, e: &NSEvent) {
+            let command = e.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Command);
+            if self.ivars().live.get() && self.ivars().focused.get() && !command {
+                // Typing goes into the page's focused field.
+                let chars = e.characters().map(|s| s.to_string()).unwrap_or_default();
+                let cmd = match chars.as_str() {
+                    "\u{7f}" | "\u{8}" => Some(Cmd::Key("Backspace")),
+                    "\r" | "\u{3}" => Some(Cmd::Key("Enter")),
+                    "\t" => Some(Cmd::Key("Tab")),
+                    "\u{1b}" => Some(Cmd::Key("Escape")),
+                    c if !c.is_empty() && c.chars().all(|ch| !ch.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&ch)) => Some(Cmd::Type(c.to_string())),
+                    _ => None,
+                };
+                if let Some(cmd) = cmd {
+                    with(move |b| send(b, cmd));
+                    return;
+                }
+            }
             if !self.scroll_key(e) {
                 let _: () = unsafe { msg_send![super(self), keyDown: e] };
             }
@@ -341,6 +426,9 @@ impl EngineView {
             sel_areas: RefCell::new(Vec::new()),
             dragged: Cell::new(false),
             base: RefCell::new(String::new()),
+            map: RefCell::new(Vec::new()),
+            live: Cell::new(false),
+            focused: Cell::new(false),
         });
         unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 100.0, 100.0)] }
     }
@@ -407,6 +495,12 @@ fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>
     NSBezierPath::fillRect(dirty);
     for item in &page.items {
         match item {
+            Item::Clip { x, y, w, h, radius } => {
+                // overflow: what follows is clipped until the matching Unclip.
+                NSGraphicsContext::saveGraphicsState_class();
+                rounded(rect(*x as f64, *y as f64, *w as f64, *h as f64), *radius as f64).addClip();
+            }
+            Item::Unclip => NSGraphicsContext::restoreGraphicsState_class(),
             Item::Rect { x, y, w, h, color, radius } => {
                 if intersects(dirty, *x as f64, *y as f64, *w as f64, *h as f64) {
                     ns_color(*color).setFill();
@@ -496,11 +590,27 @@ pub fn sync(b: &Browser) {
     let active = b.tabs.active;
     let on_tab = e.tab.is_some() && e.tab == active;
     let current_url = active.and_then(|id| b.webs.get(&id)).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string());
-    // A Simple Page snapshot belongs to the address it was taken at.
-    if on_tab && e.page.is_some() && current_url.as_deref() != e.page.as_ref().map(|p| p.url.as_str()) {
+    // Simple Page follows the tab: a new address (a link, a form, Back) loads in the engine too.
+    let sticky = e.sticky.is_some() && e.sticky == active;
+    if sticky {
+        if let Some(url) = current_url.clone().filter(|u| u.starts_with("http")) {
+            let same = |a: &str, b: &str| a.split('#').next() == b.split('#').next();
+            let running = e.session.as_ref().map(|s| same(&s.url, &url)).unwrap_or(false);
+            let shown = e.page.as_ref().map(|p| same(&p.url, &url)).unwrap_or(false);
+            if !running && !shown {
+                if let Some(id) = active {
+                    start_session(&mut e, id, url, b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm));
+                }
+            }
+        }
+    } else if on_tab && e.page.is_some() && current_url.as_deref() != e.page.as_ref().map(|p| p.url.as_str()) {
         e.page = None;
     }
     let simple = on_tab && e.page.is_some();
+    if let Some(v) = &e.view {
+        v.ivars().live.set(simple && e.session.is_some());
+        v.ivars().focused.set(simple && e.focused);
+    }
     let reader = !simple && b.settings.engine_reader && e.article.is_some() && on_tab && active.map(|id| actions::in_reader(b, id)).unwrap_or(false);
     if !simple && !reader {
         if let Some(s) = &e.scroll {
@@ -534,19 +644,25 @@ pub fn sync(b: &Browser) {
     let width = cb.size.width.floor() as i64;
     let want = (width, dark, size, serif, simple);
     if e.laid != Some(want) {
-        let (html, sheets, base) = if let Some(p) = &e.page {
-            (p.html.clone(), p.sheets.clone(), p.url.clone())
+        let started = std::time::Instant::now();
+        let images = MacImages { known: &e.images, wanted: RefCell::new(Vec::new()) };
+        let env = volant_engine::Env { width: width as f32, dark };
+        let (page, base) = if let Some(p) = &e.page {
+            *view.ivars().map.borrow_mut() = p.snap.map.clone();
+            (script::render_snapshot(&p.snap, &p.sheets, env, &MacFonts, &images), p.snap.url.clone())
         } else {
             let Some(a) = e.article.as_ref() else { return };
             let o = volant_engine::reader::Options { dark, size: size as f32, serif };
             let (html, css) = volant_engine::reader::document(a, &e.host, &o);
             // The Reader page's own top margin already sits above the toolbar line.
-            (html, vec![css + "article { margin-top: 0 }"], format!("https://{}/", e.host))
+            let sheets = vec![css + "article { margin-top: 0 }"];
+            (volant_engine::render_in(&html, &sheets, env, &MacFonts, &images), format!("https://{}/", e.host))
         };
-        let started = std::time::Instant::now();
-        let images = MacImages { known: &e.images, wanted: RefCell::new(Vec::new()) };
-        let env = volant_engine::Env { width: width as f32, dark };
-        let page = volant_engine::render_in(&html, &sheets, env, &MacFonts, &images);
+        if simple {
+            if let Some(s) = &e.session {
+                let _ = s.tx.send(Cmd::Width(width as f32, dark));
+            }
+        }
         let wanted = images.wanted.into_inner();
         let pictures = page.items.iter().filter(|i| matches!(i, Item::Image { .. })).count();
         eprintln!(
@@ -629,76 +745,181 @@ fn base64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// What WebKit is showing, after the page's scripts ran: its HTML, and each
-/// linked style sheet's rules (or just its address, when it's from another
-/// origin and WebKit won't share them).
-const SNAPSHOT_JS: &str = r#"(() => {
-  const sheets = [];
-  for (const s of document.styleSheets) {
-    if (!s.href || s.disabled) continue;
-    let text = null;
-    try { text = Array.from(s.cssRules).map((r) => r.cssText).join('\n'); } catch (e) {}
-    sheets.push({ href: s.href, text, media: s.media ? s.media.mediaText : '' });
-  }
-  return JSON.stringify({ html: document.documentElement.outerHTML, sheets });
-})()"#;
-
-/// View → Simple Page: draws the page in front with Volant's own engine (or
-/// goes back to WebKit).
+/// View → Simple Page: loads the page in front with Volant's own engine,
+/// scripts and all (or goes back to WebKit).
 pub fn toggle_page(b: &Browser) {
     let Some(id) = b.tabs.active else { return };
-    if is_active(b) && b.engine.0.try_borrow().map(|e| e.page.is_some()).unwrap_or(false) {
-        if let Ok(mut e) = b.engine.0.try_borrow_mut() {
-            e.page = None;
-        }
+    let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
+    if e.sticky == Some(id) {
+        e.sticky = None;
+        e.session = None; // dropping the sender ends the thread
+        e.page = None;
+        e.focused = false;
+        drop(e);
         sync(b);
         return;
     }
-    let Some(web) = b.webs.get(&id).map(|w| w.web.clone()) else { return };
-    let Some(url) = unsafe { web.URL() }.and_then(|u| u.absoluteString()).map(|s| s.to_string()).filter(|u| u.starts_with("http")) else {
+    let url = b.webs.get(&id).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string()).filter(|u| u.starts_with("http"));
+    let Some(url) = url else {
         eprintln!("engine: Simple Page needs a web page");
         objc2_app_kit::NSBeep();
         return;
     };
-    let block = block2::RcBlock::new(move |res: *mut AnyObject, _e: *mut objc2_foundation::NSError| {
-        let Some(json) = unsafe { res.as_ref() }.and_then(|o| o.downcast_ref::<NSString>()).map(|s| s.to_string()) else {
-            eprintln!("engine: couldn't take the page's snapshot");
-            return;
-        };
-        let url = url.clone();
-        std::thread::spawn(move || {
-            let Some(v) = volant_core::json::parse(&json) else { return };
-            let html = v.str_at("html").unwrap_or("").to_string();
-            let mut sheets = Vec::new();
-            for sh in v.get("sheets").map(volant_core::json::Value::as_array).unwrap_or(&[]) {
-                let text = match sh.str_at("text") {
-                    Some(t) => Some(t.to_string()),
-                    // Another origin's sheet: Volant fetches it itself.
-                    None => sh.str_at("href").and_then(|h| super::net::fetch_text(h, 8 << 20).ok()),
-                };
-                let Some(text) = text else { continue };
-                let media = sh.str_at("media").unwrap_or("").trim().to_string();
-                sheets.push(if media.is_empty() || media == "all" { text } else { format!("@media {media} {{\n{text}\n}}") });
+    e.sticky = Some(id);
+    e.tab = Some(id);
+    start_session(&mut e, id, url, b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm));
+}
+
+/// Sends the live page a command.
+fn send(b: &Browser, cmd: Cmd) {
+    if let Ok(e) = b.engine.0.try_borrow() {
+        if let Some(s) = &e.session {
+            let _ = s.tx.send(cmd);
+        }
+    }
+}
+
+/// Runs JavaScript in the live Simple Page (for the smoke test).
+pub fn eval(b: &Browser, code: &str) {
+    send(b, Cmd::Eval(code.to_string()));
+}
+
+/// Types into the live Simple Page and presses a key, as a person would.
+pub fn type_and_press(b: &Browser, text: &str, key: &'static str) {
+    send(b, Cmd::Type(text.to_string()));
+    send(b, Cmd::Key(key));
+}
+
+/// Starts a page's script thread: it fetches, runs and snapshots the page.
+fn start_session(e: &mut Inner, tab: TabId, url: String, width: f32, dark: bool) {
+    e.serial += 1;
+    let serial = e.serial;
+    let (tx, rx) = std::sync::mpsc::channel();
+    e.session = Some(Session { tx, url: url.clone() });
+    e.focused = false;
+    e.images.clear();
+    if let Some(v) = &e.view {
+        v.ivars().images.borrow_mut().clear();
+    }
+    let spawned = std::thread::Builder::new()
+        .name("volant-page".into())
+        .stack_size(script::STACK)
+        .spawn(move || run_session(serial, tab, url, width, dark, rx));
+    if spawned.is_err() {
+        e.session = None;
+    }
+}
+
+/// The session thread: one page's whole life in Volant's engine.
+fn run_session(serial: u64, tab: TabId, url: String, width: f32, dark: bool, rx: std::sync::mpsc::Receiver<Cmd>) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let started = std::time::Instant::now();
+    let host = NetHost;
+    let Some((status, _, body)) = script::Host::fetch(&host, "GET", &url, None) else {
+        eprintln!("engine: couldn't load {url}");
+        return;
+    };
+    let html = String::from_utf8_lossy(&body).into_owned();
+    let host: Rc<dyn script::Host> = Rc::new(NetHost);
+    let env = volant_engine::Env { width, dark };
+    let mut rt = script::Runtime::new(&html, &url, env, host.clone());
+    eprintln!("engine: loaded {url} ({status}, {} KB) in {:.0} ms", body.len() / 1024, started.elapsed().as_secs_f64() * 1000.0);
+    let mut sheets: Vec<(String, String)> = Vec::new();
+    let mut shown = 0u64;
+    let mut logged = 0usize;
+    let publish = |rt: &mut script::Runtime, sheets: &mut Vec<(String, String)>| {
+        let snap = rt.snapshot();
+        // Linked style sheets, fetched once each.
+        let mut texts = Vec::new();
+        for (href, media) in script::stylesheet_links(&snap.dom, &snap.url) {
+            let text = match sheets.iter().find(|(h, _)| *h == href) {
+                Some((_, t)) => t.clone(),
+                None => {
+                    let t = match script::Host::fetch(&NetHost, "GET", &href, None) {
+                        Some((200..=299, _, b)) => String::from_utf8_lossy(&b).into_owned(),
+                        _ => String::new(),
+                    };
+                    sheets.push((href.clone(), t.clone()));
+                    t
+                }
+            };
+            texts.push(if media.is_empty() || media == "all" { text } else { format!("@media {media} {{\n{text}\n}}") });
+        }
+        let focused = rt.focused().is_some();
+        super::on_main(move || with(move |b| arrived(b, serial, tab, snap, texts, focused)));
+    };
+    // First paint: the page as served, before its scripts.
+    publish(&mut rt, &mut sheets);
+    rt.run_scripts();
+    eprintln!("engine: ran {url}'s scripts in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+    shown = shown.max(rt.generation());
+    publish(&mut rt, &mut sheets);
+    loop {
+        for line in rt.take_console() {
+            if logged < 40 {
+                eprintln!("page: {}", line.chars().take(300).collect::<String>());
+                logged += 1;
             }
+        }
+        if let Some(next) = rt.take_navigation() {
             super::on_main(move || {
                 with(move |b| {
-                    if let Ok(mut e) = b.engine.0.try_borrow_mut() {
-                        e.tab = Some(id);
-                        e.page = Some(SimplePage { url, html, sheets });
-                        e.laid = None;
-                        e.images.clear();
-                        e.find_hits.clear();
-                        if let Some(v) = &e.view {
-                            v.ivars().images.borrow_mut().clear();
-                            *v.ivars().hits.borrow_mut() = (Vec::new(), 0);
-                        }
+                    let current = b.engine.0.try_borrow().map(|e| e.serial == serial).unwrap_or(false);
+                    if current && b.tabs.active == Some(tab) {
+                        actions::navigate(b, &next);
                     }
-                    sync(b);
                 })
             });
-        });
-    });
-    unsafe { web.evaluateJavaScript_completionHandler(&ns(SNAPSHOT_JS), Some(&block)) };
+        }
+        let wait = if rt.has_timers() { 150 } else { 1000 };
+        match rx.recv_timeout(std::time::Duration::from_millis(wait)) {
+            Ok(Cmd::Click(n)) => rt.click(n),
+            Ok(Cmd::Type(t)) => rt.type_text(&t),
+            Ok(Cmd::Key(k)) => rt.key(k),
+            Ok(Cmd::Width(w, d)) => {
+                let changed = {
+                    let mut st = rt.state.borrow_mut();
+                    let was = (st.env.width, st.env.dark);
+                    st.env = volant_engine::Env { width: w, dark: d };
+                    was != (w, d)
+                };
+                if changed {
+                    let _ = rt.interp.run("dispatchEvent(new Event('resize'))");
+                }
+            }
+            Ok(Cmd::Eval(code)) => {
+                if let Err(e) = rt.interp.run(&code) {
+                    eprintln!("page eval: {e}");
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => rt.tick(),
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if rt.generation() != shown {
+            shown = rt.generation();
+            publish(&mut rt, &mut sheets);
+        }
+    }
+}
+
+/// A snapshot from the session thread.
+fn arrived(b: &Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec<String>, focused: bool) {
+    {
+        let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
+        if e.serial != serial || e.sticky != Some(tab) {
+            return; // an older page
+        }
+        let url = e.session.as_ref().map(|s| s.url.clone()).unwrap_or_default();
+        e.tab = Some(tab);
+        e.page = Some(SimplePage { url, snap, sheets });
+        e.focused = focused;
+        e.laid = None;
+        e.find_hits.clear();
+        if let Some(v) = &e.view {
+            *v.ivars().hits.borrow_mut() = (Vec::new(), 0);
+        }
+    }
+    sync(b);
 }
 
 /// Downloads a picture (Volant's own HTTP), decodes it, and lays the page out again.

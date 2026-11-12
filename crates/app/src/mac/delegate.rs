@@ -358,7 +358,7 @@ pub fn smoke_test(b: &Browser) {
     let since_exec = super::SHOWN.with(|t| t.get()).unwrap_or_default();
     report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
     let (s1, s2, s3, s4, s5, s6, s7, s8) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone());
-    let (s9, s10, s11, s12, s13, s14) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
+    let (s9, s10, s11, s12, s13, s14, s15) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
     let (m1, m2) = (mem.clone(), mem);
     let rep = report.clone();
     let dir2 = dir.clone();
@@ -460,9 +460,16 @@ pub fn smoke_test(b: &Browser) {
         b.settings.engine_reader = false;
         actions::navigate(b, "https://en.wikipedia.org/wiki/Jet_aircraft");
     }));
+    // Simple Page: Wikipedia loaded, scripted, laid out and drawn by Volant's own engine.
     step(56.0, Box::new(|b| super::engine_view::toggle_page(b)));
-    step(61.0, Box::new(move |_b| s14("14-simple-page")));
-    step(61.5, Box::new(move |_b| {
+    step(63.0, Box::new(move |_b| s14("14-simple-page")));
+    // Search Wikipedia from its own search box: typing, Enter, the form and the next page, all in the engine.
+    step(63.5, Box::new(|b| {
+        super::engine_view::eval(b, "var q = document.getElementById('searchInput') || document.querySelector('input[name=search]'); if (q) q.focus(); console.log('search box: ' + !!q)");
+        super::engine_view::type_and_press(b, "Concorde", "Enter");
+    }));
+    step(72.0, Box::new(move |_b| s15("15-engine-search")));
+    step(72.5, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

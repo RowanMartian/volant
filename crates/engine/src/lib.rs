@@ -9,10 +9,12 @@
 //! 4. **Paint**: a display list of rectangles and text that the app draws
 //!    natively (or [`svg`] draws anywhere).
 //!
-//! What it does today is listed in each module: CSS, the cascade, blocks,
-//! lines, inline boxes, images, floats and tables. No JavaScript, flexbox or
-//! grid yet: those are later chunks. Volant uses it where that's enough (an
-//! opt-in Reader), while web pages stay on WebKit.
+//! 5. **Script** ([`script`]): the page's JavaScript, run by volant-js against
+//!    a live DOM, with events, forms and the web platform's APIs.
+//!
+//! What it does today is listed in each module. Volant uses it for an opt-in
+//! Reader and for Simple Page, which loads, runs and draws pages with nothing
+//! but Volant; ordinary browsing stays on WebKit for now.
 
 pub mod css;
 pub mod fonts;

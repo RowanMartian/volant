@@ -69,22 +69,39 @@ HTTP, searches the laid-out text for Find on page, and selects and copies text (
 line and paragraph breaks (`engine_view.rs`). `volant-tools render page.html out.svg
 [--reader URL]` draws to SVG anywhere.
 
-It's used for an opt-in Reader (Settings → Experimental): the extracted article is laid out by the engine and drawn
-natively over the Reader page. View → Simple Page (⌥⌘E) draws any page with the engine: the page's HTML and style
-sheets are taken from WebKit after its scripts ran (cross-origin sheets fetched with Volant's HTTP), laid out
-natively, with images, links, Find, selection and copy; navigating returns to WebKit.
+Since the latest chunk it also has `opacity`, `overflow` clipping, `transform: translate`, real inline-blocks
+(shrink-to-fit, on the text baseline), drawn form controls (text fields, checkboxes, radios, selects, buttons), the
+old presentational attributes (`bgcolor`, `width="85%"`, `cellpadding`) and hit boxes for every element.
+
+**Page scripts** (`script.rs`) connect the engine to Volant's JavaScript engine: a live DOM with wrapper objects
+(traversal and mutation, attributes, `innerHTML`/`outerHTML`, `querySelector` with the engine's own selector matching,
+`classList`, `style`, `dataset`), events with capture, bubbling, `once` and inline handlers, focus, typing, checkboxes,
+selects, GET form submission and link activation, scripts inserted by scripts, `document.write`, and a `getComputedStyle`
+backed by the real cascade. `prelude.js` builds the rest of the platform in JavaScript on a few native hooks: `URL`,
+`URLSearchParams`, `fetch`, `XMLHttpRequest`, `Headers`/`Response`, storage, observers, `FormData`, `atob`/`btoa`,
+`TextEncoder` and more. jQuery and MediaWiki's module loader run on it.
+
+It's used for an opt-in Reader (Settings → Experimental), and for **View → Simple Page (⌥⌘E)**, which shows any
+page with nothing but Volant: a session thread fetches the HTML, scripts and style sheets over Volant's own HTTP,
+runs the page's JavaScript, and sends snapshots to be laid out and drawn natively (a first paint before the scripts,
+then after them and after every change). Clicks are hit-tested and sent to the page's scripts, typing goes to its
+focused field, and links and forms navigate the tab, so history works and the next page opens in the engine too.
+`volant-tools render page.html out.svg [--scripts URL] [--eval JS]` does the same anywhere.
 
 ## JavaScript engine
 
 `crates/js` (volant-js) is Volant's own JavaScript engine, from scratch with no dependencies beyond volant-core. A
-lexer with automatic semicolon insertion and template literals feeds a recursive-descent parser, and a tree-walking
-interpreter runs the result: closures and hoisting, prototypes, `this`, `new`, classes (`extends`, `super`, getters
-and setters, instance and static fields), destructuring with defaults, spread and rest, optional chaining, `??=`,
-labelled loops, `switch`, and `try`/`catch`/`finally`. The standard library covers Object, Function (`call`,
-`apply`, `bind`), Array, String, Number, Boolean, Math, JSON, the Error types, Map, Set, Date, console and
-`setTimeout`. Scripts run under a step budget and a recursion limit, so a page can't hang or crash the browser.
-`volant-tools js file.js` runs a script. Not yet: regular expressions, Promises/async, generators, Symbols, and the
-DOM bindings that connect it to the engine.
+lexer with automatic semicolon insertion, template and regex literals feeds a recursive-descent parser, and a
+tree-walking interpreter runs the result: closures and hoisting, prototypes, `this`, `new`, classes (`extends`,
+`super`, getters and setters, instance and static fields), destructuring, spread and rest, optional chaining,
+labelled loops, `switch`, exceptions, generators, `async`/`await` and `new Function`/`eval`. Its own **regular
+expression engine** (`regex.rs`: a backtracking matcher with groups, named groups, lookaround, back-references,
+classes, `\p{…}` and the `gimsuy` flags) backs `RegExp` and the string methods. **Promises** run on a microtask
+queue, and timers on a virtual clock; `await` runs the event loop in place until its promise settles. The standard
+library covers Object, Function, Array, String, Number, Boolean, Math, JSON, the Error types, Map, Set, Date,
+Symbol and iterators. Scripts run under a step budget and a recursion limit, so a page can't hang the browser.
+`volant-tools js file.js` runs a script. Not yet: ES modules (`import`), Proxy, typed arrays (plain arrays stand
+in), and binary data.
 
 ## Blocking engine
 
