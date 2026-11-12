@@ -456,10 +456,13 @@ pub fn smoke_test(b: &Browser) {
     }));
     step(51.0, Box::new(move |_b| s13("13-engine-select")));
     // Simple Page: the whole Wikipedia page, drawn by Volant's own engine.
-    step(51.5, Box::new(actions::back));
-    step(55.0, Box::new(|b| super::engine_view::toggle_page(b)));
-    step(60.0, Box::new(move |_b| s14("14-simple-page")));
-    step(60.5, Box::new(move |_b| {
+    step(51.5, Box::new(|b| {
+        b.settings.engine_reader = false;
+        actions::navigate(b, "https://en.wikipedia.org/wiki/Jet_aircraft");
+    }));
+    step(56.0, Box::new(|b| super::engine_view::toggle_page(b)));
+    step(61.0, Box::new(move |_b| s14("14-simple-page")));
+    step(61.5, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

@@ -146,6 +146,12 @@ fn release() -> Result<Release, String> {
     let api = format!("https://api.github.com/repos/{REPO}/releases/tags/latest");
     let mut opts = super::net::options();
     opts.headers.push(("Accept".into(), "application/vnd.github+json".into()));
+    // CI hands over its token, as shared runners exhaust the anonymous rate limit.
+    if let Ok(t) = std::env::var("VOLANT_GITHUB_TOKEN") {
+        if !t.is_empty() {
+            opts.headers.push(("Authorization".into(), format!("Bearer {t}")));
+        }
+    }
     opts.limit = 4 << 20;
     let r = super::net::get(&api, &opts)?;
     if !r.ok() {
@@ -196,6 +202,10 @@ pub fn install(b: &mut Browser) {
                     later(move || swap_and_relaunch(&app, &new_app, &staging));
                 }
                 Err(why) => {
+                    eprintln!("update failed: {why}");
+                    if std::env::args().any(|a| a == "--install-update") {
+                        std::process::exit(1);
+                    }
                     let _ = std::fs::remove_dir_all(&staging);
                     b.update.installing = false;
                     status(b, "error");

@@ -76,6 +76,8 @@ jobs:
           tail -n 1 smoke/ublock.txt | grep -qx PASS
 
       - name: Updater test (install the current release over a copy of this build)
+        env:
+          VOLANT_GITHUB_TOKEN: ${{ github.token }}
         run: |
           ZIP_URL="https://github.com/${{ github.repository }}/releases/download/latest/Volant-mac.zip"
           if ! curl -sfL -o "$RUNNER_TEMP/release.zip" "$ZIP_URL"; then echo "No release yet; skipping."; exit 0; fi

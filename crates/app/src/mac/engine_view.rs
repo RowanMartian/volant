@@ -656,11 +656,15 @@ pub fn toggle_page(b: &Browser) {
     }
     let Some(web) = b.webs.get(&id).map(|w| w.web.clone()) else { return };
     let Some(url) = unsafe { web.URL() }.and_then(|u| u.absoluteString()).map(|s| s.to_string()).filter(|u| u.starts_with("http")) else {
+        eprintln!("engine: Simple Page needs a web page");
         objc2_app_kit::NSBeep();
         return;
     };
     let block = block2::RcBlock::new(move |res: *mut AnyObject, _e: *mut objc2_foundation::NSError| {
-        let Some(json) = unsafe { res.as_ref() }.and_then(|o| o.downcast_ref::<NSString>()).map(|s| s.to_string()) else { return };
+        let Some(json) = unsafe { res.as_ref() }.and_then(|o| o.downcast_ref::<NSString>()).map(|s| s.to_string()) else {
+            eprintln!("engine: couldn't take the page's snapshot");
+            return;
+        };
         let url = url.clone();
         std::thread::spawn(move || {
             let Some(v) = volant_core::json::parse(&json) else { return };
