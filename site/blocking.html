@@ -107,10 +107,11 @@ nav: blocking
 <section id="faq"><div class="wrap prose" style="max-width:860px">
   <div class="kicker">Questions</div>
   <h2 style="margin-top:0">Good to know.</h2>
-  <details><summary>Is this the uBlock Origin extension?</summary><p>No. Volant doesn't run browser extensions. It uses uBlock Origin's filter lists, default list selection and filter syntax, and compiles them into WebKit's built-in content blocker. That's why it says "Powered by uBlock". The extension's logger and dynamic filtering aren't part of Volant.</p></details>
+  <details><summary>Is this the uBlock Origin extension?</summary><p>No. Volant doesn't run browser extensions. It uses uBlock Origin's filter lists, default list selection, filter syntax and scriptlets, and compiles them into WebKit's built-in content blocker. That's why it says "Powered by uBlock". The extension's logger and dynamic filtering aren't part of Volant.</p></details>
+  <details><summary>Does it keep up with uBlock Origin?</summary><p>Yes, on its own. Whenever the lists are due for a refresh (when they say they expire, between twice a day and every four days), Volant first checks for a new uBlock Origin release. If there is one, it takes that release's scriptlets and list catalogue, then downloads the lists. Blocker Settings shows which uBlock Origin version you're matched to.</p></details>
   <details><summary>A site is broken. What do I do?</summary><p>Click the shield in the address bar to turn blocking off for that site. If you'd rather keep blocking on, open Blocker Settings and make sure uBlock filters – Unbreak and Quick fixes are ticked, then choose Update Now.</p></details>
   <details><summary>Does blocking slow pages down?</summary><p>It speeds them up. Matching happens inside WebKit's compiled content blocker, and every blocked request is one your Mac never downloads. The only script Volant adds to a page is that site's own fixes, and only when the lists have some.</p></details>
-  <details><summary>What does Volant send when it updates the lists?</summary><p>It downloads each list from its usual address, the same request the uBlock Origin extension makes. Nothing about the pages you visit is sent.</p></details>
+  <details><summary>What does Volant send when it updates the lists?</summary><p>It downloads each list from its usual address, the same request the uBlock Origin extension makes, and asks jsDelivr which uBlock Origin release is the latest. Nothing about the pages you visit is sent.</p></details>
   <details><summary>Can I turn it off entirely?</summary><p>Yes. Use the switch at the top of Blocker Settings, or Settings → Privacy. Setup also asks on the first launch.</p></details>
 </div></section>
 
