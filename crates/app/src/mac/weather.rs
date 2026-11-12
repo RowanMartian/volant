@@ -4,7 +4,6 @@
 //! new tab page is open, and cached in between.
 
 use super::{on_main, pages, with, Browser};
-use objc2_foundation::{NSData, NSString, NSURL};
 use volant_core::json;
 
 const FRESH: u64 = 30 * 60;
@@ -45,9 +44,7 @@ pub fn cached(b: &Browser) -> Option<&str> {
 /// Fetches text over HTTPS on a background thread.
 fn get(url: String, done: impl FnOnce(Option<String>) + Send + 'static) {
     std::thread::spawn(move || {
-        let text = NSURL::URLWithString(&NSString::from_str(&url))
-            .and_then(|u| NSData::dataWithContentsOfURL(&u))
-            .and_then(|d| String::from_utf8(d.to_vec()).ok());
+        let text = super::net::fetch_text(&url, 1 << 20).ok();
         on_main(move || done(text));
     });
 }

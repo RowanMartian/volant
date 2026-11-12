@@ -20,6 +20,7 @@ memory footprint summed over every process each browser starts. Shared runners v
 ```
 crates/core   volant-core: platform-independent, zero dependencies, builds and tests on any OS
 crates/app    volant: the macOS shell (objc2 bindings to AppKit and WebKit)
+crates/tools  volant-tools: website builder, lipo and zip, used by the build (depends only on volant-core)
 assets/       Volant's own pages (volant://) and the scripts the blocker injects
 ```
 
@@ -28,7 +29,12 @@ assets/       Volant's own pages (volant://) and the scripts the blocker injects
 - `history`: an append-only log plus an in-memory frecency index; under 1 ms per keystroke at 100k pages.
 - `html`, `reader`: an HTML tokenizer/tree builder and article extraction (590 KB page: 4 ms parse, 8 ms extract).
 - `ublock`: the filter compiler described below.
-- `tabs`, `store`, `json`: the tab model with sleep and restore, settings and favourites as plain text, and a JSON writer.
+- `tabs`, `store`, `json`: the tab model with sleep and restore, settings and favourites as plain text, JSON in and out.
+- `http`: an HTTP/1.1 client over a pluggable transport: redirects (never HTTPS→HTTP), chunked, gzip, 1xx, size limits,
+  deadlines, conditional requests.
+- `deflate`, `hash`, `zip`, `macho`: inflate and deflate (LZ77 with lazy matching, package-merge length-limited
+  Huffman), gzip, SHA-256, CRC-32, zip read/write with path-escape checks, and universal Mach-O assembly.
+- `favicon`, `scriptlets`: icon discovery for favourites, and uBO's scriptlets assembled per page.
 
 **volant** (objc2, objc2-app-kit, objc2-web-kit, block2, dispatch2)
 - A single `Browser` state on the main thread. AppKit and WebKit callbacks reach it through a re-entrancy-safe
@@ -36,8 +42,11 @@ assets/       Volant's own pages (volant://) and the scripts the blocker injects
 - The window is ordered front before WebKit is touched; the first tab's `WKWebView` is created on the next turn.
 - One `WKWebViewConfiguration` is copied per tab, each tab with its own `WKUserContentController`.
 - Background tabs idle past a threshold (20 min by default) drop their web view and keep only URL, title and history.
-- In-place updater: polls the `latest` release, downloads `Volant-mac.zip`, `ditto -x`, `codesign --verify --deep --strict`,
-  then swaps the bundle after quit and relaunches with the session.
+- Networking (`net.rs`): volant-core's HTTP over TLS connections from the Network framework (`nw_connection`, called
+  through hand-written C bindings), so certificate validation and encryption stay the system's.
+- In-place updater: reads the `latest` release from GitHub's API, downloads `Volant-mac.zip`, checks it against the
+  SHA-256 GitHub publishes for the asset, unpacks it in Rust, then re-runs its own binary as `--finish-update` to swap
+  the bundle after quit and relaunch with the session. No `ditto`, `codesign` or shell.
 
 ## Blocking engine
 
@@ -77,12 +86,17 @@ uBlock Origin is by Raymond Hill and contributors (GPLv3); Volant is independent
 bash scripts/bundle-macos.sh
 ```
 
-This builds a universal release binary (`lto = "fat"`, `codegen-units = 1`, `panic = "abort"`), compiles the Liquid
-Glass icon (`macos/AppIcon.icon`) with `actool`, ad-hoc signs, and writes `dist/Volant.app`, `Volant.dmg` and
-`Volant-mac.zip`.
+This builds a universal release binary (`lto = "fat"`, `codegen-units = 1`, `panic = "abort"`; joined by
+`volant-tools lipo`), compiles the Liquid Glass icon (`macos/AppIcon.icon`) with `actool`, ad-hoc signs, and writes
+`dist/Volant.app`, `Volant.dmg` (`hdiutil`) and `Volant-mac.zip` (`volant-tools zip`, then checked with Apple's
+`ditto` and `codesign`).
 
 ```bash
-cargo test -p volant-core
+cargo test -p volant-core -p volant-tools
+```
+
+```bash
+cargo run -p volant-tools -- site
 ```
 
 ```bash
@@ -104,7 +118,7 @@ cargo run --release -p volant-core --example compile_lists -- easylist.txt easyp
 4. Updater test: install the current release over a copy of this build and verify it relaunches.
 5. Benchmark against Safari, Chrome and Firefox, then publish the `latest` release if this commit is still the tip.
 
-The website is `site/` → `python3 scripts/build-site.py` → `docs/`, deployed by `.github/workflows/pages.yml`.
+The website is `site/` → `cargo run -p volant-tools -- site` → `docs/`, deployed by `.github/workflows/pages.yml`.
 
 ## Install
 

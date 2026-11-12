@@ -4,7 +4,6 @@
 //! offline. Volant's pages ask for `volant://<page>/site-icon/<host>`.
 
 use super::{on_main, pages, with, Browser};
-use objc2_foundation::{NSData, NSString, NSURL};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -40,8 +39,7 @@ pub fn serve(b: &Browser, key: &str) -> Option<(&'static str, Vec<u8>)> {
 }
 
 fn get(url: &str, limit: usize) -> Option<Vec<u8>> {
-    let d = NSURL::URLWithString(&NSString::from_str(url)).and_then(|u| NSData::dataWithContentsOfURL(&u))?;
-    (d.length() > 0 && d.length() <= limit).then(|| d.to_vec())
+    super::net::fetch(url, limit).ok().filter(|b| !b.is_empty())
 }
 
 /// Finds and saves a sharp icon for every favourite that doesn't have one yet.

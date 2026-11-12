@@ -3,7 +3,7 @@ name: Website
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "site/**", "scripts/build-site.py", ".github/workflows/pages.yml"]
+    paths: ["docs/**", "site/**", "crates/tools/src/site.rs", ".github/workflows/pages.yml"]
   # If the repository's Pages source is still "Deploy from a branch", GitHub's
   # own build publishes the README over the site on every push. This runs when
   # that build starts, waits for it, and puts the site back.
@@ -40,7 +40,7 @@ jobs:
             sleep 5
           done
       - name: Build the pages from site/
-        run: python3 scripts/build-site.py
+        run: cargo run --quiet --locked -p volant-tools -- site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

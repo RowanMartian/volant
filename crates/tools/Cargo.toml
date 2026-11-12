@@ -1,0 +1,11 @@
+[package]
+name = "volant-tools"
+description = "Volant's build tools: the website builder, lipo and zip, in Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+volant-core = { path = "../core" }

@@ -18,7 +18,7 @@ use super::{blocking, ns, on_main, with, Browser};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::MainThreadOnly;
-use objc2_foundation::{NSData, NSString, NSURL};
+use objc2_foundation::NSURL;
 use objc2_web_kit::{WKUserContentController, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
 use volant_core::scriptlets::Resources;
 use volant_core::ublock;
@@ -63,13 +63,10 @@ pub fn sync(b: &mut Browser) {
     let round = b.ubo.round;
     blocking::set_status(b, "Checking for a new uBlock Origin…");
     std::thread::spawn(move || {
-        let text = NSURL::URLWithString(&NSString::from_str(LATEST))
-            .and_then(|u| NSData::dataWithContentsOfURL(&u))
-            .and_then(|d| String::from_utf8(d.to_vec()).ok())
-            .unwrap_or_default();
-        let latest = volant_core::json::strings_for(&text, "version").into_iter().next().filter(|v| {
-            !v.is_empty() && v.len() < 24 && v.bytes().all(|c| c.is_ascii_digit() || c == b'.')
-        });
+        let text = super::net::fetch_text(LATEST, 1 << 20).unwrap_or_default();
+        let latest = volant_core::json::parse(&text)
+            .and_then(|v| v.str_at("version").map(String::from))
+            .filter(|v| !v.is_empty() && v.len() < 24 && v.bytes().all(|c| c.is_ascii_digit() || c == b'.'));
         on_main(move || {
             with(move |b| {
                 if b.ubo.round != round {

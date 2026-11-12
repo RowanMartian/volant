@@ -623,12 +623,10 @@ fn fetch_icon(b: &mut Browser, id: TabId) {
         let Some(href) = href else { return };
         let host = host.clone();
         std::thread::spawn(move || {
-            let Some(url) = NSURL::URLWithString(&ns(&href)) else { return };
-            let Some(data) = NSData::dataWithContentsOfURL(&url) else { return };
-            if data.length() == 0 || data.length() > 512 * 1024 {
+            let Ok(bytes) = super::net::fetch(&href, 512 * 1024) else { return };
+            if bytes.is_empty() {
                 return;
             }
-            let bytes = data.to_vec();
             super::on_main(move || {
                 with(move |b| {
                     let data = NSData::with_bytes(&bytes);

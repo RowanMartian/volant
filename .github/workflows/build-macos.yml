@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     # The website and README don't change the app.
-    paths-ignore: ["docs/**", "site/**", "scripts/build-site.py", "README.md", ".github/workflows/pages.yml"]
+    paths-ignore: ["docs/**", "site/**", "crates/tools/src/site.rs", "README.md", ".github/workflows/pages.yml"]
   pull_request:
   workflow_dispatch:
 
@@ -29,7 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Test the engine pieces
-        run: cargo test --locked -p volant-core
+        run: cargo test --locked -p volant-core -p volant-tools
 
       - name: Build Volant.app
         env:
@@ -142,7 +142,7 @@ jobs:
           tip=$(git rev-parse origin/main)
           if [ "$tip" != "$GITHUB_SHA" ]; then
             # Later commits that only touch the website or README don't change the app.
-            changed=$(git diff --name-only "$GITHUB_SHA" "$tip" | grep -Ev '^(docs/|site/|scripts/build-site\.py$|README\.md$|\.github/workflows/pages\.yml$)' || true)
+            changed=$(git diff --name-only "$GITHUB_SHA" "$tip" | grep -Ev '^(docs/|site/|crates/tools/src/site\.rs$|README\.md$|\.github/workflows/pages\.yml$)' || true)
             if [ -n "$changed" ]; then echo "main has moved on; not publishing"; exit 0; fi
             echo "main has moved on, but only the website changed; publishing"
           fi

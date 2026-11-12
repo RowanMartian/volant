@@ -265,3 +265,10 @@ dependencies = [
 [[package]]
 name = "volant-core"
 version = "0.1.0"
+
+[[package]]
+name = "volant-tools"
+version = "0.1.0"
+dependencies = [
+ "volant-core",
+]

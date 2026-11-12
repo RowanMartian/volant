@@ -13,7 +13,7 @@ use super::{ns, on_main, pages, with, Browser};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::MainThreadOnly;
-use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
+use objc2_foundation::{NSArray, NSError, NSString};
 use objc2_web_kit::{WKContentRuleList, WKContentRuleListStore, WKContentWorld, WKUserContentController, WKUserScript, WKUserScriptInjectionTime};
 use std::path::PathBuf;
 use volant_core::json::{self, Obj};
@@ -81,6 +81,23 @@ fn fnv(s: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 
+/// Changes whenever a selected list's file does (size or modification time).
+fn lists_fingerprint(b: &Browser) -> u64 {
+    let mut parts = String::new();
+    for id in &b.settings.ublock_lists {
+        if let Ok(m) = std::fs::metadata(list_path(b, id)) {
+            let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            parts.push_str(&format!("{id}:{}:{mtime};", m.len()));
+        }
+    }
+    fnv(&parts)
+}
+
+/// The key of the rules WebKit has compiled now ("" if none).
+fn compiled_key(b: &Browser) -> String {
+    std::fs::read_to_string(dir(b).join("compiled.txt")).unwrap_or_default().lines().next().unwrap_or("").to_string()
+}
+
 /// Names this exact build of the rules: lists, options, My filters and when the lists were fetched.
 fn build_key(b: &Browser) -> String {
     let o = options(b);
@@ -90,7 +107,7 @@ fn build_key(b: &Browser) -> String {
         o.cosmetic,
         o.block_fonts,
         o.block_pings,
-        b.settings.lists_updated,
+        lists_fingerprint(b),
         fnv(&b.blocking.my_filters)
     );
     format!("{:016x}", fnv(&what))
@@ -255,35 +272,80 @@ pub fn download_lists(b: &mut Browser, all: bool) {
     let started = std::time::Instant::now();
     std::thread::spawn(move || {
         let mut failed = Vec::new();
+        let mut changed = 0;
         for (id, urls, path) in &want {
-            // A real list is more than a few hundred bytes; anything smaller is an error page.
-            let data = urls
-                .iter()
-                .find_map(|url| NSURL::URLWithString(&NSString::from_str(url)).and_then(|u| NSData::dataWithContentsOfURL(&u)).filter(|d| d.length() > 200));
-            match data {
-                Some(d) => {
-                    let tmp = path.with_extension("tmp");
-                    if std::fs::write(&tmp, d.to_vec()).and_then(|_| std::fs::rename(&tmp, path)).is_err() {
-                        failed.push(id.clone());
-                    }
+            match fetch_list(urls, path) {
+                Ok(true) => changed += 1,
+                Ok(false) => {}
+                Err(why) => {
+                    eprintln!("ublock: {id}: {why}");
+                    failed.push(id.clone());
                 }
-                _ => failed.push(id.clone()),
             }
         }
         let took = started.elapsed().as_millis();
         on_main(move || {
             with(move |b| {
                 b.blocking.busy = false;
-                b.blocking.timings.push_str(&format!("download ({} lists): {took} ms; ", want.len()));
+                let unchanged = want.len() - changed - failed.len();
+                b.blocking.timings.push_str(&format!("download ({} lists, {unchanged} unchanged): {took} ms; ", want.len()));
                 b.blocking.error = if failed.is_empty() { String::new() } else { format!("Couldn't download {} of the lists. Using what's here.", failed.len()) };
                 if failed.len() < want.len() {
                     b.settings.lists_updated = super::now();
                     b.settings.save(&b.paths.settings);
                 }
+                // Nothing new and WebKit already has these exact rules: no need to compile again.
+                if changed == 0 && !b.blocking.lists.is_empty() && compiled_key(b) == build_key(b) {
+                    status(b, "");
+                    return;
+                }
                 compile(b);
             })
         });
     });
+}
+
+/// Downloads one list, trying each mirror. Sends what the last copy's server
+/// said about it (ETag, Last-Modified), so an unchanged list costs one short
+/// answer. `Ok(true)` if the file changed.
+fn fetch_list(urls: &[String], path: &std::path::Path) -> Result<bool, String> {
+    let meta_path = path.with_extension("meta");
+    let meta = std::fs::read_to_string(&meta_path).unwrap_or_default();
+    let field = |k: &str| meta.lines().find_map(|l| l.strip_prefix(k).and_then(|v| v.strip_prefix('\t'))).map(String::from);
+    let mut last = String::from("no address");
+    for url in urls {
+        let mut opts = super::net::options();
+        opts.limit = 64 << 20;
+        opts.deadline = std::time::Duration::from_secs(180);
+        if path.exists() && field("url").as_deref() == Some(url.as_str()) {
+            if let Some(e) = field("etag") {
+                opts.headers.push(("If-None-Match".into(), e));
+            }
+            if let Some(m) = field("modified") {
+                opts.headers.push(("If-Modified-Since".into(), m));
+            }
+        }
+        match super::net::get(url, &opts) {
+            Ok(r) if r.status == 304 => return Ok(false),
+            // A real list is more than a few hundred bytes; anything smaller is an error page.
+            Ok(r) if r.ok() && r.body.len() > 200 => {
+                let tmp = path.with_extension("tmp");
+                std::fs::write(&tmp, &r.body).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| e.to_string())?;
+                let mut m = format!("url\t{url}\n");
+                if let Some(e) = r.header("etag") {
+                    m.push_str(&format!("etag\t{e}\n"));
+                }
+                if let Some(lm) = r.header("last-modified") {
+                    m.push_str(&format!("modified\t{lm}\n"));
+                }
+                let _ = std::fs::write(&meta_path, m);
+                return Ok(true);
+            }
+            Ok(r) => last = format!("{url} answered {}", r.status),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
 }
 
 /// Compiles the lists on a background thread, then has WebKit compile the rule lists.

@@ -10,11 +10,14 @@ export MACOSX_DEPLOYMENT_TARGET=12.0
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cargo build --release --locked -p volant --target aarch64-apple-darwin
 cargo build --release --locked -p volant --target x86_64-apple-darwin
+# Volant's own packaging tools (lipo and zip, in Rust), built for this Mac.
+cargo build --release --locked -p volant-tools
+TOOLS=target/release/volant-tools
 
 rm -rf dist
 APP="dist/Volant.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-lipo -create -output "$APP/Contents/MacOS/Volant" \
+$TOOLS lipo -output "$APP/Contents/MacOS/Volant" \
   target/aarch64-apple-darwin/release/volant \
   target/x86_64-apple-darwin/release/volant
 sed "s/__VERSION__/$VERSION/g" macos/Info.plist > "$APP/Contents/Info.plist"
@@ -53,7 +56,13 @@ fi
 codesign --force --deep --sign - "$APP"
 codesign --verify --verbose "$APP"
 
-ditto -c -k --keepParent "$APP" dist/Volant-mac.zip
+$TOOLS zip "$APP" dist/Volant-mac.zip
+# Check the zip with Apple's own tools: it unpacks to the same files, still sealed by the signature.
+rm -rf build/zipcheck && mkdir -p build/zipcheck
+ditto -x -k dist/Volant-mac.zip build/zipcheck
+diff -r "$APP" build/zipcheck/Volant.app
+codesign --verify --deep --strict build/zipcheck/Volant.app
+echo "Volant-mac.zip unpacks to an identical, validly signed app."
 
 mkdir -p dist/dmg
 cp -R "$APP" dist/dmg/
@@ -61,6 +70,8 @@ ln -s /Applications dist/dmg/Applications
 hdiutil create -volname "Volant" -srcfolder dist/dmg -ov -format UDZO dist/Volant.dmg
 rm -rf dist/dmg
 
+# Checked by Apple's lipo too.
 lipo -info "$APP/Contents/MacOS/Volant"
+$TOOLS lipo -info "$APP/Contents/MacOS/Volant"
 echo "Apple Silicon binary: $(stat -f %z target/aarch64-apple-darwin/release/volant) bytes"
 ls -lh dist

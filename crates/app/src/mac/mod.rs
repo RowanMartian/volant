@@ -18,6 +18,7 @@ mod ui;
 mod updater;
 mod views;
 mod favicons;
+mod net;
 mod ubo;
 mod weather;
 mod web;
@@ -177,6 +178,11 @@ pub fn now() -> u64 {
 }
 
 pub fn run() {
+    // The updater's helper: finish an update and exit, without starting the app.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--finish-update") {
+        std::process::exit(updater::finish_update(&args[2..]));
+    }
     let mtm = MainThreadMarker::new().expect("Volant must start on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);

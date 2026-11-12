@@ -15,20 +15,29 @@
 //! * [`reader`]: Reader mode, which finds the article in a page and rewrites it as clean HTML.
 //! * [`store`]: settings and session files in a plain line format.
 //! * [`tabs`]: tab order, pinning, closed-tab memory and sleeping tabs.
-//! * [`json`]: the minimal JSON writer/reader the app needs.
+//! * [`json`]: the JSON writer and parser the app needs.
+//! * [`http`]: an HTTP/1.1 client (redirects, chunked, gzip, limits) over any transport.
+//! * [`deflate`], [`hash`], [`zip`]: DEFLATE both ways, gzip, SHA-256, CRC-32 and
+//!   zip archives, for updates, downloads and packaging.
+//! * [`macho`]: universal (fat) Mach-O binaries, as `lipo -create` makes them.
 
 
+pub mod deflate;
 pub mod favicon;
+pub mod hash;
 pub mod fuzzy;
 pub mod history;
 pub mod json;
+pub mod macho;
 pub mod html;
+pub mod http;
 pub mod omnibox;
 pub mod reader;
 pub mod scriptlets;
 pub mod search;
 pub mod store;
 pub mod tabs;
+pub mod zip;
 pub mod ublock;
 
 /// Seconds since the Unix epoch.

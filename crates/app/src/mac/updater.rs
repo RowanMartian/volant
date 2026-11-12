@@ -2,18 +2,20 @@
 //!
 //! Every GitHub build of Volant knows the commit it was built from. The updater
 //! asks GitHub which commit the "Latest build" release was made from; if it's a
-//! different one, an update is offered. Installing downloads the zip, unpacks
-//! it next to the running app, checks it really is Volant with an intact code
-//! signature, then swaps the two app bundles the moment Volant quits and opens
-//! the new one. Your tabs, history and settings live outside the app and stay.
+//! different one, an update is offered. Installing downloads the zip, checks it
+//! against the SHA-256 GitHub publishes for it, unpacks it next to the running
+//! app (all in Rust: volant-core's `hash` and `zip`), checks it really is
+//! Volant, then Volant itself (`--finish-update`) swaps the two app bundles the
+//! moment the old one quits and opens the new one. Your tabs, history and
+//! settings live outside the app and stay.
 
 use super::{later, on_main, pages, ui, web, with, Browser, COMMIT};
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSApplication;
-use objc2_foundation::{NSBundle, NSData, NSString, NSURL};
+use objc2_app_kit::{NSApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
+use objc2_foundation::{NSBundle, NSURL};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use volant_core::json;
+use volant_core::{hash, json, zip};
 
 pub const REPO: &str = match option_env!("VOLANT_REPO") {
     Some(r) => r,
@@ -86,16 +88,12 @@ pub fn check(b: &mut Browser, manual: bool) {
     }
     b.update.checking = true;
     status(b, "checking");
-    let api = format!("https://api.github.com/repos/{REPO}/releases/tags/latest");
     std::thread::spawn(move || {
-        let text = NSURL::URLWithString(&NSString::from_str(&api))
-            .and_then(|u| NSData::dataWithContentsOfURL(&u))
-            .and_then(|d| String::from_utf8(d.to_vec()).ok());
+        let latest = release().ok().map(|r| r.commit);
         on_main(move || {
             with(move |b| {
                 b.update.checking = false;
                 b.update.last_check = super::now();
-                let latest = text.as_deref().and_then(|t| json::strings_for(t, "target_commitish").into_iter().next());
                 match latest {
                     Some(sha) if sha.len() >= 7 && !sha.starts_with(&mine) && !mine.starts_with(&sha) => {
                         b.update.available = Some(sha);
@@ -136,6 +134,34 @@ pub fn offer() {
     }
 }
 
+/// The "Latest build" release, as GitHub describes it.
+struct Release {
+    commit: String,
+    zip_url: String,
+    /// The SHA-256 GitHub computed for the zip when it was uploaded.
+    zip_sha256: Option<String>,
+}
+
+fn release() -> Result<Release, String> {
+    let api = format!("https://api.github.com/repos/{REPO}/releases/tags/latest");
+    let mut opts = super::net::options();
+    opts.headers.push(("Accept".into(), "application/vnd.github+json".into()));
+    opts.limit = 4 << 20;
+    let r = super::net::get(&api, &opts)?;
+    if !r.ok() {
+        return Err(format!("GitHub answered {}", r.status));
+    }
+    let v = json::parse(&r.text()).ok_or("GitHub's answer wasn't JSON")?;
+    let commit = v.str_at("target_commitish").ok_or("no commit in GitHub's answer")?.to_string();
+    let asset = v.get("assets").map(json::Value::as_array).unwrap_or(&[]).iter().find(|a| a.str_at("name") == Some("Volant-mac.zip"));
+    let zip_url = asset
+        .and_then(|a| a.str_at("browser_download_url"))
+        .map(String::from)
+        .unwrap_or_else(|| format!("https://github.com/{REPO}/releases/download/latest/Volant-mac.zip"));
+    let zip_sha256 = asset.and_then(|a| a.str_at("digest")).and_then(|d| d.strip_prefix("sha256:")).map(str::to_ascii_lowercase);
+    Ok(Release { commit, zip_url, zip_sha256 })
+}
+
 fn app_path() -> Option<PathBuf> {
     let p = PathBuf::from(NSBundle::mainBundle().bundlePath().to_string());
     (p.extension().map(|e| e == "app").unwrap_or(false)).then_some(p)
@@ -159,9 +185,8 @@ pub fn install(b: &mut Browser) {
     b.update.installing = true;
     status(b, "installing");
     ui::update_downloads(b);
-    let zip_url = format!("https://github.com/{REPO}/releases/download/latest/Volant-mac.zip");
     std::thread::spawn(move || {
-        let result = download_and_check(&zip_url, &staging);
+        let result = download_and_check(&staging);
         on_main(move || {
             with(move |b| match result {
                 Ok(new_app) => {
@@ -184,45 +209,40 @@ pub fn install(b: &mut Browser) {
     });
 }
 
-fn download_and_check(url: &str, staging: &Path) -> Result<PathBuf, String> {
-    let data = NSURL::URLWithString(&NSString::from_str(url))
-        .and_then(|u| NSData::dataWithContentsOfURL(&u))
-        .ok_or("The download didn't finish. Check your connection and try again.")?;
-    let zip = staging.join("Volant-mac.zip");
-    std::fs::write(&zip, data.to_vec()).map_err(|e| format!("Couldn't save the update: {e}"))?;
-    let ok = Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(&zip).arg(staging).status().map(|s| s.success()).unwrap_or(false);
-    if !ok {
-        return Err("The update couldn't be unpacked.".into());
+fn download_and_check(staging: &Path) -> Result<PathBuf, String> {
+    let rel = release().map_err(|e| format!("Couldn't reach GitHub ({e})."))?;
+    let want = rel.zip_sha256.ok_or("GitHub didn't say what the update should contain, so it wasn't installed.")?;
+    let mut opts = super::net::options();
+    opts.limit = 256 << 20;
+    opts.deadline = std::time::Duration::from_secs(600);
+    let r = super::net::get(&rel.zip_url, &opts).map_err(|e| format!("The download didn't finish ({e}). Check your connection and try again."))?;
+    if !r.ok() {
+        return Err(format!("The download didn't finish (GitHub answered {}).", r.status));
     }
+    // Exactly the file GitHub has: a damaged or altered download stops here.
+    if hash::hex(&hash::sha256(&r.body)) != want {
+        return Err("The download didn't match the release, so it wasn't installed.".into());
+    }
+    zip::extract_to(&r.body, staging, 1 << 30).map_err(|e| format!("The update couldn't be unpacked ({e})."))?;
     let new_app = staging.join("Volant.app");
     let plist = std::fs::read_to_string(new_app.join("Contents/Info.plist")).unwrap_or_default();
-    if !plist.contains(BUNDLE_ID) || !new_app.join("Contents/MacOS/Volant").exists() {
+    let exe = std::fs::read(new_app.join("Contents/MacOS/Volant")).unwrap_or_default();
+    let mach_o = volant_core::macho::slices(&exe).is_ok() || volant_core::macho::cpu(&exe).is_ok();
+    if !plist.contains(BUNDLE_ID) || !mach_o {
         return Err("The download wasn't a copy of Volant.".into());
-    }
-    // The signature seals every file in the bundle; a damaged download fails here.
-    let sealed = Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&new_app).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
-    if !sealed {
-        return Err("The update's signature didn't check out, so it wasn't installed.".into());
     }
     Ok(new_app)
 }
 
-/// A tiny script waits for Volant to quit, swaps the bundles (rolling back if
-/// the swap fails), cleans up, and opens the new Volant.
+/// Starts this very binary as a small helper (`--finish-update`) that waits for
+/// Volant to quit, swaps the bundles and opens the new one; then quits.
 fn swap_and_relaunch(app: &Path, new_app: &Path, staging: &Path) {
-    const SCRIPT: &str = r#"
-pid="$1"; app="$2"; new="$3"; dir="$4"
-while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
-old="$app.previous"
-rm -rf "$old"
-if mv "$app" "$old"; then
-  if mv "$new" "$app"; then rm -rf "$old"; else mv "$old" "$app"; fi
-fi
-rm -rf "$dir"
-open "$app"
-"#;
-    let spawned = Command::new("/bin/sh")
-        .args(["-c", SCRIPT, "volant-update"])
+    use std::os::unix::process::CommandExt;
+    let Ok(me) = std::env::current_exe() else { return };
+    let spawned = Command::new(me)
+        // Its own name in the process list, so nothing mistakes it for Volant.
+        .arg0("volant-update-helper")
+        .arg("--finish-update")
         .arg(std::process::id().to_string())
         .arg(app)
         .arg(new_app)
@@ -237,4 +257,49 @@ open "$app"
             NSApplication::sharedApplication(mtm).terminate(None);
         }
     }
+}
+
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// `Volant --finish-update PID APP NEW STAGING`: the second half of an update,
+/// run as a helper process. Waits for Volant (PID) to quit, moves the old app
+/// aside, moves the new one into place (putting the old one back if that
+/// fails), cleans up, and opens the app. Returns the exit status.
+pub fn finish_update(args: &[String]) -> i32 {
+    let [pid, app, new, staging] = args else { return 2 };
+    let Ok(pid) = pid.parse::<i32>() else { return 2 };
+    let (app, new, staging) = (PathBuf::from(app), PathBuf::from(new), PathBuf::from(staging));
+    // Only ever swap an app bundle for one staged beside it.
+    if app.extension().map(|e| e != "app").unwrap_or(true) || !new.starts_with(&staging) || staging.parent() != app.parent() {
+        return 2;
+    }
+    let started = std::time::Instant::now();
+    while unsafe { kill(pid, 0) } == 0 && started.elapsed() < std::time::Duration::from_secs(120) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let mut old = app.clone().into_os_string();
+    old.push(".previous");
+    let old = PathBuf::from(old);
+    let _ = std::fs::remove_dir_all(&old);
+    if std::fs::rename(&app, &old).is_ok() {
+        if std::fs::rename(&new, &app).is_ok() {
+            let _ = std::fs::remove_dir_all(&old);
+        } else {
+            let _ = std::fs::rename(&old, &app);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    // Open it the way the Finder would, and wait (briefly) until macOS has.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let done = block2::RcBlock::new(move |_app: *mut objc2_app_kit::NSRunningApplication, _err: *mut objc2_foundation::NSError| {
+        let _ = tx.send(());
+    });
+    let url = NSURL::fileURLWithPath(&super::ns(&app.to_string_lossy()));
+    let config = NSWorkspaceOpenConfiguration::configuration();
+    config.setActivates(true);
+    NSWorkspace::sharedWorkspace().openApplicationAtURL_configuration_completionHandler(&url, &config, Some(&done));
+    let _ = rx.recv_timeout(std::time::Duration::from_secs(20));
+    0
 }
