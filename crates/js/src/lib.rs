@@ -8,12 +8,18 @@
 //! * [`builtins`]: Object, Function, Array, String, Number, Boolean, Math,
 //!   JSON, the Error types, Map, Set, Date, console and timers.
 //!
-//! Not yet: regular expressions, Promises and async, generators, Symbols,
-//! typed arrays, and the DOM. Those are the next chunks.
+//! * [`regex`] and [`regexp`]: regular expressions and the methods using them.
+//! * [`promise`]: the event loop, Promises, async/await, timers, generators,
+//!   iterators and Symbols.
+//!
+//! The DOM lives with the web engine (volant-engine's `script` module).
 
 pub mod builtins;
 pub mod interp;
 pub mod parse;
+pub mod promise;
+pub mod regex;
+pub mod regexp;
 
 pub use interp::{Interp, Value};
 
@@ -27,6 +33,12 @@ pub fn run(src: &str) -> (Vec<String>, Result<(), String>) {
     let spawned = std::thread::Builder::new().stack_size(256 << 20).spawn(move || {
         let mut i = Interp::new();
         let r = i.run(&src).map(|_| ());
+        // Then the event loop: timers in order of their (virtual) due times.
+        i.run_jobs(f64::INFINITY, 100_000);
+        let r = r.and_then(|_| match i.errors.first() {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        });
         (std::mem::take(&mut i.output), r)
     });
     match spawned {

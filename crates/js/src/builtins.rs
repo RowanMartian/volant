@@ -101,6 +101,22 @@ pub fn inspect(i: &mut Interp, v: &Value, top: bool, depth: u32) -> String {
             if matches!(o.borrow().kind, Kind::Error) {
                 return i.describe(v);
             }
+            if let Kind::RegExp(_, src, flags) = &o.borrow().kind {
+                return format!("/{src}/{flags}");
+            }
+            if let Kind::Promise(p) = &o.borrow().kind {
+                return match &*p.borrow() {
+                    crate::promise::PState::Pending(_) => "Promise { <pending> }".into(),
+                    crate::promise::PState::Fulfilled(v) => {
+                        let v = v.clone();
+                        format!("Promise {{ {} }}", inspect(i, &v, false, depth + 1))
+                    }
+                    crate::promise::PState::Rejected(v) => {
+                        let v = v.clone();
+                        format!("Promise {{ <rejected> {} }}", inspect(i, &v, false, depth + 1))
+                    }
+                };
+            }
             if matches!(o.borrow().kind, Kind::Date(_) | Kind::Boxed(_)) {
                 return i.to_str(v).map(|s| s.to_string()).unwrap_or_default();
             }
@@ -1401,19 +1417,26 @@ pub fn install(i: &mut Interp) {
         global(i, name, f);
     }
 
-    // ---------------------------------------------------------- timers
-    let set_timeout = i.native(|i, _t, a| {
-        let f = arg(&a, 0);
-        if Interp::is_callable(&f) {
-            i.tasks.push((f, a.into_iter().skip(2).collect()));
+    // Promises, timers, iterators, Symbols, regular expressions.
+    crate::promise::install(i);
+    crate::regexp::install(i);
+
+    // ---------------------------------------------------------- misc
+    let structured = i.native(|i, _t, a| {
+        // A deep copy through JSON (enough for plain data).
+        let mut seen = Vec::new();
+        match json_stringify(i, &arg(&a, 0), "", "", &mut seen)? {
+            Some(s) => Ok(volant_core::json::parse(&s).map(|v| from_json(i, &v)).unwrap_or(Value::Undefined)),
+            None => Ok(Value::Undefined),
         }
-        Ok(Value::Num(i.tasks.len() as f64))
     });
-    global(i, "setTimeout", set_timeout.clone());
-    global(i, "queueMicrotask", set_timeout);
-    let noop = i.native(|_i, _t, _a| Ok(Value::Undefined));
-    global(i, "clearTimeout", noop.clone());
-    global(i, "clearInterval", noop);
+    global(i, "structuredClone", structured);
+    for (name, base) in [("WeakMap", "Map"), ("WeakSet", "Set"), ("WeakRef", "Object")] {
+        let v = i.global_obj.borrow().get_own(base).and_then(|s| if let Slot::Data(v) = s { Some(v.clone()) } else { None });
+        if let Some(v) = v {
+            global(i, name, v);
+        }
+    }
 
     // Silence the unused-callable lint for Callable (used by interp's matches).
     let _ = |c: &Callable| matches!(c, Callable::Native(_));

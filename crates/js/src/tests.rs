@@ -210,3 +210,80 @@ fn uri_and_partial_output() {
     assert_eq!(printed, vec!["before".to_string()]);
     assert!(r.unwrap_err().contains("ReferenceError"));
 }
+
+#[test]
+fn regular_expressions() {
+    let src = r#"
+        const re = /(\d{4})-(\d{2})-(\d{2})/
+        const m = '2026-11-12'.match(re)
+        console.log(m[0], m[1], m.index, re.test('no'), re.source, /a/gi.flags)
+        console.log('a1b22c333'.match(/\d+/g).join('|'), 'x'.match(/y/), 'aaa'.search(/a$/))
+        console.log('John Smith'.replace(/(\w+)\s(\w+)/, '$2, $1'), 'a.b.c'.replace(/\./g, '-'), 'abc'.replace(/b/, m => m.toUpperCase()))
+        console.log('one, two;three'.split(/[,;]\s*/).join('|'), 'a1b2'.split(/(\d)/).join('|'), 'abc'.split(/(?:)/).length)
+        const { groups: { year } } = /(?<year>\d{4})/.exec('in 1939 the')
+        console.log(year, [...'a1b2c3'.matchAll(/[a-z](\d)/g)].map(x => x[1]).join(''))
+        const g = /o/g; let n = 0; while (g.exec('foo boo')) n++
+        console.log(n, g.lastIndex, new RegExp('h(i)', 'i').exec('HI')[1], String(/x\/y/))
+        console.log('camelCaseString'.replace(/([A-Z])/g, ' $1').toLowerCase(), /^[\w.+-]+@\w+\.\w+$/.test('me@volant.app'))
+        console.log('  trim  me '.replace(/^\s+|\s+$/g, ''), 'x'.replace('x', '$&$&'), 10 / 2 / 5)
+    "#;
+    assert_eq!(
+        out(src),
+        "2026-11-12 2026 0 false (\\d{4})-(\\d{2})-(\\d{2}) gi\n1|22|333 null 2\nSmith, John a-b-c aBc\none|two|three a|1|b|2| 3\n1939 123\n4 0 I /x\\/y/\ncamel case string true\ntrim  me xx 1"
+    );
+}
+
+#[test]
+fn promises_and_async() {
+    let src = r#"
+        const log = []
+        Promise.resolve(1).then(v => log.push('then ' + v))
+        new Promise((res, rej) => rej(new Error('bad'))).catch(e => log.push('caught ' + e.message)).finally(() => log.push('finally'))
+        queueMicrotask(() => log.push('micro'))
+        log.push('sync')
+        setTimeout(() => { console.log(log.join(', ')) }, 0)
+        const sleep = ms => new Promise(r => setTimeout(r, ms))
+        async function work(x) { await sleep(10); return x * 2 }
+        async function main() {
+            const a = await work(2)
+            const [b, c] = await Promise.all([work(3), work(4)])
+            let err
+            try { await Promise.reject(new TypeError('nope')) } catch (e) { err = e.name }
+            const settled = await Promise.allSettled([work(1), Promise.reject(1)])
+            const first = await Promise.race([sleep(50).then(() => 'slow'), sleep(5).then(() => 'fast')])
+            console.log(a, b, c, err, settled.map(s => s.status).join('/'), first)
+        }
+        // `await` runs the event loop in place (see promise.rs), so main() finishes here.
+        const arrow = async () => 7
+        arrow().then(v => console.log('arrow', v))
+        main().then(() => console.log('main done'))
+        const order = []
+        setTimeout(() => order.push(30), 30); setTimeout(() => order.push(10), 10); setTimeout(() => console.log(order.join()), 40)
+        let ticks = 0; const iv = setInterval(() => { if (++ticks === 3) clearInterval(iv) }, 5)
+        setTimeout(() => console.log('ticks', ticks), 100)
+    "#;
+    assert_eq!(out(src), "arrow 7\nsync, then 1, caught bad, micro, finally\n4 6 8 TypeError fulfilled/rejected fast\nmain done\n10,30\nticks 3");
+}
+
+#[test]
+fn generators_iterators_symbols() {
+    let src = r#"
+        function* count(n) { for (let i = 0; i < n; i++) yield i; return 'end' }
+        const g = count(3)
+        console.log(g.next().value, g.next().value, g.next().value, JSON.stringify(g.next()), [...count(4)].join())
+        function* naturals() { let i = 0; while (true) yield i++ }
+        const it = naturals(); it.next(); console.log(it.next().value)
+        function* inner() { yield 'a'; yield 'b' }
+        function* outer() { yield* inner(); yield* [1, 2] }
+        console.log([...outer()].join())
+        class Range { constructor(a, b) { this.a = a; this.b = b } *[Symbol.iterator]() { for (let i = this.a; i <= this.b; i++) yield i } }
+        console.log([...new Range(1, 5)].join(), typeof Symbol.iterator, typeof Symbol('x'))
+        const custom = { [Symbol.iterator]() { let n = 0; return { next: () => ({ value: n, done: n++ >= 3 }) } } }
+        for (const v of custom) console.log('v', v)
+        const m = new Map([['a', 1], ['b', 2]])
+        console.log(m.keys().next().value, [...m.values()].join(), Array.from(m.entries()).length, [1, 2].entries().next().value.join(':'))
+        const s = Symbol('id'); const o = { [s]: 1, x: 2 }
+        console.log(Object.keys(o).join(), o[s])
+    "#;
+    assert_eq!(out(src), "0 1 2 {\"value\":\"end\",\"done\":true} 0,1,2,3\n1\na,b,1,2\n1,2,3,4,5 symbol symbol\nv 0\nv 1\nv 2\na 1,2 2 0:1\nx 1");
+}

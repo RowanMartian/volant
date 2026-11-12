@@ -50,6 +50,9 @@ pub enum Kind {
     Date(f64),
     /// A primitive in an object (`new String("x")`).
     Boxed(Value),
+    /// A regular expression: (compiled, source, flags)
+    RegExp(Rc<crate::regex::Regex>, Rc<str>, Rc<str>),
+    Promise(Rc<RefCell<crate::promise::PState>>),
 }
 
 #[derive(Clone)]
@@ -168,10 +171,24 @@ pub struct Interp {
     pub map_proto: Obj,
     pub set_proto: Obj,
     pub date_proto: Obj,
+    pub regexp_proto: Obj,
+    pub promise_proto: Obj,
+    pub generator_proto: Obj,
+    pub iterator_proto: Obj,
     /// What `console.log` printed.
     pub output: Vec<String>,
-    /// Callbacks from setTimeout and friends, run after the script.
-    pub tasks: Vec<(Value, Vec<Value>)>,
+    /// Uncaught exceptions from callbacks (timers, promise jobs, events).
+    pub errors: Vec<String>,
+    /// Promise reactions and queueMicrotask callbacks.
+    pub microtasks: std::collections::VecDeque<(Value, Vec<Value>)>,
+    /// setTimeout / setInterval, on a virtual clock.
+    pub timers: Vec<crate::promise::Timer>,
+    /// The virtual clock, in ms since the page started.
+    pub now: f64,
+    pub timer_seq: u32,
+    /// Values yielded by the generators currently running (innermost last).
+    pub gen_stack: Vec<Vec<Value>>,
+    regex_cache: HashMap<(Rc<str>, Rc<str>), Rc<crate::regex::Regex>>,
     steps: u64,
     pub max_steps: u64,
     depth: u32,
@@ -199,11 +216,21 @@ impl Interp {
             map_proto: mk(Kind::Plain),
             set_proto: mk(Kind::Plain),
             date_proto: mk(Kind::Plain),
+            regexp_proto: mk(Kind::Plain),
+            promise_proto: mk(Kind::Plain),
+            generator_proto: mk(Kind::Plain),
+            iterator_proto: mk(Kind::Plain),
             global_obj,
             object_proto,
             function_proto,
             output: Vec::new(),
-            tasks: Vec::new(),
+            errors: Vec::new(),
+            microtasks: Default::default(),
+            timers: Vec::new(),
+            now: 0.0,
+            timer_seq: 0,
+            gen_stack: Vec::new(),
+            regex_cache: HashMap::new(),
             steps: 0,
             max_steps: 50_000_000,
             depth: 0,
@@ -222,6 +249,8 @@ impl Interp {
             Kind::Map(_) => self.map_proto.clone(),
             Kind::Set(_) => self.set_proto.clone(),
             Kind::Date(_) => self.date_proto.clone(),
+            Kind::RegExp(..) => self.regexp_proto.clone(),
+            Kind::Promise(_) => self.promise_proto.clone(),
             _ => self.object_proto.clone(),
         };
         Value::Obj(Rc::new(RefCell::new(Object::new(Some(proto), kind))))
@@ -265,6 +294,7 @@ impl Interp {
             Value::Null => "object",
             Value::Bool(_) => "boolean",
             Value::Num(_) => "number",
+            Value::Str(s) if s.starts_with("\0@") => "symbol",
             Value::Str(_) => "string",
             Value::Obj(o) => {
                 if matches!(o.borrow().kind, Kind::Function(_)) {
@@ -530,6 +560,27 @@ impl Interp {
     }
 
     /// Runs a whole script in the global scope; returns the last expression statement's value.
+    /// A RegExp object for a literal (compiled once per pattern).
+    pub fn regexp(&mut self, body: &Rc<str>, flags: &Rc<str>) -> Res<Value> {
+        let key = (body.clone(), flags.clone());
+        let re = match self.regex_cache.get(&key) {
+            Some(r) => r.clone(),
+            None => {
+                let r = match crate::regex::Regex::new(body, flags) {
+                    Ok(r) => Rc::new(r),
+                    Err(e) => return self.throw("SyntaxError", &e),
+                };
+                self.regex_cache.insert(key, r.clone());
+                r
+            }
+        };
+        let o = self.obj(Kind::RegExp(re, body.clone(), flags.clone()));
+        if let Value::Obj(oo) = &o {
+            oo.borrow_mut().set_own("lastIndex", Value::Num(0.0));
+        }
+        Ok(o)
+    }
+
     pub fn run(&mut self, src: &str) -> Result<Value, String> {
         let prog = crate::parse::parse(src).map_err(|e| format!("SyntaxError: {e}"))?;
         let g = self.global.clone();
@@ -544,13 +595,8 @@ impl Interp {
                 },
             }
         }
-        // Timers and queued callbacks, in order (no real clock yet).
-        let mut n = 0;
-        while !self.tasks.is_empty() && n < 10_000 {
-            let (f, args) = self.tasks.remove(0);
-            self.call(&f, Value::Undefined, args).map_err(|v| self.describe(&v))?;
-            n += 1;
-        }
+        // Promise reactions run as soon as the script ends; timers wait for the caller's event loop.
+        self.run_microtasks();
         Ok(last)
     }
 
@@ -780,6 +826,23 @@ impl Interp {
                 if let Some(l) = kind_list {
                     return Ok(l);
                 }
+                // One of our own iterators: the rest of its items.
+                if let Some(rest) = crate::promise::iterator_rest(o) {
+                    return Ok(rest);
+                }
+                // An iterable: [Symbol.iterator]() gives the iterator.
+                let it_fn = self.get(v, crate::promise::SYM_ITERATOR)?;
+                if Self::is_callable(&it_fn) {
+                    let it = self.call(&it_fn, v.clone(), vec![])?;
+                    if let Value::Obj(io) = &it {
+                        if let Some(rest) = crate::promise::iterator_rest(io) {
+                            return Ok(rest);
+                        }
+                    }
+                    if !Self::strict_eq(&it, v) {
+                        return self.iterate(&it);
+                    }
+                }
                 // An iterator object (has next()), or an array-like (has length).
                 let next = self.get(v, "next")?;
                 if Self::is_callable(&next) {
@@ -826,7 +889,30 @@ impl Interp {
         };
         match callable {
             Ok(native) => native(self, this, args),
-            Err((func, parent, lexical, sup)) => {
+            Err((func, _, _, _)) if func.is_gen => Ok(self.make_generator(f.clone(), this, args)),
+            Err((func, _, _, _)) if func.is_async => {
+                let r = self.call_body(f, this, args);
+                let (p, _) = self.new_promise();
+                match r {
+                    Ok(v) => self.resolve_promise(&p, v),
+                    Err(e) => self.reject_promise(&p, e),
+                }
+                Ok(p)
+            }
+            Err(_) => self.call_body(f, this, args),
+        }
+    }
+
+    /// Runs a closure's body (without the async / generator wrapping).
+    pub(crate) fn call_body(&mut self, f: &Value, this: Value, args: Vec<Value>) -> Res<Value> {
+        let Value::Obj(o) = f else { return self.throw("TypeError", "not a function") };
+        let callable = match &o.borrow().kind {
+            Kind::Function(Callable::Closure { func, scope, this: lexical, sup }) => Some((func.clone(), scope.clone(), lexical.clone(), sup.clone())),
+            _ => None,
+        };
+        match callable {
+            None => self.throw("TypeError", "not a function"),
+            Some((func, parent, lexical, sup)) => {
                 let this_v = if func.arrow { lexical } else { Some(this) };
                 let sc = scope(Some(&parent), true, if func.arrow { None } else { this_v.clone() });
                 if !func.arrow {
@@ -1165,7 +1251,7 @@ impl Interp {
             } else {
                 vec![]
             };
-            Rc::new(Func { name: name.clone(), params: vec![], body, arrow: false, expr_body: false })
+            Rc::new(Func { name: name.clone(), params: vec![], body, arrow: false, expr_body: false, is_async: false, is_gen: false })
         });
         let ctor = self.closure(&ctor_func, sc);
         let proto = match self.get(&ctor, "prototype")? {
@@ -1242,7 +1328,7 @@ impl Interp {
         // Instance fields run as a hidden initialiser: before the constructor
         // body in a base class, right after super() in a derived one.
         if !fields.is_empty() {
-            let init = Rc::new(Func { name: None, params: vec![], body: fields, arrow: false, expr_body: false });
+            let init = Rc::new(Func { name: None, params: vec![], body: fields, arrow: false, expr_body: false, is_async: false, is_gen: false });
             let f = self.closure(&init, sc);
             set_super(&f, parent.clone());
             if let Value::Obj(c) = &ctor {
@@ -1250,7 +1336,7 @@ impl Interp {
             }
         }
         if !statics.is_empty() {
-            let init = Rc::new(Func { name: None, params: vec![], body: statics, arrow: false, expr_body: false });
+            let init = Rc::new(Func { name: None, params: vec![], body: statics, arrow: false, expr_body: false, is_async: false, is_gen: false });
             let f = self.closure(&init, sc);
             self.call(&f, ctor.clone(), vec![])?;
         }
@@ -1348,6 +1434,25 @@ impl Interp {
                 o
             }
             Expr::Func(f) => self.closure(f, sc),
+            Expr::Regex(body, flags) => self.regexp(body, flags)?,
+            Expr::Await(e) => {
+                let v = self.eval(e, sc)?;
+                self.await_value(v)?
+            }
+            Expr::Yield(arg, delegate) => {
+                let v = match arg {
+                    Some(e) => self.eval(e, sc)?,
+                    None => Value::Undefined,
+                };
+                let items = if *delegate { self.iterate(&v)? } else { vec![v] };
+                let Some(buf) = self.gen_stack.last_mut() else { return self.throw("SyntaxError", "yield outside a generator") };
+                buf.extend(items);
+                if buf.len() > crate::promise::MAX_YIELDS {
+                    // An endless generator: stop it here (generators run ahead of their consumer).
+                    return Err(Value::Str(crate::promise::GEN_STOP.into()));
+                }
+                Value::Undefined
+            }
             Expr::Unary(op, x) => {
                 if *op == "typeof" {
                     // typeof an undeclared name is "undefined", not an error.

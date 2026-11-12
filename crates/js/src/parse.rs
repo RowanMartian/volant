@@ -12,6 +12,8 @@ pub enum Tok {
     Template(Vec<String>, Vec<String>),
     Ident(String),
     Punct(&'static str),
+    /// A regular expression literal: (pattern, flags)
+    Regex(String, String),
     Eof,
 }
 
@@ -178,6 +180,34 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             push(&mut out, Tok::Ident(s[start..i].iter().collect()));
             continue;
         }
+        if c == '/' && regex_allowed(out.last().map(|t: &Token| &t.tok)) {
+            let mut j = i + 1;
+            let mut class = false;
+            while j < s.len() {
+                match s[j] {
+                    '\\' => j += 1,
+                    '[' => class = true,
+                    ']' => class = false,
+                    '/' if !class => break,
+                    '\n' => return Err(format!("line {line}: unterminated regular expression")),
+                    _ => {}
+                }
+                j += 1;
+            }
+            if j >= s.len() {
+                return Err(format!("line {line}: unterminated regular expression"));
+            }
+            let body: String = s[i + 1..j].iter().collect();
+            j += 1;
+            let fstart = j;
+            while j < s.len() && s[j].is_alphanumeric() {
+                j += 1;
+            }
+            let flags: String = s[fstart..j].iter().collect();
+            i = j;
+            push(&mut out, Tok::Regex(body, flags));
+            continue;
+        }
         let rest: String = s[i..(i + 4).min(s.len())].iter().collect();
         match PUNCTS.iter().find(|p| rest.starts_with(**p)) {
             Some(p) => {
@@ -195,6 +225,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
     }
     out.push(Token { tok: Tok::Eof, nl: true, line });
     Ok(out)
+}
+
+/// Whether a `/` after this token starts a regular expression (rather than dividing).
+fn regex_allowed(prev: Option<&Tok>) -> bool {
+    match prev {
+        None => true,
+        Some(Tok::Punct(p)) => !matches!(*p, ")" | "]" | "}" | "++" | "--"),
+        Some(Tok::Ident(w)) => matches!(
+            w.as_str(),
+            "return" | "typeof" | "instanceof" | "in" | "of" | "new" | "delete" | "void" | "throw" | "case" | "do" | "else" | "yield" | "await"
+        ),
+        _ => false,
+    }
 }
 
 fn escape(s: &[char], i: &mut usize, v: &mut String, line: &mut u32) {
@@ -273,6 +316,11 @@ pub enum Expr {
     /// Destructuring patterns (as assignment targets and parameters).
     ArrayPat(Vec<Option<Expr>>),
     ObjectPat(Vec<(Expr, Expr)>),
+    /// /pattern/flags
+    Regex(Rc<str>, Rc<str>),
+    /// `yield x` (delegate: `yield* x`)
+    Yield(Option<P<Expr>>, bool),
+    Await(P<Expr>),
     /// `target = default` inside a pattern or parameter list.
     Default(P<Expr>, P<Expr>),
     Rest(P<Expr>),
@@ -305,6 +353,9 @@ pub struct Func {
     pub arrow: bool,
     /// An arrow with an expression body: `body` is one `Return`.
     pub expr_body: bool,
+    pub is_async: bool,
+    /// `function*`
+    pub is_gen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +391,11 @@ pub struct Parser {
     i: usize,
     /// Nesting depth, to stop pathological input before it overflows the stack.
     depth: u32,
+    /// The next function parsed is `async` / a generator.
+    next_async: bool,
+    next_gen: bool,
+    /// Inside a generator body (`yield` is a keyword).
+    in_gen: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -380,7 +436,7 @@ const RESERVED: &[&str] = &[
 
 impl Parser {
     pub fn new(src: &str) -> R<Self> {
-        Ok(Parser { toks: lex(src)?, i: 0, depth: 0 })
+        Ok(Parser { toks: lex(src)?, i: 0, depth: 0, next_async: false, next_gen: false, in_gen: false })
     }
 
     fn peek(&self) -> &Tok {
@@ -514,15 +570,15 @@ impl Parser {
             }
             "function" => {
                 self.next();
-                let star = self.eat("*");
-                let _ = star;
+                self.next_gen = self.eat("*");
                 let name = self.ident()?;
                 Ok(Stmt::Func(self.func_rest(Some(name))?))
             }
             "async" if matches!(self.peek_at(1), Tok::Ident(w) if w == "function") && !self.toks[self.i + 1].nl => {
                 self.next();
                 self.next();
-                self.eat("*");
+                self.next_gen = self.eat("*");
+                self.next_async = true;
                 let name = self.ident()?;
                 Ok(Stmt::Func(self.func_rest(Some(name))?))
             }
@@ -720,10 +776,16 @@ impl Parser {
     }
 
     fn func_rest(&mut self, name: Option<Rc<str>>) -> R<Rc<Func>> {
-        self.expect("(")?;
-        let params = self.params()?;
-        let body = self.block()?;
-        Ok(Rc::new(Func { name, params, body, arrow: false, expr_body: false }))
+        let (is_async, is_gen) = (std::mem::take(&mut self.next_async), std::mem::take(&mut self.next_gen));
+        let outer = std::mem::replace(&mut self.in_gen, is_gen);
+        let r = (|| {
+            self.expect("(")?;
+            let params = self.params()?;
+            let body = self.block()?;
+            Ok(Rc::new(Func { name, params, body, arrow: false, expr_body: false, is_async, is_gen }))
+        })();
+        self.in_gen = outer;
+        r
     }
 
     fn params(&mut self) -> R<Vec<Expr>> {
@@ -761,10 +823,11 @@ impl Parser {
                     accessor = Some(w);
                 }
             }
+            let mut is_async = false;
             if !matches!(self.peek_at(1), Tok::Punct("(" | "=" | ";" | "}")) {
-                self.eat_word("async");
+                is_async = self.eat_word("async");
             }
-            self.eat("*");
+            let is_gen = self.eat("*");
             let key = if self.eat("[") {
                 let k = self.assign()?;
                 self.expect("]")?;
@@ -779,6 +842,8 @@ impl Parser {
             };
             if self.is("(") {
                 let name = if let Expr::Str(n) = &key { Some(n.clone()) } else { None };
+                self.next_async = is_async;
+                self.next_gen = is_gen;
                 let f = self.func_rest(name)?;
                 let m = match accessor {
                     Some("get") => Member::Get(f),
@@ -861,14 +926,25 @@ impl Parser {
 
     fn assign_inner(&mut self) -> R<Expr> {
         // Arrow functions: `x => ...`, `(a, b) => ...`, `async x => ...` (no event loop yet: async is ignored).
+        let mut is_async = false;
         if self.is_word("async") && !self.toks[self.i + 1].nl {
             let save = self.i;
             self.next();
             let arrow = (matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Punct("=>"))) || self.is_arrow_ahead();
-            if !arrow {
+            if arrow {
+                is_async = true;
+            } else {
                 self.i = save;
             }
         }
+        if self.in_gen && self.is_word("yield") {
+            self.next();
+            let delegate = self.eat("*");
+            let ends = self.nl_before() || matches!(self.peek(), Tok::Punct(")" | "]" | "}" | "," | ";" | ":") | Tok::Eof);
+            let arg = if ends && !delegate { None } else { Some(Box::new(self.assign()?)) };
+            return Ok(Expr::Yield(arg, delegate));
+        }
+        self.next_async = is_async;
         if let Tok::Ident(n) = self.peek().clone() {
             if matches!(self.peek_at(1), Tok::Punct("=>")) && !RESERVED.contains(&n.as_str()) {
                 self.next();
@@ -882,6 +958,7 @@ impl Parser {
             self.expect("=>")?;
             return self.arrow_body(params);
         }
+        self.next_async = false;
         let left = self.conditional()?;
         self.assign_rest(left)
     }
@@ -901,13 +978,19 @@ impl Parser {
     }
 
     fn arrow_body(&mut self, params: Vec<Expr>) -> R<Expr> {
-        if self.is("{") {
-            let body = self.block()?;
-            Ok(Expr::Func(Rc::new(Func { name: None, params, body, arrow: true, expr_body: false })))
-        } else {
-            let e = self.assign()?;
-            Ok(Expr::Func(Rc::new(Func { name: None, params, body: vec![Stmt::Return(Some(e))], arrow: true, expr_body: true })))
-        }
+        let is_async = std::mem::take(&mut self.next_async);
+        let outer = std::mem::replace(&mut self.in_gen, false);
+        let r = (|| {
+            if self.is("{") {
+                let body = self.block()?;
+                Ok(Expr::Func(Rc::new(Func { name: None, params, body, arrow: true, expr_body: false, is_async, is_gen: false })))
+            } else {
+                let e = self.assign()?;
+                Ok(Expr::Func(Rc::new(Func { name: None, params, body: vec![Stmt::Return(Some(e))], arrow: true, expr_body: true, is_async, is_gen: false })))
+            }
+        })();
+        self.in_gen = outer;
+        r
     }
 
     fn conditional(&mut self) -> R<Expr> {
@@ -946,10 +1029,10 @@ impl Parser {
         let op = match self.peek() {
             Tok::Punct(p @ ("!" | "-" | "+" | "~")) => Some(*p),
             Tok::Ident(w) if w == "typeof" || w == "void" || w == "delete" => Some(intern(w)),
-            Tok::Ident(w) if w == "await" => {
-                // No event loop yet: `await x` is just `x`.
+            Tok::Ident(w) if w == "await" && !matches!(self.peek_at(1), Tok::Punct(")" | "," | ";" | "=" | "." | "]" | "}" | ":")) => {
                 self.next();
-                return self.unary_and_postfix();
+                let e = self.unary_and_postfix()?;
+                return Ok(Expr::Await(Box::new(e)));
             }
             _ => None,
         };
@@ -1101,7 +1184,7 @@ impl Parser {
                 Ok(Expr::Array(items))
             }
             Tok::Punct("{") => self.object(),
-            Tok::Punct("/") | Tok::Punct("/=") => Err(format!("line {line}: regular expressions aren't supported yet")),
+            Tok::Regex(body, flags) => Ok(Expr::Regex(body.into(), flags.into())),
             Tok::Ident(w) => match w.as_str() {
                 "true" => Ok(Expr::Bool(true)),
                 "false" => Ok(Expr::Bool(false)),
@@ -1109,7 +1192,7 @@ impl Parser {
                 "undefined" => Ok(Expr::Undefined),
                 "this" => Ok(Expr::This),
                 "function" => {
-                    self.eat("*");
+                    self.next_gen = self.eat("*");
                     let name = if let Tok::Ident(n) = self.peek() {
                         if !self.is("(") {
                             let n: Rc<str> = n.as_str().into();
@@ -1125,6 +1208,7 @@ impl Parser {
                 }
                 "async" if self.is_word("function") => {
                     self.next();
+                    self.next_async = true;
                     self.primary_after_function()
                 }
                 "class" => {
@@ -1147,6 +1231,8 @@ impl Parser {
                             body: vec![Stmt::Class(if name.is_empty() { "_class".into() } else { name.clone() }, sup, members), Stmt::Return(Some(Expr::Ident(if name.is_empty() { "_class".into() } else { name })))],
                             arrow: true,
                             expr_body: false,
+                            is_async: false,
+                            is_gen: false,
                         }))),
                         vec![],
                         false,
@@ -1160,7 +1246,7 @@ impl Parser {
     }
 
     fn primary_after_function(&mut self) -> R<Expr> {
-        self.eat("*");
+        self.next_gen = self.eat("*");
         let name = match self.peek().clone() {
             Tok::Ident(n) => {
                 self.next();
@@ -1182,10 +1268,12 @@ impl Parser {
                     get_set = Some(self.is_word("get"));
                     self.next();
                 }
+                let mut is_async = false;
                 if self.is_word("async") && !matches!(self.peek_at(1), Tok::Punct(":" | "(" | "," | "}")) {
                     self.next();
+                    is_async = true;
                 }
-                self.eat("*");
+                let is_gen = self.eat("*");
                 let (key, shorthand) = if self.eat("[") {
                     let k = self.assign()?;
                     self.expect("]")?;
@@ -1202,6 +1290,8 @@ impl Parser {
                     let f = self.func_rest(None)?;
                     props.push(if getter { Prop::Getter(key, f) } else { Prop::Setter(key, f) });
                 } else if self.is("(") {
+                    self.next_async = is_async;
+                    self.next_gen = is_gen;
                     let name = shorthand.as_ref().map(|n| n.as_str().into());
                     props.push(Prop::KeyValue(key, Expr::Func(self.func_rest(name)?)));
                 } else if self.eat(":") {
@@ -1263,6 +1353,7 @@ fn describe(t: &Tok) -> String {
         Tok::Template(..) => "a template".into(),
         Tok::Ident(w) => format!("'{w}'"),
         Tok::Punct(p) => format!("'{p}'"),
+        Tok::Regex(..) => "a regular expression".into(),
         Tok::Eof => "the end of the script".into(),
     }
 }
