@@ -1183,16 +1183,40 @@ fn install(i: &mut Interp, st: &S) {
         }
         node.borrow_mut().set_own(k, Value::Num(v));
     }
-    for name in [
-        "HTMLElement", "HTMLDivElement", "HTMLSpanElement", "HTMLAnchorElement", "HTMLImageElement", "HTMLInputElement", "HTMLButtonElement",
-        "HTMLFormElement", "HTMLSelectElement", "HTMLOptionElement", "HTMLTextAreaElement", "HTMLCanvasElement", "HTMLIFrameElement",
-        "HTMLScriptElement", "HTMLStyleElement", "HTMLLinkElement", "HTMLMetaElement", "HTMLBodyElement", "HTMLHeadElement", "HTMLHtmlElement",
-        "HTMLParagraphElement", "HTMLHeadingElement", "HTMLUListElement", "HTMLOListElement", "HTMLLIElement", "HTMLTableElement",
-        "HTMLTableRowElement", "HTMLTableCellElement", "HTMLVideoElement", "HTMLAudioElement", "HTMLMediaElement", "HTMLTemplateElement",
-        "HTMLLabelElement", "HTMLDetailsElement", "HTMLDialogElement", "HTMLPictureElement", "HTMLSourceElement", "SVGElement",
-        "SVGSVGElement", "HTMLUnknownElement", "HTMLBRElement", "HTMLHRElement", "HTMLPreElement",
-    ] {
+    for name in ["HTMLElement", "HTMLUnknownElement"] {
         i.global_obj.borrow_mut().set_own(name, element_ctor.clone());
+    }
+    // The specific element classes: Element's prototype, and instanceof checks the tag.
+    for (name, tags) in [
+        ("HTMLDivElement", &["div"][..]), ("HTMLSpanElement", &["span"]), ("HTMLAnchorElement", &["a"]), ("HTMLImageElement", &["img"]),
+        ("HTMLInputElement", &["input"]), ("HTMLButtonElement", &["button"]), ("HTMLFormElement", &["form"]), ("HTMLSelectElement", &["select"]),
+        ("HTMLOptionElement", &["option"]), ("HTMLTextAreaElement", &["textarea"]), ("HTMLCanvasElement", &["canvas"]), ("HTMLIFrameElement", &["iframe"]),
+        ("HTMLScriptElement", &["script"]), ("HTMLStyleElement", &["style"]), ("HTMLLinkElement", &["link"]), ("HTMLMetaElement", &["meta"]),
+        ("HTMLBodyElement", &["body"]), ("HTMLHeadElement", &["head"]), ("HTMLHtmlElement", &["html"]), ("HTMLParagraphElement", &["p"]),
+        ("HTMLHeadingElement", &["h1", "h2", "h3", "h4", "h5", "h6"]), ("HTMLUListElement", &["ul"]), ("HTMLOListElement", &["ol"]), ("HTMLLIElement", &["li"]),
+        ("HTMLTableElement", &["table"]), ("HTMLTableRowElement", &["tr"]), ("HTMLTableCellElement", &["td", "th"]), ("HTMLVideoElement", &["video"]),
+        ("HTMLAudioElement", &["audio"]), ("HTMLMediaElement", &["video", "audio"]), ("HTMLTemplateElement", &["template"]), ("HTMLLabelElement", &["label"]),
+        ("HTMLDetailsElement", &["details"]), ("HTMLDialogElement", &["dialog"]), ("HTMLPictureElement", &["picture"]), ("HTMLSourceElement", &["source"]),
+        ("HTMLBRElement", &["br"]), ("HTMLHRElement", &["hr"]), ("HTMLPreElement", &["pre"]), ("HTMLSlotElement", &["slot"]), ("HTMLObjectElement", &["object"]),
+        ("HTMLEmbedElement", &["embed"]), ("HTMLFieldSetElement", &["fieldset"]), ("HTMLLegendElement", &["legend"]), ("HTMLProgressElement", &["progress"]),
+        ("HTMLOutputElement", &["output"]), ("HTMLTimeElement", &["time"]), ("HTMLDataListElement", &["datalist"]), ("HTMLMapElement", &["map"]),
+        ("HTMLAreaElement", &["area"]), ("HTMLBaseElement", &["base"]), ("HTMLTitleElement", &["title"]), ("HTMLQuoteElement", &["blockquote", "q"]),
+        ("SVGElement", &["svg", "path", "g", "circle", "rect", "use", "symbol", "line", "polygon", "polyline", "ellipse", "text", "defs"]), ("SVGSVGElement", &["svg"]),
+    ] {
+        let tags: Vec<&'static str> = tags.to_vec();
+        let st2 = st.clone();
+        let check = i.native(move |_i, _t, a| {
+            let s = st2.borrow();
+            Ok(Value::Bool(node_of(&arg(&a, 0)).map(|n| s.dom.tag(n).map(|t| tags.contains(&t)).unwrap_or(false)).unwrap_or(false)))
+        });
+        let f = i.native(|i, _t, _a| i.throw("TypeError", "Illegal constructor"));
+        if let Value::Obj(fo) = &f {
+            let mut b = fo.borrow_mut();
+            b.set_own("prototype", Value::Obj(element.clone()));
+            b.set_own("name", str_val(name));
+            b.set_own("\0@hasInstance", check);
+        }
+        i.global_obj.borrow_mut().set_own(name, f);
     }
     for name in ["CharacterData", "Comment", "DocumentFragment", "ShadowRoot", "HTMLDocument"] {
         let f = i.native(|i, _t, _a| i.throw("TypeError", "Illegal constructor"));

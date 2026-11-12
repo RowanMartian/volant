@@ -1023,6 +1023,17 @@ impl Interp {
     }
 
     pub fn instance_of(&mut self, v: &Value, f: &Value) -> Res<bool> {
+        // A constructor's [Symbol.hasInstance] decides, if it has one.
+        if let Value::Obj(fo) = f {
+            let own = match fo.borrow().get_own("\0@hasInstance") {
+                Some(Slot::Data(h)) => Some(h.clone()),
+                _ => None,
+            };
+            if let Some(h) = own.filter(Self::is_callable) {
+                let r = self.call(&h, f.clone(), vec![v.clone()])?;
+                return Ok(Self::truthy(&r));
+            }
+        }
         let Value::Obj(o) = v else { return Ok(false) };
         let Value::Obj(p) = self.get(f, "prototype")? else { return Ok(false) };
         let mut cur = o.borrow().proto.clone();

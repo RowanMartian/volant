@@ -143,22 +143,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 } else if s[i] == '$' && s.get(i + 1) == Some(&'{') {
                     i += 2;
                     let start = i;
-                    let mut depth = 1;
-                    while i < s.len() {
-                        match s[i] {
-                            '{' => depth += 1,
-                            '}' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            '\n' => line += 1,
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-                    exprs.push(s[start..i].iter().collect());
+                    i = skip_braced(&s, i, &mut line);
+                    exprs.push(s[start..i.min(s.len())].iter().collect());
                     strs.push(String::new());
                     i += 1;
                 } else {
@@ -228,6 +214,64 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
     }
     out.push(Token { tok: Tok::Eof, nl: true, line, at: s.len() as u32 });
     Ok(out)
+}
+
+/// From just inside `${`, the index of the matching `}`: strings, nested
+/// templates and comments in between are skipped whole.
+fn skip_braced(s: &[char], mut i: usize, line: &mut u32) -> usize {
+    let mut depth = 1;
+    while i < s.len() {
+        match s[i] {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            '\n' => *line += 1,
+            q @ ('\'' | '"') => {
+                i += 1;
+                while i < s.len() && s[i] != q && s[i] != '\n' {
+                    if s[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            '`' => {
+                i += 1;
+                while i < s.len() && s[i] != '`' {
+                    match s[i] {
+                        '\\' => i += 1,
+                        '$' if s.get(i + 1) == Some(&'{') => i = skip_braced(s, i + 2, line),
+                        '\n' => *line += 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            '/' if s.get(i + 1) == Some(&'/') => {
+                while i < s.len() && s[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '/' if s.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i + 1 < s.len() && !(s[i] == '*' && s[i + 1] == '/') {
+                    if s[i] == '\n' {
+                        *line += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    i
 }
 
 /// Whether a `/` after this token starts a regular expression (rather than dividing).
@@ -1156,7 +1200,11 @@ impl Parser {
             } else if let Tok::Template(strs, exprs) = self.peek().clone() {
                 // A tagged template: called with the pieces and the values.
                 self.next();
-                let parts = Expr::Array(strs.into_iter().map(|s| Expr::Str(s.into())).collect());
+                // The strings array carries `.raw` (the cooked text stands in for the raw source).
+                let pieces = Expr::Array(strs.iter().map(|s| Expr::Str(s.as_str().into())).collect());
+                let raw = Expr::Object(vec![Prop::KeyValue(Expr::Str("raw".into()), pieces.clone())]);
+                let assign = Expr::Member(Box::new(Expr::Ident("Object".into())), Box::new(Expr::Str("assign".into())), false);
+                let parts = Expr::Call(Box::new(assign), vec![pieces, raw], false);
                 let mut args = vec![parts];
                 for src in exprs {
                     args.push(Parser::new(&src)?.expr()?);

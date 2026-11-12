@@ -306,3 +306,12 @@ fn dates_and_static_blocks() {
     ";
     assert_eq!(out(src), "2026-11-12T09:30:00.000Z 12 10 4\n2026-12-12T09:30:00.000Z\n2027-02-13T02:01:00.000Z 946684800000\n42");
 }
+
+#[test]
+fn nested_templates() {
+    let src = r#"
+        const a = 1, css = (s, ...v) => s.raw.join('|') + v.join(',')
+        console.log(`x${ `in${a}ner` + '}' + "{" }y`, `${ { b: 2 }.b }`, css`p { color: ${'red'} } @media (x) { q {} }`)
+    "#;
+    assert_eq!(out(src), "xin1ner}{y 2 p { color: | } @media (x) { q {} }red");
+}
