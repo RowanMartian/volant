@@ -104,12 +104,19 @@ fn fill(template: &str, data: &str) -> Vec<u8> {
 pub fn serve(b: &Browser, url: &str) -> (&'static str, Vec<u8>) {
     let rest = url.strip_prefix("volant://").unwrap_or("");
     let path = rest.split(['?', '#']).next().unwrap_or("").trim_end_matches('/');
+    // A favourite's icon, served from the page's own origin (volant://newtab/site-icon/host).
+    if let Some((_, key)) = path.split_once("/site-icon/") {
+        return super::favicons::serve(b, key).unwrap_or(("image/png", Vec::new()));
+    }
     match path {
         "app/style.css" => ("text/css", STYLE.as_bytes().to_vec()),
         "app/volant.js" => ("text/javascript", SCRIPT.as_bytes().to_vec()),
         "app/icon.svg" => ("image/svg+xml", ICON.as_bytes().to_vec()),
         "welcome" => ("text/html", fill(WELCOME, &page_data(b, "welcome"))),
-        "newtab" | "" => ("text/html", fill(NEWTAB, &page_data(b, "newtab"))),
+        "newtab" | "" => {
+            super::favicons::ensure(b);
+            ("text/html", fill(NEWTAB, &page_data(b, "newtab")))
+        }
         "settings" => ("text/html", fill(SETTINGS, &page_data(b, "settings"))),
         "history" => ("text/html", fill(HISTORY, &page_data(b, "history"))),
         "blocker" => ("text/html", fill(BLOCKER, &blocking::page_data(b))),
@@ -193,6 +200,7 @@ pub fn handle(b: &mut Browser, tab: Option<TabId>, cmd: &str, value: &str) {
             if b.favorites.add(url, title) {
                 b.favorites.save(&b.paths.favorites);
                 send_favorites(b, "");
+                super::favicons::ensure(b);
             } else if volant_core::omnibox::as_url(url).is_none() {
                 send_favorites(b, "That doesn’t look like a web address.");
             } else if b.favorites.list.len() >= volant_core::store::MAX_FAVORITES {

@@ -236,6 +236,15 @@ define_class!(
     unsafe impl WKScriptMessageHandler for WebDelegate {
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
         fn message(&self, _c: &WKUserContentController, msg: &WKScriptMessage) {
+            // The hidden page that reads uBlock Origin's latest release.
+            if unsafe { msg.name() }.to_string() == super::ubo::HANDLER {
+                let body = unsafe { msg.body() };
+                let ptr = unsafe { msg.webView() }.map(|w| Retained::as_ptr(&w) as usize).unwrap_or(0);
+                if let Some(text) = body.downcast_ref::<NSString>().map(|s| s.to_string()) {
+                    with(move |b| super::ubo::received(b, ptr, &text));
+                }
+                return;
+            }
             // The element picker runs inside web pages; its messages carry a one-time token.
             if unsafe { msg.name() }.to_string() == "volantPicker" {
                 let body = unsafe { msg.body() };

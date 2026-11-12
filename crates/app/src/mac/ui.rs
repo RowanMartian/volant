@@ -28,6 +28,9 @@ const ROW_H: f64 = 34.0;
 const ROW_GAP: f64 = 2.0;
 const LIST_TOP: f64 = 136.0;
 const FOOTER_H: f64 = 46.0;
+/// The shield's glyph is drawn smaller than Reader's page glyph at the same
+/// point size, so it gets a point more to look the same size beside it.
+const SHIELD_PT: f64 = 13.0;
 
 /// A small site icon: the favicon when we have one, else a coloured letter tile.
 pub struct SiteIcon {
@@ -189,7 +192,7 @@ impl Ui {
         address.addSubview(&address_icon);
         address.addSubview(&address_text);
         address.addSubview(&reader.hit);
-        let shield = IconButton::new(Kind::Shield, "shield.fill", 12.0, rect(SIDEBAR_W - 20.0 - 62.0, 6.0, 26.0, 24.0), "Blocking is on for this site", mtm);
+        let shield = IconButton::new(Kind::Shield, "shield", SHIELD_PT, rect(SIDEBAR_W - 20.0 - 62.0, 6.0, 26.0, 24.0), "Blocking is on for this site", mtm);
         address.addSubview(&shield.hit);
         address.setToolTip(Some(&ns("Search or enter an address (⌘L)")));
         sidebar.addSubview(&address);
@@ -478,8 +481,9 @@ pub fn update_chrome(b: &Browser) {
     let pill_w = SIDEBAR_W - 20.0;
     ui.reader.hit.setFrame(rect(pill_w - 34.0, 6.0, 26.0, 24.0));
     ui.shield.hit.setFrame(rect(pill_w - if reader_shown { 62.0 } else { 34.0 }, 6.0, 26.0, 24.0));
-    ui.shield.img.setImage(symbol(if protected { "shield.fill" } else { "shield.slash" }, 12.0, Weight::Medium).as_deref());
-    views::tint(&ui.shield.img, if protected { t.accent } else { t.text3 });
+    // Drawn like the Reader button beside it: an outline in the same grey.
+    ui.shield.img.setImage(symbol(if protected { "shield" } else { "shield.slash" }, SHIELD_PT, Weight::Medium).as_deref());
+    views::tint(&ui.shield.img, if protected { t.text2 } else { t.text3 });
     ui.shield.hit.setToolTip(Some(&ns(&if !b.settings.ublock {
         "Blocking is off (Settings → Block ads and trackers)".to_string()
     } else if protected {

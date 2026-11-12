@@ -5,10 +5,12 @@
 //!
 //! * [`omnibox`]: turns whatever you type into a URL or a search.
 //! * [`history`]: an append-only visit log with frecency ranking (no SQLite).
+//! * [`favicon`]: finds a sharp icon for a site (apple-touch-icon, sized icons, SVG).
 //! * [`fuzzy`]: the matcher that ranks suggestions as you type.
 //! * [`ublock`]: the content blocker, powered by uBlock Origin: its filter
 //!   lists and syntax, compiled to WebKit content rules plus per-site
 //!   scriptlets and cosmetic filters.
+//! * [`scriptlets`]: uBlock Origin's own scriptlets, from its latest release, assembled per page.
 //! * [`html`]: an HTML tokenizer and tree builder, written from scratch.
 //! * [`reader`]: Reader mode, which finds the article in a page and rewrites it as clean HTML.
 //! * [`store`]: settings and session files in a plain line format.
@@ -16,12 +18,14 @@
 //! * [`json`]: the minimal JSON writer/reader the app needs.
 
 
+pub mod favicon;
 pub mod fuzzy;
 pub mod history;
 pub mod json;
 pub mod html;
 pub mod omnibox;
 pub mod reader;
+pub mod scriptlets;
 pub mod search;
 pub mod store;
 pub mod tabs;

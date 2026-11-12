@@ -17,6 +17,8 @@ mod theme;
 mod ui;
 mod updater;
 mod views;
+mod favicons;
+mod ubo;
 mod weather;
 mod web;
 
@@ -81,6 +83,7 @@ pub struct Browser {
     pub settings: Settings,
     pub favorites: volant_core::store::Favorites,
     pub weather: weather::Cache,
+    pub ubo: ubo::State,
     pub update: updater::State,
     pub paths: Paths,
     pub config: Retained<WKWebViewConfiguration>,
@@ -206,6 +209,7 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
         settings,
         favorites,
         weather: Default::default(),
+        ubo: Default::default(),
         update: Default::default(),
         paths,
         config,

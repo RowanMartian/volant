@@ -14,9 +14,10 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::MainThreadOnly;
 use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
-use objc2_web_kit::{WKContentRuleList, WKContentRuleListStore, WKUserContentController, WKUserScript, WKUserScriptInjectionTime};
+use objc2_web_kit::{WKContentRuleList, WKContentRuleListStore, WKContentWorld, WKUserContentController, WKUserScript, WKUserScriptInjectionTime};
 use std::path::PathBuf;
 use volant_core::json::{self, Obj};
+use volant_core::scriptlets::Resources;
 use volant_core::ublock::{self, Options, SiteIndex};
 
 const SCRIPTLETS_JS: &str = include_str!("../../../../assets/ublock/scriptlets.js");
@@ -25,8 +26,10 @@ const PICKER_JS: &str = include_str!("../../../../assets/ublock/picker.js");
 
 /// Bump when the compiler changes what it emits, so compiled lists are rebuilt.
 const COMPILER_VERSION: u32 = 3;
-/// uBlock Origin refreshes lists every few days; so does Volant.
-const UPDATE_EVERY: u64 = 4 * 86_400;
+/// Lists are refreshed when the soonest `! Expires:` among them says so, as in
+/// uBlock Origin, but not more often than twice a day or less than every 4 days.
+const UPDATE_MIN: u64 = 12 * 3600;
+const UPDATE_MAX: u64 = 4 * 86_400;
 
 #[derive(Default)]
 pub struct State {
@@ -42,6 +45,12 @@ pub struct State {
     pub picker_nonce: String,
     /// How long the last download / compile took, for the self-test report.
     pub timings: String,
+    /// uBlock Origin's scriptlets, from its latest release (see `ubo`).
+    pub resources: Option<Resources>,
+    /// uBlock Origin's list catalogue, from its latest release.
+    pub catalog: Vec<ublock::Entry>,
+    /// How long the current lists stay fresh.
+    pub refresh_every: u64,
     generation: u64,
     busy: bool,
 }
@@ -89,6 +98,8 @@ fn build_key(b: &Browser) -> String {
 
 pub fn init(b: &mut Browser) {
     let d = dir(b);
+    super::ubo::load(b);
+    b.blocking.refresh_every = std::fs::read_to_string(d.join("refresh.txt")).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(UPDATE_MAX);
     b.blocking.trusted = std::fs::read_to_string(d.join("trusted-sites.txt"))
         .map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect())
         .unwrap_or_default();
@@ -117,9 +128,10 @@ pub fn init(b: &mut Browser) {
     rebuild(b);
 }
 
-/// Refreshes the lists if they're older than a few days.
+/// Refreshes the lists (and checks for a new uBlock Origin) once they've expired.
 pub fn maybe_update(b: &mut Browser) {
-    if b.settings.ublock && super::now().saturating_sub(b.settings.lists_updated) > UPDATE_EVERY {
+    let every = b.blocking.refresh_every.clamp(UPDATE_MIN, UPDATE_MAX);
+    if b.settings.ublock && super::now().saturating_sub(b.settings.lists_updated) > every {
         download(b, true);
     }
 }
@@ -159,6 +171,10 @@ fn look_up(b: &mut Browser, ids: Vec<String>) {
     }
 }
 
+pub fn set_status(b: &mut Browser, text: &str) {
+    status(b, text);
+}
+
 fn status(b: &mut Browser, text: &str) {
     b.blocking.status = text.to_string();
     push_status(b);
@@ -180,6 +196,7 @@ pub fn status_json(b: &Browser) -> String {
         .str("status", &b.blocking.status)
         .str("error", &b.blocking.error)
         .num("updated", b.settings.lists_updated)
+        .str("ubo", super::ubo::version(b))
         .done()
 }
 
@@ -200,17 +217,33 @@ pub fn rebuild(b: &mut Browser) {
     compile(b);
 }
 
-/// Downloads the selected lists (all of them, or just the missing ones), then recompiles.
+/// Downloads the selected lists (all of them, or just the missing ones), then
+/// recompiles. A full refresh first checks for a new uBlock Origin release.
 pub fn download(b: &mut Browser, all: bool) {
     if b.blocking.busy {
         return;
     }
-    let want: Vec<(String, String, PathBuf)> = b
+    if all && b.settings.ublock {
+        b.blocking.busy = true;
+        super::ubo::sync(b);
+        return;
+    }
+    download_lists(b, all);
+}
+
+/// Downloads lists from uBlock Origin's catalogue, trying each list's mirrors in turn.
+pub fn download_lists(b: &mut Browser, all: bool) {
+    b.blocking.busy = false;
+    if !b.settings.ublock {
+        status(b, "");
+        return; // switched off while uBlock Origin was being checked
+    }
+    let want: Vec<(String, Vec<String>, PathBuf)> = b
         .settings
         .ublock_lists
         .iter()
-        .filter_map(|id| ublock::list(id))
-        .map(|l| (l.id.to_string(), l.url.to_string(), list_path(b, l.id)))
+        .filter_map(|id| b.blocking.catalog.iter().find(|e| &e.id == id))
+        .map(|e| (e.id.clone(), e.urls.clone(), list_path(b, &e.id)))
         .filter(|(_, _, p)| all || !p.exists())
         .collect();
     if want.is_empty() {
@@ -222,11 +255,13 @@ pub fn download(b: &mut Browser, all: bool) {
     let started = std::time::Instant::now();
     std::thread::spawn(move || {
         let mut failed = Vec::new();
-        for (id, url, path) in &want {
-            let data = NSURL::URLWithString(&NSString::from_str(url)).and_then(|u| NSData::dataWithContentsOfURL(&u));
+        for (id, urls, path) in &want {
+            // A real list is more than a few hundred bytes; anything smaller is an error page.
+            let data = urls
+                .iter()
+                .find_map(|url| NSURL::URLWithString(&NSString::from_str(url)).and_then(|u| NSData::dataWithContentsOfURL(&u)).filter(|d| d.length() > 200));
             match data {
-                // A real list is more than a few hundred bytes; anything smaller is an error page.
-                Some(d) if d.length() > 200 => {
+                Some(d) => {
                     let tmp = path.with_extension("tmp");
                     if std::fs::write(&tmp, d.to_vec()).and_then(|_| std::fs::rename(&tmp, path)).is_err() {
                         failed.push(id.clone());
@@ -268,6 +303,8 @@ fn compile(b: &mut Browser) {
     std::thread::spawn(move || {
         let started = std::time::Instant::now();
         let mut texts: Vec<(String, String)> = sources.iter().filter_map(|(id, p)| std::fs::read_to_string(p).ok().map(|t| (id.clone(), t))).collect();
+        let refresh = texts.iter().filter_map(|(_, t)| ublock::expires(t)).min().unwrap_or(UPDATE_MAX);
+        let _ = std::fs::write(d.join("refresh.txt"), refresh.to_string());
         if texts.is_empty() {
             // Nothing downloaded yet (offline first launch): Volant's small built-in list.
             texts.push(("fallback".into(), ublock::FALLBACK.to_string()));
@@ -295,6 +332,7 @@ fn compile(b: &mut Browser) {
                     return;
                 }
                 b.blocking.counts = counts;
+                b.blocking.refresh_every = refresh;
                 b.blocking.sites = SiteIndex::parse(&sites_text);
                 b.blocking.timings.push_str(&format!("compile (Rust): {rust_ms} ms; "));
                 webkit_compile(b, generation, key, lists, counts);
@@ -402,8 +440,15 @@ pub fn site_on(b: &Browser, host: &str) -> bool {
     b.settings.ublock && !host.is_empty() && !ublock::is_trusted(host, &b.blocking.trusted)
 }
 
-/// The script injected into a page at `host`: its scriptlets and cosmetic filters.
-pub fn page_script(b: &Browser, host: &str) -> Option<String> {
+/// What's injected into a page at `host`: its scriptlets and cosmetic filters
+/// for the page's own world, and the scriptlets uBO runs in an isolated world.
+#[derive(Default)]
+pub struct PageScripts {
+    pub main: String,
+    pub isolated: String,
+}
+
+pub fn page_script(b: &Browser, host: &str) -> Option<PageScripts> {
     if !site_on(b, host) {
         return None;
     }
@@ -413,26 +458,54 @@ pub fn page_script(b: &Browser, host: &str) -> Option<String> {
         calls.push(vec!["nowebrtc".into()]);
     }
     let mut js = String::new();
+    let mut isolated = String::new();
     if !calls.is_empty() {
-        let calls_json = json::array(calls.iter().map(|c| json::array(c.iter().map(|a| json::string(a)))));
-        js.push_str(SCRIPTLETS_JS.trim_end());
-        js.push_str(&format!("({calls_json});\n"));
+        // uBlock Origin's own scriptlets from its latest release; Volant's
+        // built-in ones for anything that release doesn't have (or before the
+        // first sync).
+        let rest = match &b.blocking.resources {
+            Some(r) => {
+                let a = r.assemble(&calls);
+                js.push_str(&a.main);
+                isolated = a.isolated;
+                a.unknown
+            }
+            None => calls,
+        };
+        if !rest.is_empty() {
+            let calls_json = json::array(rest.iter().map(|c| json::array(c.iter().map(|a| json::string(a)))));
+            js.push_str(SCRIPTLETS_JS.trim_end());
+            js.push_str(&format!("({calls_json});\n"));
+        }
     }
     if b.settings.ublock_cosmetic && (!bundle.hide.is_empty() || !bundle.procedural.is_empty()) {
         let strs = |v: &[String]| json::array(v.iter().map(|s| json::string(s)));
         js.push_str(COSMETIC_JS.trim_end());
         js.push_str(&format!("({}, {});\n", strs(&bundle.hide), strs(&bundle.procedural)));
     }
-    (!js.is_empty()).then_some(js)
+    (!js.is_empty() || !isolated.is_empty()).then_some(PageScripts { main: js, isolated })
 }
 
 /// Called just before a page loads in a tab: the right lists and scripts for its site.
 pub fn prepare_navigation(b: &Browser, ucc: &WKUserContentController, host: &str) {
     set_lists(b, ucc, host);
     unsafe { ucc.removeAllUserScripts() };
-    if let Some(js) = page_script(b, host) {
+    let Some(scripts) = page_script(b, host) else { return };
+    if !scripts.main.is_empty() {
         let script = unsafe {
-            WKUserScript::initWithSource_injectionTime_forMainFrameOnly(WKUserScript::alloc(b.mtm), &ns(&js), WKUserScriptInjectionTime::AtDocumentStart, true)
+            WKUserScript::initWithSource_injectionTime_forMainFrameOnly(WKUserScript::alloc(b.mtm), &ns(&scripts.main), WKUserScriptInjectionTime::AtDocumentStart, true)
+        };
+        unsafe { ucc.addUserScript(&script) };
+    }
+    if !scripts.isolated.is_empty() {
+        let script = unsafe {
+            WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
+                WKUserScript::alloc(b.mtm),
+                &ns(&scripts.isolated),
+                WKUserScriptInjectionTime::AtDocumentStart,
+                true,
+                &WKContentWorld::defaultClientWorld(b.mtm),
+            )
         };
         unsafe { ucc.addUserScript(&script) };
     }
@@ -513,10 +586,10 @@ pub fn picked(b: &mut Browser, message: &str) {
 
 /// The data the blocker settings page shows.
 pub fn page_data(b: &Browser) -> String {
-    let lists = json::array(ublock::CATALOG.iter().map(|l| {
-        let on = b.settings.ublock_lists.iter().any(|x| x == l.id);
-        let have = list_path(b, l.id).exists();
-        Obj::new().str("id", l.id).str("title", l.title).str("group", l.group).bool("on", on).bool("downloaded", have).bool("default", l.default_on).done()
+    let lists = json::array(b.blocking.catalog.iter().map(|l| {
+        let on = b.settings.ublock_lists.iter().any(|x| x == &l.id);
+        let have = list_path(b, &l.id).exists();
+        Obj::new().str("id", &l.id).str("title", &l.title).str("group", &l.group).bool("on", on).bool("downloaded", have).bool("default", l.default_on).done()
     }));
     let s = &b.settings;
     Obj::new()

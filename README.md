@@ -58,8 +58,16 @@ with no extension runtime.
 
 uBO defaults (9 lists) produce 239,704 network rules, 30,201 cosmetic filters, 10,362 scriptlets and 1,332 procedural
 filters across ~26.8k sites. On the CI Mac that takes about 1 s in Rust and about 19 s in WebKit, once; compiled
-lists are then looked up by key at launch. `assets/ublock/` holds the page-side code: 33 scriptlets, a procedural
-engine (`:has-text`, `:upward`, `:matches-css`, `:xpath`, `:remove`, `:style`, …) and the element picker.
+lists are then looked up by key at launch. `assets/ublock/` holds the page-side code: a procedural engine
+(`:has-text`, `:upward`, `:matches-css`, `:xpath`, `:remove`, `:style`, …), the element picker, and 33 fallback scriptlets.
+
+**Staying current with uBO.** Lists refresh when the soonest `! Expires:` among them passes (clamped to 12 h–4 days),
+trying each list's uBO CDN mirrors before its origin. Each refresh first asks jsDelivr for uBO's latest release; when it
+changes, a hidden `WKWebView` (non-persistent store) imports that release's `src/js/resources/scriptlets.js` and
+`assets/assets.json` and returns them flattened (`crates/app/src/mac/ubo.rs`). Volant then runs uBO's own scriptlets,
+assembled per page as uBO does (function plus its `.fn` dependencies, `scriptletGlobals`, one `try` per call), with
+`ISOLATED` ones in a separate `WKContentWorld` and `trusted-*` ones only from `ublock-*` lists. The list catalogue,
+groups and mirrors come from the same release.
 
 uBlock Origin is by Raymond Hill and contributors (GPLv3); Volant is independent and not endorsed by them.
 
@@ -90,8 +98,9 @@ cargo run --release -p volant-core --example compile_lists -- easylist.txt easyp
 
 1. Run core tests, build the app, and render its icon as macOS draws it.
 2. Smoke test: launch, browse, screenshot ten views, and record memory.
-3. uBlock self-test: download the default lists, compile them into WebKit, then check network, generic and site
-   cosmetic, procedural and scriptlet filtering on a live page, and check that trusting the site disables all of it.
+3. uBlock self-test: sync with uBO's latest release, download the default lists, compile them into WebKit, then check
+   network, generic and site cosmetic, procedural, and uBO scriptlets in the page and isolated worlds on a live page,
+   and check that trusting the site disables all of it.
 4. Updater test: install the current release over a copy of this build and verify it relaunches.
 5. Benchmark against Safari, Chrome and Firefox, then publish the `latest` release if this commit is still the tip.
 

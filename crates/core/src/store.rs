@@ -106,7 +106,7 @@ impl Settings {
                 // Volant before uBlock: "off" / "standard" / "strict".
                 "blocking" => s.ublock = v != "off",
                 "ublock" => s.ublock = v == "1",
-                "ublock_lists" => s.ublock_lists = v.split(',').map(str::trim).filter(|x| crate::ublock::list(x).is_some()).map(String::from).collect(),
+                "ublock_lists" => s.ublock_lists = v.split(',').map(str::trim).filter(|x| crate::ublock::valid_list_id(x)).map(String::from).collect(),
                 "ublock_cosmetic" => s.ublock_cosmetic = v == "1",
                 "ublock_fonts" => s.ublock_fonts = v == "1",
                 "ublock_noscript" => s.ublock_noscript = v == "1",
@@ -309,7 +309,7 @@ mod tests {
         let mut s = Settings::default();
         assert!(s.set("engine", "kagi"));
         assert!(s.set("ublock", "0"));
-        assert!(s.set("ublock_lists", "easylist,not-a-list,easyprivacy"));
+        assert!(s.set("ublock_lists", "easylist,not a list!,easyprivacy"));
         assert!(s.set("onboarded", "1"));
         let t = Settings::parse(&s.serialize());
         assert_eq!(t, s);

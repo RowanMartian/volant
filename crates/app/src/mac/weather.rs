@@ -1,18 +1,34 @@
 //! The new tab page's weather widget. Forecasts come from Open-Meteo (free,
 //! no account, no key); only the chosen city's coordinates are sent, and only
-//! while the widget is on. Results are cached for 20 minutes.
+//! while the widget is on. The forecast is refreshed every 30 minutes while a
+//! new tab page is open, and cached in between.
 
 use super::{on_main, pages, with, Browser};
 use objc2_foundation::{NSData, NSString, NSURL};
 use volant_core::json;
 
-const FRESH: u64 = 20 * 60;
+const FRESH: u64 = 30 * 60;
+/// After a failed fetch, wait this long before trying again.
+const RETRY: u64 = 5 * 60;
 
 #[derive(Default)]
 pub struct Cache {
     at: u64,
     key: String,
     raw: String,
+    /// When the last request went out.
+    asked: u64,
+}
+
+/// Called every minute: keeps the forecast on open new tab pages current.
+pub fn tick(b: &mut Browser) {
+    if !b.settings.weather || cached(b).is_some() || super::now().saturating_sub(b.weather.asked) < RETRY {
+        return;
+    }
+    let showing = b.tabs.list.iter().any(|t| t.url.starts_with(super::actions::NEWTAB) && b.webs.contains_key(&t.id));
+    if showing {
+        refresh(b);
+    }
 }
 
 fn key(b: &Browser) -> Option<String> {
@@ -47,6 +63,7 @@ pub fn refresh(b: &mut Browser) {
         return;
     }
     let (Some((lat, lon)), Some(k)) = (b.settings.weather_at, key(b)) else { return };
+    b.weather.asked = super::now();
     let unit = if b.settings.weather_unit == "f" { "&temperature_unit=fahrenheit" } else { "" };
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1{unit}"
@@ -55,7 +72,7 @@ pub fn refresh(b: &mut Browser) {
         with(move |b| {
             match text.filter(|t| t.contains("\"current\"")) {
                 Some(raw) => {
-                    b.weather = Cache { at: super::now(), key: k, raw: raw.clone() };
+                    b.weather = Cache { at: super::now(), key: k, raw: raw.clone(), asked: b.weather.asked };
                     pages::notify(b, &format!("window.volantWeather && volantWeather({})", json::string(&raw)));
                 }
                 None => pages::notify(b, "window.volantWeather && volantWeather('', 'Couldn’t get the weather right now.')"),

@@ -184,6 +184,7 @@ fn housekeeping(b: &mut Browser) {
     actions::save_session(b);
     actions::sleep_idle(b);
     super::blocking::maybe_update(b);
+    super::weather::tick(b);
     super::updater::tick(b);
 }
 
@@ -199,12 +200,25 @@ pub fn ublock_selftest(b: &mut Browser) {
     b.settings.ublock = true;
     b.settings.ublock_lists = volant_core::ublock::default_lists();
     let started = std::time::Instant::now();
-    // My filters: one of each kind, all aimed at example.com.
-    super::blocking::set_my_filters(
-        b,
-        "example.com##+js(set, volantSelfTest, true)\nexample.com##div:has-text(volant-procedural-check)\nexample.com##p\n",
-    );
-    wait_until_compiled(dir, started, 0);
+    // My filters: one of each kind, all aimed at example.com. `set` runs in the
+    // page's world and `set-attr` in an isolated one, both from uBlock Origin.
+    b.blocking.my_filters = "example.com##+js(set, volantSelfTest, true)\nexample.com##+js(set-attr, body, data-volant-isolated, true)\nexample.com##div:has-text(volant-procedural-check)\nexample.com##p\n".into();
+    // A full refresh, as the timer does it: uBlock Origin's latest release
+    // first, then the lists. If launch already started a build, let it finish.
+    refresh_when_idle(dir, started, 0);
+}
+
+fn refresh_when_idle(dir: String, started: std::time::Instant, polls: u32) {
+    super::after(1.0, move || {
+        with(move |b| {
+            if super::blocking::is_busy(b) && polls < 600 {
+                refresh_when_idle(dir, started, polls + 1);
+                return;
+            }
+            super::blocking::download(b, true);
+            wait_until_compiled(dir, started, 0);
+        })
+    });
 }
 
 fn wait_until_compiled(dir: String, started: std::time::Instant, polls: u32) {
@@ -216,8 +230,10 @@ fn wait_until_compiled(dir: String, started: std::time::Instant, polls: u32) {
                 return;
             }
             let compiled_in = started.elapsed();
+            let ubo = super::ubo::version(b).to_string();
             let mut report = format!(
-                "lists ready after {:.1} s ({})\n{} network rules, {} cosmetic filters, {} scriptlets, {} procedural; {} WebKit lists\nerror: {}\n",
+                "uBlock Origin: {}\nlists ready after {:.1} s ({})\n{} network rules, {} cosmetic filters, {} scriptlets, {} procedural; {} WebKit lists\nerror: {}\n",
+                if ubo.is_empty() { "FAIL: no scriptlets from uBlock Origin's latest release" } else { &ubo },
                 compiled_in.as_secs_f64(),
                 b.blocking.timings,
                 b.blocking.counts.network,
@@ -241,6 +257,7 @@ fn wait_until_compiled(dir: String, started: std::time::Instant, polls: u32) {
 const SELFTEST_JS: &str = r#"(async () => {
   const r = {};
   r.scriptlet = window.volantSelfTest === true;
+  r.isolated = document.body.getAttribute('data-volant-isolated') === 'true';
   const p = document.querySelector('p'); r.site_cosmetic = !!p && getComputedStyle(p).display === 'none';
   const ad = document.createElement('ins'); ad.className = 'adsbygoogle'; ad.setAttribute('data-ad-client', 'ca-pub-0'); ad.textContent = 'ad'; document.body.appendChild(ad);
   // Added after load, so this also checks that procedural filters follow page changes.
@@ -274,7 +291,7 @@ fn selftest_page(dir: String, report: String, trusted: bool) {
                         let label = if trusted { "trusted site" } else { "blocking on" };
                         report.push_str(&format!("{label}: {text}\n"));
                         if !trusted {
-                            let all_on = ["\"scriptlet\":true", "\"procedural\":true", "\"site_cosmetic\":true", "\"generic_cosmetic\":true", "\"network\":\"blocked\""]
+                            let all_on = ["\"scriptlet\":true", "\"isolated\":true", "\"procedural\":true", "\"site_cosmetic\":true", "\"generic_cosmetic\":true", "\"network\":\"blocked\""]
                                 .iter()
                                 .all(|k| text.contains(k));
                             report.push_str(if all_on { "blocking: PASS\n" } else { "blocking: FAIL\n" });
@@ -286,7 +303,7 @@ fn selftest_page(dir: String, report: String, trusted: bool) {
                                 selftest_page(dir, report, true);
                             });
                         } else {
-                            let all_off = ["\"scriptlet\":false", "\"procedural\":false", "\"site_cosmetic\":false", "\"network\":\"loaded\""].iter().all(|k| text.contains(k));
+                            let all_off = ["\"scriptlet\":false", "\"isolated\":false", "\"procedural\":false", "\"site_cosmetic\":false", "\"network\":\"loaded\""].iter().all(|k| text.contains(k));
                             report.push_str(if all_off { "trusted: PASS\n" } else { "trusted: FAIL\n" });
                             finish_selftest(&dir, &report);
                         }

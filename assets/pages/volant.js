@@ -71,12 +71,51 @@ function tileColor(host) {
   for (const c of host) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return TILE_COLORS[h % TILE_COLORS.length];
 }
+/* A site's icon: the sharp one Volant saved for it (volant://<page>/site-icon/<host>),
+   else the site's own favicon.ico, else the letter tile. */
+let iconRev = 0;
 function siteIcon(host, url, size = 40) {
-  const letter = esc((host.replace(/^www\./, '')[0] || '•').toUpperCase());
-  const origin = (() => { try { return new URL(url).origin; } catch { return ''; } })();
-  const img = origin ? `<img src="${esc(origin)}/favicon.ico" alt="" onload="this.parentNode.classList.add('has-img')" onerror="this.remove()">` : '';
-  return `<span class="site-ic" style="--c:${tileColor(host)};--s:${size}px"><b>${letter}</b>${img}</span>`;
+  const key = host.replace(/^www\./, '').toLowerCase();
+  const letter = esc((key[0] || '•').toUpperCase());
+  let origin = '';
+  try { origin = new URL(url).origin; } catch {}
+  if (!origin || origin === 'null') return `<span class="site-ic" style="--c:${tileColor(key)};--s:${size}px"><b>${letter}</b></span>`;
+  const saved = `${location.protocol}//${location.host}/site-icon/${encodeURIComponent(key)}?${iconRev}`;
+  return `<span class="site-ic" data-icon="${esc(key)}" style="--c:${tileColor(key)};--s:${size}px"><b>${letter}</b>` +
+    `<img src="${esc(saved)}" data-fallback="${esc(origin)}/favicon.ico" alt="" onload="iconLoaded(this)" onerror="iconFailed(this)"></span>`;
 }
+function iconFailed(img) {
+  const next = img.dataset.fallback;
+  if (next) { delete img.dataset.fallback; img.src = next; } else img.remove();
+}
+/* A big icon with an opaque square background (an apple-touch-icon) fills its tile;
+   anything else sits inside it. */
+function iconLoaded(img) {
+  const tile = img.parentNode;
+  tile.classList.add('has-img');
+  let full = false;
+  if (img.naturalWidth >= 100 && Math.abs(img.naturalWidth - img.naturalHeight) <= 2) {
+    try {
+      const c = document.createElement('canvas');
+      c.width = c.height = 16;
+      const g = c.getContext('2d');
+      g.drawImage(img, 0, 0, 16, 16);
+      const d = g.getImageData(0, 0, 16, 16).data;
+      full = [0, 15, 240, 255].every((p) => d[p * 4 + 3] > 250);
+    } catch {}
+  }
+  tile.classList.toggle('full', full);
+}
+/* Volant saved a sharper icon for `key`: swap it in wherever it's shown. */
+window.volantIconReady = (key) => {
+  iconRev++;
+  document.querySelectorAll(`.site-ic[data-icon="${CSS.escape(key)}"]`).forEach((tile) => {
+    const img = new Image();
+    img.alt = '';
+    img.onload = () => { tile.querySelectorAll('img').forEach((o) => o.remove()); tile.appendChild(img); iconLoaded(img); };
+    img.src = `${location.protocol}//${location.host}/site-icon/${encodeURIComponent(key)}?${iconRev}`;
+  });
+};
 
 function shortcutKeys(s) {
   return s.split(' ').map((k) => `<kbd>${esc(k)}</kbd>`).join('');

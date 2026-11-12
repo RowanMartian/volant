@@ -116,7 +116,7 @@ function blockStatus(st) {
   if (!BL.on) el.textContent = 'Off. Everything loads';
   else if (BL.status) el.textContent = BL.status;
   else if (BL.error) el.innerHTML = '<span style="color:var(--danger)">' + esc(BL.error) + '</span>';
-  else el.innerHTML = '<span class="ok">●</span> ' + Number(BL.network || 0).toLocaleString() + ' rules, ' + Number(BL.scriptlets || 0).toLocaleString() + ' scriptlets · lists updated ' + ago(BL.updated);
+  else el.innerHTML = '<span class="ok">●</span> ' + Number(BL.network || 0).toLocaleString() + ' rules, ' + Number(BL.scriptlets || 0).toLocaleString() + ' scriptlets · lists updated ' + ago(BL.updated) + (BL.ubo ? ' · uBlock Origin ' + BL.ubo : '');
 }
 window.volantBlocker = blockStatus;
 $('#ublock').onchange = (e) => {

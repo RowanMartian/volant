@@ -111,7 +111,7 @@ textarea:focus{background:var(--fill)}
     <div class="bar"><span class="muted"></span><button class="btn primary" id="apply-trusted" disabled>Apply Changes</button></div>
   </section>
 
-  <p class="credit">Powered by uBlock: Volant uses <a href="https://github.com/gorhill/uBlock">uBlock Origin</a>'s filter lists, default list selection and filter syntax, compiled into WebKit's native content blocker. uBlock Origin is by Raymond Hill and contributors (GPLv3); the lists are by their maintainers.</p>
+  <p class="credit">Powered by uBlock: Volant uses <a href="https://github.com/gorhill/uBlock">uBlock Origin</a>'s filter lists, default list selection, filter syntax and scriptlets, compiled into WebKit's native content blocker. Volant follows uBlock Origin's latest release on its own: its scriptlets and list catalogue update with it, and the lists update when they expire. uBlock Origin is by Raymond Hill and contributors (GPLv3); the lists are by their maintainers.</p>
 </div>
 
 <script>
@@ -136,7 +136,7 @@ function showStatus(s) {
   let t;
   if (!st.on) t = 'Off. Everything loads.';
   else if (st.status) t = st.status;
-  else t = `${fmt(st.network)} network rules · ${fmt(st.cosmetic)} cosmetic filters · ${fmt(st.scriptlets)} scriptlets · lists updated ${ago(st.updated)}`;
+  else t = `${fmt(st.network)} network rules · ${fmt(st.cosmetic)} cosmetic filters · ${fmt(st.scriptlets)} scriptlets · lists updated ${ago(st.updated)}${st.ubo ? ` · uBlock Origin ${st.ubo}` : ''}`;
   if (st.error) t += ` · ${st.error}`;
   $('#status-text').textContent = t;
   $('#on').checked = !!st.on;
@@ -182,7 +182,7 @@ $('#apply-lists').onclick = () => {
   renderLists();
   showStatus({ status: 'Updating…' });
 };
-$('#update').onclick = () => { volant.send('ublockUpdate'); showStatus({ status: 'Downloading filter lists…' }); };
+$('#update').onclick = () => { volant.send('ublockUpdate'); showStatus({ status: 'Checking for a new uBlock Origin…' }); };
 renderLists();
 
 // ---------- my filters, trusted sites ----------

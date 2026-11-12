@@ -80,6 +80,110 @@ pub fn list(id: &str) -> Option<&'static FilterList> {
     CATALOG.iter().find(|l| l.id == id)
 }
 
+/// uBlock Origin's own lists (`ublock-*`), the only ones uBO lets use the
+/// `trusted-*` scriptlets.
+pub fn is_trusted_list(id: &str) -> bool {
+    id.starts_with("ublock-")
+}
+
+/// A list id as uBlock Origin's catalogue spells them.
+pub fn valid_list_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.')
+}
+
+/// A list in the catalogue Volant uses: uBlock Origin's latest (from its
+/// `assets/assets.json`) once downloaded, else the built-in copy above.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub id: String,
+    pub title: String,
+    pub group: String,
+    /// Where to download it, best first (uBO's CDN mirrors, then the origin).
+    pub urls: Vec<String>,
+    pub default_on: bool,
+}
+
+pub fn builtin_catalog() -> Vec<Entry> {
+    CATALOG
+        .iter()
+        .map(|l| Entry { id: l.id.into(), title: l.title.into(), group: l.group.into(), urls: vec![l.url.into()], default_on: l.default_on })
+        .collect()
+}
+
+/// uBlock Origin's group names, in the order its dashboard shows them.
+const GROUPS: &[(&str, &str)] = &[
+    ("default", "Built-in"),
+    ("ads", "Ads"),
+    ("privacy", "Privacy"),
+    ("malware", "Malware protection, security"),
+    ("multipurpose", "Multipurpose"),
+    ("cookies", "Cookie notices"),
+    ("social", "Social widgets"),
+    ("annoyances", "Annoyances"),
+    ("regions", "Regions, languages"),
+];
+
+/// Reads the catalogue Volant saves from uBlock Origin's `assets.json`: one list
+/// per line, `id \t group \t group2 \t off \t ua \t title \t url url...`.
+/// Lists for other platforms (`ua`) are left out, and the groups are sorted as
+/// uBO's dashboard sorts them.
+pub fn parse_catalog(text: &str) -> Vec<Entry> {
+    let mut out: Vec<(usize, Entry)> = Vec::new();
+    for line in text.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        let [id, group, group2, off, ua, title, urls] = f[..] else { continue };
+        if !valid_list_id(id) || title.is_empty() || !ua_matches(ua) {
+            continue;
+        }
+        let urls: Vec<String> = urls.split(' ').filter(|u| u.starts_with("https://")).map(String::from).collect();
+        if urls.is_empty() {
+            continue;
+        }
+        let key = if group2.is_empty() { group } else { group2 };
+        let Some(rank) = GROUPS.iter().position(|(k, _)| *k == key) else { continue };
+        let default_on = off != "1" && group != "regions";
+        out.push((rank, Entry { id: id.into(), title: title.into(), group: GROUPS[rank].1.into(), urls, default_on }));
+    }
+    out.sort_by_key(|(rank, _)| *rank);
+    out.into_iter().map(|(_, e)| e).collect()
+}
+
+/// uBO's `ua` field: which browsers a list is for (`mobile`, `!safari`, ...).
+fn ua_matches(ua: &str) -> bool {
+    const US: &[&str] = &["safari", "desktop", "mac", "macos"];
+    let mut positive = false;
+    let mut hit = false;
+    for t in ua.split([' ', '|', ',']).filter(|t| !t.is_empty()) {
+        match t.strip_prefix('!') {
+            Some(not) if US.contains(&not) => return false,
+            Some(_) => {}
+            None => {
+                positive = true;
+                hit |= US.contains(&t);
+            }
+        }
+    }
+    !positive || hit
+}
+
+/// How long a list says it stays fresh (`! Expires: 4 days`, `! Expires: 12 hours`), in seconds.
+pub fn expires(text: &str) -> Option<u64> {
+    for line in text.lines().take(40) {
+        let Some(rest) = line.strip_prefix('!') else {
+            if line.trim().is_empty() || line.starts_with('[') {
+                continue;
+            }
+            break;
+        };
+        let Some(v) = rest.trim().strip_prefix("Expires:") else { continue };
+        let v = v.trim();
+        let n: u64 = v.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
+        let unit = if v.contains("hour") { 3600 } else { 86_400 };
+        return Some(n * unit);
+    }
+    None
+}
+
 pub fn default_lists() -> Vec<String> {
     CATALOG.iter().filter(|l| l.default_on).map(|l| l.id.to_string()).collect()
 }
@@ -786,6 +890,9 @@ struct Builder {
     specific_exceptions: HashSet<(String, String)>,
     sites: SiteIndex,
     stats: Stats,
+    /// Whether the list being read is one of uBlock Origin's own, which alone
+    /// may use the `trusted-*` scriptlets (as in uBO).
+    trusted_source: bool,
 }
 
 /// `||example.com^$script,third-party` → `||example.com^$script,third-party`
@@ -849,6 +956,10 @@ impl Builder {
             if include.is_empty() || call.is_empty() {
                 self.stats.skipped += 1;
                 return false; // uBO doesn't run generic scriptlets
+            }
+            if !self.trusted_source && call.trim_start_matches(['\'', '"', '`']).starts_with("trusted-") {
+                self.stats.skipped += 1;
+                return false; // needs a trusted list, as in uBO
             }
             for d in &include {
                 self.sites.add(d, Kind::Scriptlet, call);
@@ -1254,6 +1365,7 @@ fn looks_like_regex(pattern: &str) -> bool {
 pub fn compile(lists: &[(&str, &str)], opts: Options) -> Compiled {
     let mut b = Builder::default();
     for (id, text) in lists {
+        b.trusted_source = is_trusted_list(id);
         let before = b.stats.total() + b.blocks.len() + b.allows.len();
         for line in preprocess(text) {
             b.line(line);
@@ -1343,6 +1455,39 @@ mod tests {
 
     fn one(text: &str) -> Compiled {
         compile(&[("test", text)], Options::default())
+    }
+
+    #[test]
+    fn trusted_scriptlets_need_a_trusted_list() {
+        let f = "example.com##+js(trusted-set-cookie, a, b)\nexample.com##+js(set, x, 1)\n";
+        let c = compile(&[("easylist", f)], Options::default());
+        assert_eq!(c.sites.lookup("example.com").scriptlets, vec!["set, x, 1".to_string()]);
+        let c = compile(&[("ublock-filters", f)], Options::default());
+        assert_eq!(c.sites.lookup("example.com").scriptlets.len(), 2);
+    }
+
+    #[test]
+    fn catalogue() {
+        let t = "ublock-filters\tdefault\t\t0\t\tuBlock filters – Ads\thttps://a.example/f.txt https://b.example/f.txt\n\
+                 adguard-mobile\tads\t\t1\tmobile\tAdGuard – Mobile Ads\thttps://m.example/11.txt\n\
+                 adguard-cookies\tannoyances\tcookies\t1\t\tAdGuard – Cookie Notices\thttps://c.example/18.txt\n\
+                 DEU-0\tregions\t\t0\t\tEasyList Germany\thttps://d.example/de.txt\n\
+                 easylist\tads\t\t0\t\tEasyList\thttp://insecure.example/e.txt\n";
+        let c = parse_catalog(t);
+        let ids: Vec<&str> = c.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["ublock-filters", "adguard-cookies", "DEU-0"]);
+        assert_eq!(c[0].urls.len(), 2);
+        assert!(c[0].default_on && !c[1].default_on && !c[2].default_on, "regional lists start off");
+        assert_eq!(c[1].group, "Cookie notices");
+        assert_eq!(builtin_catalog().len(), CATALOG.len());
+        assert!(ua_matches("") && ua_matches("!mobile") && !ua_matches("mobile") && !ua_matches("!safari"));
+    }
+
+    #[test]
+    fn list_expiry() {
+        assert_eq!(expires("[Adblock Plus 2.0]\n! Title: X\n! Expires: 4 days (update frequency)\n||a^"), Some(4 * 86_400));
+        assert_eq!(expires("! Expires: 12 hours\n"), Some(12 * 3600));
+        assert_eq!(expires("||a^\n! Expires: 1 day"), None);
     }
 
     #[test]
