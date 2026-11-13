@@ -93,6 +93,8 @@ pub trait Host {
     fn background(&self) -> Option<Fetch> {
         None
     }
+    /// Starts `urls` (for `page`) on their way, to be asked for soon; does nothing if the host can't.
+    fn prefetch(&self, _urls: Vec<String>, _page: &str) {}
 }
 
 /// GETs `url` for `page` from any thread (see [`Host::background`]).
@@ -197,6 +199,11 @@ impl Host for Preloading {
     }
     fn background(&self) -> Option<Fetch> {
         self.inner.background()
+    }
+    fn prefetch(&self, urls: Vec<String>, page: &str) {
+        if let Some(fetch) = self.inner.background() {
+            self.preload.start(urls, page, fetch);
+        }
     }
 }
 
@@ -453,7 +460,16 @@ pub struct State {
     protos: Option<Protos>,
     /// Bumped on every change to the document (so the app knows to lay it out again).
     pub generation: u64,
-    computed: Option<(u64, style::Styled)>,
+    computed: Option<Computed>,
+}
+
+/// What `getComputedStyle` keeps between calls: the parsed sheets (until
+/// they change) and the styles worked out since the document last changed.
+struct Computed {
+    generation: u64,
+    sheets: u64,
+    cascade: Rc<style::Cascade>,
+    memo: HashMap<NodeId, style::Style>,
 }
 
 type S = Rc<RefCell<State>>;
@@ -1321,6 +1337,16 @@ fn inserted(i: &mut Interp, st: &S, node: NodeId) {
         all.extend(descendants(&s.dom, node));
         all.into_iter().filter(|&n| s.dom.tag(n) == Some("script") && !s.ran.contains(&n) && is_js(&s.dom, n)).collect()
     };
+    // Their files all start downloading now, side by side, as browsers do; each
+    // script runs when its turn comes (an inserted script is async).
+    let (urls, page, host) = {
+        let s = st.borrow();
+        let urls: Vec<String> = new.iter().filter_map(|&n| s.dom.attr(n, "src")).map(|x| resolve_url(&s.url, x)).filter(|u| u.starts_with("http://") || u.starts_with("https://")).collect();
+        (urls, s.url.clone(), s.host.clone())
+    };
+    if !urls.is_empty() {
+        host.prefetch(urls, &page);
+    }
     for n in new {
         let empty = {
             let s = st.borrow();
@@ -3498,14 +3524,27 @@ fn adjacent(dom: &mut Dom, id: NodeId, pos: &str, n: NodeId) {
 fn computed(st: &S, id: NodeId, prop: &str) -> String {
     let mut s = st.borrow_mut();
     let generation = s.generation;
-    if s.computed.as_ref().map(|c| c.0) != Some(generation) {
+    if (id as usize) >= s.dom.nodes.len() {
+        return String::new();
+    }
+    if s.computed.as_ref().map(|c| c.generation) != Some(generation) {
+        use std::hash::{Hash, Hasher};
         let mut all = crate::style_sheets(&s.dom);
         all.extend(s.sheets.iter().cloned());
-        let styled = style::compute(&s.dom, &all, &s.env);
-        s.computed = Some((generation, styled));
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        all.hash(&mut h);
+        s.env.width.to_bits().hash(&mut h);
+        s.env.dark.hash(&mut h);
+        let key = h.finish();
+        let cascade = match &s.computed {
+            Some(c) if c.sheets == key => c.cascade.clone(),
+            _ => Rc::new(style::Cascade::new(&all, &s.env)),
+        };
+        s.computed = Some(Computed { generation, sheets: key, cascade, memo: HashMap::new() });
     }
-    let Some((_, styled)) = &s.computed else { return String::new() };
-    let Some(st) = styled.styles.get(id as usize) else { return String::new() };
+    let state = &mut *s;
+    let Some(c) = state.computed.as_mut() else { return String::new() };
+    let st = &c.cascade.clone().style_of(&state.dom, id, &mut c.memo);
     let color = |c: style::Color| if c.a == 255 { format!("rgb({}, {}, {})", c.r, c.g, c.b) } else { format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a as f32 / 255.0) };
     let len = |l: style::Len| match l {
         style::Len::Px(v) => format!("{v}px"),

@@ -1571,6 +1571,19 @@ pub fn hover_selectors(author_css: &[String], env: &Env) -> Vec<css::Selector> {
 }
 
 pub fn compute(dom: &Dom, author_css: &[String], env: &Env) -> Styled {
+    Cascade::new(author_css, env).compute(dom)
+}
+
+/// A document's style rules, parsed and indexed once so they can style the
+/// whole tree or (for `getComputedStyle`) just one element and its ancestors.
+pub struct Cascade {
+    rules: Vec<Rule>,
+    origins: Vec<u8>,
+    index: HashMap<(u8, String), Vec<Entry>>,
+}
+
+impl Cascade {
+pub fn new(author_css: &[String], env: &Env) -> Cascade {
     // Origin 0: user agent; 1: author sheets (in order), then inline styles.
     // Rules whose @media doesn't apply are dropped up front.
     let mut rules: Vec<Rule> = Vec::new();
@@ -1589,7 +1602,10 @@ pub fn compute(dom: &Dom, author_css: &[String], env: &Env) -> Styled {
             index.entry(bucket(sel)).or_default().push((origins[ri], ri, ri, si));
         }
     }
-    let empty = Vec::new();
+    Cascade { rules, origins, index }
+}
+
+pub fn compute(&self, dom: &Dom) -> Styled {
     let mut styles: Vec<Style> = Vec::with_capacity(dom.nodes.len());
     let mut extra: Vec<(NodeId, PseudoElement, Style)> = Vec::new();
     let root_style = Style { display: Display::Block, ..Style::default() };
@@ -1597,10 +1613,69 @@ pub fn compute(dom: &Dom, author_css: &[String], env: &Env) -> Styled {
     for id in 0..dom.nodes.len() as NodeId {
         let parent_id = dom.parent(id);
         let parent = if parent_id == id || (parent_id as usize) >= styles.len() { root_style.clone() } else { styles[parent_id as usize].clone() };
-        let Some((tag, attrs)) = element(dom, id) else {
-            styles.push(if id == 0 { root_style.clone() } else { parent });
-            continue;
+        let s = match element(dom, id) {
+            Some((tag, attrs)) => self.element_style(dom, id, tag, attrs, &parent, &mut rem, &mut extra),
+            None if id == 0 => root_style.clone(),
+            None => parent,
         };
+        styles.push(s);
+    }
+    // Pseudo-element styles go after the nodes'.
+    let mut out = Styled { styles, before: HashMap::new(), after: HashMap::new() };
+    for (id, el, st) in extra {
+        let k = out.styles.len() as NodeId;
+        out.styles.push(st);
+        match el {
+            PseudoElement::Before => out.before.insert(id, k),
+            PseudoElement::After => out.after.insert(id, k),
+        };
+    }
+    out
+}
+
+/// One node's style, styling only it and its ancestors (those not already
+/// in `memo`, which keeps every style worked out here for the next call).
+pub fn style_of(&self, dom: &Dom, id: NodeId, memo: &mut HashMap<NodeId, Style>) -> Style {
+    let mut chain = vec![id];
+    let mut at = id;
+    while !memo.contains_key(&at) {
+        let p = dom.parent(at);
+        if p == at {
+            break;
+        }
+        chain.push(p);
+        at = p;
+    }
+    let root_style = Style { display: Display::Block, ..Style::default() };
+    let mut rem = 16.0;
+    let mut extra = Vec::new();
+    let mut parent: Option<Style> = None;
+    for &n in chain.iter().rev() {
+        let s = if let Some(s) = memo.get(&n) {
+            s.clone()
+        } else {
+            let up = parent.clone().unwrap_or_else(|| root_style.clone());
+            let s = match element(dom, n) {
+                Some((tag, attrs)) => self.element_style(dom, n, tag, attrs, &up, &mut rem, &mut extra),
+                None if n == 0 => root_style.clone(),
+                None => up,
+            };
+            memo.insert(n, s.clone());
+            s
+        };
+        if dom.tag(n) == Some("html") {
+            rem = s.font_size;
+        }
+        parent = Some(s);
+    }
+    parent.unwrap_or(root_style)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, String)], parent: &Style, rem_out: &mut f32, extra: &mut Vec<(NodeId, PseudoElement, Style)>) -> Style {
+        let (rules, origins, index) = (&self.rules, &self.origins, &self.index);
+        let empty = Vec::new();
+        let mut rem = *rem_out;
         // Candidate rules: by id, each class, the tag, and the universal ones.
         let mut cands: Vec<&Entry> = Vec::new();
         if let Some(i) = attr(attrs, "id") {
@@ -1727,19 +1802,9 @@ pub fn compute(dom: &Dom, author_css: &[String], env: &Env) -> Styled {
                 }
             }
         }
-        styles.push(s);
-    }
-    // Pseudo-element styles go after the nodes'.
-    let mut out = Styled { styles, before: HashMap::new(), after: HashMap::new() };
-    for (id, el, st) in extra {
-        let k = out.styles.len() as NodeId;
-        out.styles.push(st);
-        match el {
-            PseudoElement::Before => out.before.insert(id, k),
-            PseudoElement::After => out.after.insert(id, k),
-        };
-    }
-    out
+        *rem_out = rem;
+        s
+}
 }
 
 /// Applies matched declarations in cascade order: custom properties first,
@@ -1784,6 +1849,23 @@ mod tests {
         let styled = compute(&dom, &[css.to_string()], &Env::default());
         let id = dom.find(tag).unwrap();
         styled.styles[id as usize].clone()
+    }
+
+    #[test]
+    fn one_element_matches_whole_tree() {
+        let dom = html::parse("<html style='font-size:20px'><body class=a><div id=x><p class='b c'>t<span>s</span></p><em>e</em></div></body></html>");
+        let css = ".a p { color: red } #x > em { font-size: 2rem } .b.c span { font-weight: bold } div em + * { opacity: .5 }".to_string();
+        let env = Env::default();
+        let whole = compute(&dom, &[css.clone()], &env);
+        let cascade = Cascade::new(&[css], &env);
+        let mut memo = HashMap::new();
+        for id in (0..dom.nodes.len() as NodeId).rev() {
+            let one = cascade.style_of(&dom, id, &mut memo);
+            let w = &whole.styles[id as usize];
+            assert_eq!((one.color, one.font_size, one.weight, one.opacity, one.display), (w.color, w.font_size, w.weight, w.opacity, w.display), "node {id}");
+        }
+        let em = dom.find("em").unwrap();
+        assert_eq!(cascade.style_of(&dom, em, &mut HashMap::new()).font_size, 40.0);
     }
 
     #[test]

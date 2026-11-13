@@ -103,6 +103,8 @@ pub(crate) enum Input {
 
 /// The hidden property holding a class's instance-field initialiser.
 const FIELDS: &str = "\0fields";
+/// A global variable's inline cache marks a `let`/`const` binding's position with this bit.
+const IC_LEX: u32 = 1 << 31;
 
 #[inline]
 fn cstr(code: &Code, i: u32) -> &Rc<str> {
@@ -492,8 +494,14 @@ impl Interp {
                         };
                     }
                     self.steps += 1;
-                    if self.steps > self.max_steps {
-                        break 'inner self.error("RangeError", "the script ran too long and was stopped");
+                    if self.steps & 1023 == 0 {
+                        if self.steps > self.max_steps {
+                            break 'inner self.error("RangeError", "the script ran too long and was stopped");
+                        }
+                        if let Some(p) = &mut self.profile {
+                            let at = self.call_names.last().cloned().unwrap_or((None, 0));
+                            *p.entry(at).or_insert(0) += 1;
+                        }
                     }
                     let op = code.ops[pc];
                     pc += 1;
@@ -572,13 +580,13 @@ impl Interp {
                             let v = tri!(self.get_global(cstr(&code, k), &code.ics[ic as usize]));
                             stack.push(v);
                         }
-                        Op::SetGlobal(k) => {
+                        Op::SetGlobal(k, ic) => {
                             let v = top!().clone();
-                            tri!(self.set_global(cstr(&code, k), v));
+                            tri!(self.set_global(cstr(&code, k), v, &code.ics[ic as usize]));
                         }
-                        Op::PutGlobal(k) => {
+                        Op::PutGlobal(k, ic) => {
                             let v = pop!();
-                            tri!(self.set_global(cstr(&code, k), v));
+                            tri!(self.set_global(cstr(&code, k), v, &code.ics[ic as usize]));
                         }
                         Op::TypeofGlobal(k) => {
                             let k = cstr(&code, k);
@@ -729,12 +737,7 @@ impl Interp {
                             let a = pop!();
                             let r = match (&a, &b) {
                                 (Value::Num(x), Value::Num(y)) => Value::Num(x + y),
-                                (Value::Str(x), Value::Str(y)) => {
-                                    let mut s = String::with_capacity(x.len() + y.len());
-                                    s.push_str(x);
-                                    s.push_str(y);
-                                    Value::Str(s.into())
-                                }
+                                (Value::Str(x), Value::Str(y)) => Value::Str(crate::interp::concat_str(x, y)),
                                 _ => tri!(self.add_slow(&a, &b)),
                             };
                             stack.push(r);
@@ -1285,18 +1288,19 @@ impl Interp {
     // ------------------------------------------------------------ helpers
 
     fn get_global(&mut self, k: &Rc<str>, ic: &Cell<u32>) -> Res<Value> {
+        let c = ic.get();
         {
             let lex = self.global_lex.borrow();
             if !lex.is_empty() {
-                if let Some(i) = lex.find(k, ic.get()) {
-                    ic.set(i as u32);
+                if let Some(i) = lex.find(k, if c & IC_LEX != 0 { c & !IC_LEX } else { u32::MAX }) {
+                    ic.set(i as u32 | IC_LEX);
                     if let Slot::Data(v) = lex.slot_at(i) {
                         return Ok(v.clone());
                     }
                 }
             }
             let g = self.global_obj.borrow();
-            if let Some(i) = g.find(k, ic.get()) {
+            if let Some(i) = g.find(k, if c & IC_LEX == 0 { c } else { 0 }) {
                 ic.set(i as u32);
                 if let Slot::Data(v) = g.slot_at(i) {
                     return Ok(v.clone());
@@ -1310,21 +1314,26 @@ impl Interp {
         self.throw("ReferenceError", &format!("{k} is not defined"))
     }
 
-    fn set_global(&mut self, k: &Rc<str>, v: Value) -> Res<()> {
+    fn set_global(&mut self, k: &Rc<str>, v: Value, ic: &Cell<u32>) -> Res<()> {
+        let c = ic.get();
         {
             let mut lex = self.global_lex.borrow_mut();
-            if let Some(i) = lex.find(k, 0) {
-                if lex.readonly_at(i) {
-                    drop(lex);
-                    return self.throw("TypeError", &format!("assignment to constant '{k}'"));
+            if !lex.is_empty() {
+                if let Some(i) = lex.find(k, if c & IC_LEX != 0 { c & !IC_LEX } else { u32::MAX }) {
+                    if lex.readonly_at(i) {
+                        drop(lex);
+                        return self.throw("TypeError", &format!("assignment to constant '{k}'"));
+                    }
+                    ic.set(i as u32 | IC_LEX);
+                    *lex.slot_at_mut(i) = Slot::Data(v);
+                    return Ok(());
                 }
-                *lex.slot_at_mut(i) = Slot::Data(v);
-                return Ok(());
             }
         }
         {
             let mut g = self.global_obj.borrow_mut();
-            if let Some(i) = g.find(k, 0) {
+            if let Some(i) = g.find(k, if c & IC_LEX == 0 { c } else { 0 }) {
+                ic.set(i as u32);
                 if let Slot::Data(d) = g.slot_at_mut(i) {
                     *d = v;
                     return Ok(());
@@ -1393,9 +1402,8 @@ impl Interp {
     fn add_slow(&mut self, a: &Value, b: &Value) -> Res<Value> {
         let (pa, pb) = (self.to_primitive(a, false)?, self.to_primitive(b, false)?);
         if matches!(pa, Value::Str(_)) || matches!(pb, Value::Str(_)) {
-            let mut s = self.to_str(&pa)?.to_string();
-            s.push_str(&self.to_str(&pb)?);
-            Ok(Value::Str(s.into()))
+            let (x, y) = (self.to_str(&pa)?, self.to_str(&pb)?);
+            Ok(Value::Str(crate::interp::concat_str(&x, &y)))
         } else {
             Ok(Value::Num(self.to_number(&pa)? + self.to_number(&pb)?))
         }

@@ -53,8 +53,9 @@ pub enum Op {
     PutEnv(u32, u32),
     /// (name, inline cache)
     GetGlobal(u32, u32),
-    SetGlobal(u32),
-    PutGlobal(u32),
+    /// A global assignment: the name, and an inline cache of where it was.
+    SetGlobal(u32, u32),
+    PutGlobal(u32, u32),
     TypeofGlobal(u32),
     /// A top-level `let`/`const`/`class` of a script: [v →] (name, const?)
     DeclareLex(u32, bool),
@@ -825,7 +826,8 @@ impl Compiler {
                 let idx = self.func(&f, None)?;
                 self.emit(Op::Closure(idx));
                 let n = self.name_const(f.name.as_deref().unwrap_or(""));
-                self.emit(Op::PutGlobal(n));
+                let ic = self.ic();
+                self.emit(Op::PutGlobal(n, ic));
             }
             let mut vars = Vec::new();
             var_names(prog, &mut vars);
@@ -1083,7 +1085,8 @@ impl Compiler {
                 Some((loc, _)) => self.store_loc(loc, true),
                 None => {
                     let n = self.name_const(&name);
-                    self.emit(Op::PutGlobal(n));
+                    let ic = self.ic();
+                    self.emit(Op::PutGlobal(n, ic));
                 }
             }
         }
@@ -1263,7 +1266,7 @@ impl Compiler {
             let merged = match st.ops.last() {
                 Some(Op::SetLocal(i)) => Some(Op::PutLocal(*i)),
                 Some(Op::SetEnv(d, i)) => Some(Op::PutEnv(*d, *i)),
-                Some(Op::SetGlobal(k)) => Some(Op::PutGlobal(*k)),
+                Some(Op::SetGlobal(k, ic)) => Some(Op::PutGlobal(*k, *ic)),
                 _ => None,
             };
             if let Some(m) = merged {
@@ -1504,7 +1507,8 @@ impl Compiler {
             if let Expr::Ident(n) = p {
                 let c = self.name_const(n);
                 if kind == "var" {
-                    self.emit(Op::PutGlobal(c));
+                    let ic = self.ic();
+                    self.emit(Op::PutGlobal(c, ic));
                 } else {
                     self.emit(Op::DeclareLex(c, kind == "const"));
                 }
@@ -2075,7 +2079,8 @@ impl Compiler {
             }
             None => {
                 let c = self.name_const(n);
-                self.emit(if pop { Op::PutGlobal(c) } else { Op::SetGlobal(c) });
+                let ic = self.ic();
+                self.emit(if pop { Op::PutGlobal(c, ic) } else { Op::SetGlobal(c, ic) });
             }
         }
         // A `with` hit skips the ordinary store (and leaves the value as the store would).

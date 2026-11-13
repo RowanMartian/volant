@@ -309,6 +309,23 @@ pub fn num_to_string(n: f64) -> String {
     format!("{n}")
 }
 
+/// `a + b` as a shared string, built in one allocation (a String first would copy twice).
+pub fn concat_str(a: &str, b: &str) -> Rc<str> {
+    if b.is_empty() {
+        return a.into();
+    }
+    let mut buf: Rc<[std::mem::MaybeUninit<u8>]> = Rc::new_uninit_slice(a.len() + b.len());
+    let dst = Rc::get_mut(&mut buf).expect("a new Rc is unique");
+    // SAFETY: u8 and MaybeUninit<u8> share a layout; every byte is written before assume_init.
+    unsafe {
+        std::ptr::copy_nonoverlapping(a.as_ptr(), dst.as_mut_ptr() as *mut u8, a.len());
+        std::ptr::copy_nonoverlapping(b.as_ptr(), (dst.as_mut_ptr() as *mut u8).add(a.len()), b.len());
+        let bytes: Rc<[u8]> = buf.assume_init();
+        // Two valid UTF-8 strings joined are valid UTF-8, and str and [u8] share a layout.
+        Rc::from_raw(Rc::into_raw(bytes) as *const str)
+    }
+}
+
 pub struct Interp {
     pub global_obj: Obj,
     /// The global `let`, `const` and `class` declarations of scripts.
@@ -367,6 +384,8 @@ pub struct Interp {
     pub(crate) modules: HashMap<Rc<str>, crate::module::ModuleRef>,
     /// What classic scripts' `import()` resolves against (the document's URL).
     pub base_url: Rc<str>,
+    /// When set, a sample every 1024 steps of the function running (a JS profile).
+    pub profile: Option<HashMap<(Option<Rc<str>>, u32), u64>>,
 }
 
 impl Default for Interp {
@@ -423,6 +442,7 @@ impl Interp {
             loader: None,
             modules: HashMap::new(),
             base_url: "".into(),
+            profile: None,
         };
         crate::builtins::install(&mut i);
         i
@@ -864,6 +884,20 @@ impl Interp {
 
     /// Runs a whole script in the global scope; returns the last expression statement's value.
     /// Starts a fresh step budget (for each script and each event a page handles).
+    /// The busiest functions in the profile, one per line.
+    pub fn profile_report(&self, top: usize) -> String {
+        let Some(p) = &self.profile else { return String::new() };
+        let total: u64 = p.values().sum::<u64>().max(1);
+        let mut rows: Vec<_> = p.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1));
+        let head = format!("{total} samples (about {:.1} million steps)\n", total as f64 * 1024.0 / 1e6);
+        head + &rows
+            .iter()
+            .take(top)
+            .map(|((name, at), n)| format!("{:5.1}%  {} ({})\n", **n as f64 * 100.0 / total as f64, name.as_deref().unwrap_or("<anonymous>"), crate::parse::Where::unpack(*at)))
+            .collect::<String>()
+    }
+
     pub fn reset_steps(&mut self, budget: u64) {
         self.steps = 0;
         self.max_steps = budget;
@@ -1113,9 +1147,71 @@ fn show_key(k: &str) -> String {
     }
 }
 
-/// A string's length in UTF-16 code units (what JavaScript counts).
-#[inline]
-pub fn utf16_len(s: &str) -> usize {
+/// Strings shorter than this are measured each time; longer ones go through [`STR_INFO`].
+const CACHE_AT: usize = 256;
+
+/// What's known about a long string being indexed: whether it's ASCII, its
+/// UTF-16 length, and where the last lookup landed (loops walk strings in order).
+struct StrInfo {
+    s: Rc<str>,
+    ascii: bool,
+    len16: usize,
+    at16: usize,
+    at_byte: usize,
+}
+
+thread_local! {
+    /// The last few long strings indexed. Each entry holds its string, so the
+    /// address it's found by can't be reused by another string while cached.
+    static STR_INFO: RefCell<([Option<StrInfo>; 4], usize)> = const { RefCell::new(([None, None, None, None], 0)) };
+}
+
+fn with_info<T>(s: &Rc<str>, f: impl FnOnce(&mut StrInfo) -> T) -> T {
+    STR_INFO.with(|c| {
+        let mut c = c.borrow_mut();
+        let (slots, next) = &mut *c;
+        if let Some(e) = slots.iter_mut().flatten().find(|e| Rc::ptr_eq(&e.s, s)) {
+            return f(e);
+        }
+        let ascii = s.is_ascii();
+        let len16 = if ascii { s.len() } else { s.encode_utf16().count() };
+        let k = *next;
+        *next = (k + 1) % slots.len();
+        slots[k] = Some(StrInfo { s: s.clone(), ascii, len16, at16: 0, at_byte: 0 });
+        f(slots[k].as_mut().expect("just set"))
+    })
+}
+
+/// Where UTF-16 unit `k` is: the byte offset of its character, and whether it's
+/// that character's second (low surrogate) unit.
+fn locate(e: &mut StrInfo, k: usize) -> Option<(usize, bool)> {
+    if k >= e.len16 {
+        return None;
+    }
+    if e.ascii {
+        return Some((k, false));
+    }
+    if k < e.at16 {
+        (e.at16, e.at_byte) = (0, 0);
+    }
+    let (mut u, mut b) = (e.at16, e.at_byte);
+    loop {
+        let c = e.s[b..].chars().next()?;
+        let w = c.len_utf16();
+        if k < u + w {
+            (e.at16, e.at_byte) = (u, b);
+            return Some((b, k > u));
+        }
+        u += w;
+        b += c.len_utf8();
+    }
+}
+
+/// A string's length in UTF-16 units, as JS counts it.
+pub fn utf16_len(s: &Rc<str>) -> usize {
+    if s.len() >= CACHE_AT {
+        return with_info(s, |e| e.len16);
+    }
     if s.is_ascii() {
         s.len()
     } else {
@@ -1123,16 +1219,49 @@ pub fn utf16_len(s: &str) -> usize {
     }
 }
 
+/// UTF-16 unit `k` of a string (`charCodeAt`).
+pub fn utf16_unit(s: &Rc<str>, k: usize) -> Option<u16> {
+    if s.len() < CACHE_AT {
+        return s.encode_utf16().nth(k);
+    }
+    with_info(s, |e| {
+        let (b, low) = locate(e, k)?;
+        let c = e.s[b..].chars().next()?;
+        let mut buf = [0u16; 2];
+        let units = c.encode_utf16(&mut buf);
+        units.get(low as usize).copied()
+    })
+}
+
 /// The character at index i (ASCII strings index directly).
 #[inline]
-pub fn string_at(s: &str, i: usize) -> Value {
-    if s.is_ascii() {
-        return match s.as_bytes().get(i) {
-            Some(_) => Value::Str(s[i..i + 1].into()),
-            None => Value::Undefined,
-        };
+pub fn string_at(s: &Rc<str>, i: usize) -> Value {
+    let at = if s.len() < CACHE_AT {
+        if s.is_ascii() {
+            return match s.as_bytes().get(i) {
+                Some(_) => Value::Str(s[i..i + 1].into()),
+                None => Value::Undefined,
+            };
+        }
+        let mut u = 0;
+        s.char_indices().find_map(|(b, c)| {
+            let w = c.len_utf16();
+            let hit = (i < u + w).then_some((b, i > u));
+            u += w;
+            hit
+        })
+    } else {
+        with_info(s, |e| locate(e, i))
+    };
+    match at {
+        // Half of a surrogate pair can't stand alone in a Rust string.
+        Some((_, true)) => Value::Str("\u{FFFD}".into()),
+        Some((b, false)) => {
+            let c = s[b..].chars().next().unwrap_or('\u{FFFD}');
+            Value::Str(s[b..b + c.len_utf8()].into())
+        }
+        None => Value::Undefined,
     }
-    s.chars().nth(i).map(|c| Value::Str(c.to_string().into())).unwrap_or(Value::Undefined)
 }
 
 pub fn to_i32(n: f64) -> i32 {

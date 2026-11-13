@@ -712,11 +712,47 @@ pub fn install(i: &mut Interp) {
         Ok(i.array(v))
     });
     def(i, &array, "of", |i, _t, a| Ok(i.array(a)));
-    def(i, &ap, "push", |i, t, a| with_array(i, &t, |arr| {
-        arr.extend(a);
-        Value::Num(arr.len() as f64)
-    }));
-    def(i, &ap, "pop", |i, t, _a| with_array(i, &t, |arr| arr.pop().unwrap_or(Value::Undefined)));
+    /// An array-like's `length` (for the generic push and pop).
+    fn like_len(i: &mut Interp, t: &Value) -> Res<usize> {
+        let len = i.get(t, "length")?;
+        let n = i.to_number(&len)?;
+        Ok(if n.is_finite() && n > 0.0 { (n as usize).min(1 << 53) } else { 0 })
+    }
+    fn is_array(t: &Value) -> bool {
+        matches!(t, Value::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)))
+    }
+    // On array-likes these touch only the end (copying the whole object each
+    // time made building one with push.apply quadratic).
+    def(i, &ap, "push", |i, t, a| {
+        if is_array(&t) {
+            return with_array(i, &t, |arr| {
+                arr.extend(a);
+                Value::Num(arr.len() as f64)
+            });
+        }
+        let n = like_len(i, &t)?;
+        let total = n + a.len();
+        for (k, x) in a.into_iter().enumerate() {
+            i.set(&t, &(n + k).to_string(), x)?;
+        }
+        i.set(&t, "length", Value::Num(total as f64))?;
+        Ok(Value::Num(total as f64))
+    });
+    def(i, &ap, "pop", |i, t, _a| {
+        if is_array(&t) {
+            return with_array(i, &t, |arr| arr.pop().unwrap_or(Value::Undefined));
+        }
+        let n = like_len(i, &t)?;
+        if n == 0 {
+            i.set(&t, "length", Value::Num(0.0))?;
+            return Ok(Value::Undefined);
+        }
+        let k = (n - 1).to_string();
+        let v = i.get(&t, &k)?;
+        i.delete_property(&t, &k)?;
+        i.set(&t, "length", Value::Num((n - 1) as f64))?;
+        Ok(v)
+    });
     def(i, &ap, "shift", |i, t, _a| with_array(i, &t, |arr| if arr.is_empty() { Value::Undefined } else { arr.remove(0) }));
     def(i, &ap, "unshift", |i, t, a| with_array(i, &t, |arr| {
         arr.splice(0..0, a);
@@ -960,17 +996,33 @@ pub fn install(i: &mut Interp) {
     def(i, &sp, "charAt", |i, t, a| {
         let s = this_str(i, &t)?;
         let k = int_arg(i, &a, 0, 0.0)?;
-        Ok(Value::Str(if k < 0.0 { "".into() } else { s.chars().nth(k as usize).map(|c| c.to_string()).unwrap_or_default().into() }))
+        Ok(if k < 0.0 {
+            Value::Str("".into())
+        } else {
+            match crate::interp::string_at(&s, k as usize) {
+                Value::Undefined => Value::Str("".into()),
+                v => v,
+            }
+        })
     });
     def(i, &sp, "charCodeAt", |i, t, a| {
         let s = this_str(i, &t)?;
         let k = int_arg(i, &a, 0, 0.0)?;
-        Ok(Value::Num(if k < 0.0 { f64::NAN } else { s.encode_utf16().nth(k as usize).map(|u| u as f64).unwrap_or(f64::NAN) }))
+        Ok(Value::Num(if k < 0.0 { f64::NAN } else { crate::interp::utf16_unit(&s, k as usize).map(|u| u as f64).unwrap_or(f64::NAN) }))
     });
     def(i, &sp, "codePointAt", |i, t, a| {
         let s = this_str(i, &t)?;
         let k = int_arg(i, &a, 0, 0.0)?;
-        Ok(s.chars().nth(k.max(0.0) as usize).map(|c| Value::Num(c as u32 as f64)).unwrap_or(Value::Undefined))
+        // The code point starting at UTF-16 unit k (a lone low half gives itself).
+        let k = k.max(0.0) as usize;
+        Ok(match crate::interp::utf16_unit(&s, k) {
+            Some(hi @ 0xD800..=0xDBFF) => match crate::interp::utf16_unit(&s, k + 1) {
+                Some(lo @ 0xDC00..=0xDFFF) => Value::Num((0x10000 + ((hi as u32 - 0xD800) << 10) + (lo as u32 - 0xDC00)) as f64),
+                _ => Value::Num(hi as f64),
+            },
+            Some(u) => Value::Num(u as f64),
+            None => Value::Undefined,
+        })
     });
     fn char_index(s: &str, byte: usize) -> f64 {
         s[..byte].chars().count() as f64

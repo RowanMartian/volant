@@ -136,6 +136,11 @@ pub fn one(url: &str) {
     let env = volant_engine::Env { width: 1100.0, dark: false };
     let t = Instant::now();
     let mut rt = script::Runtime::new(&html, &page, env, host.clone());
+    // VOLANT_PROFILE=1: where the page's JavaScript spends its time (to stderr).
+    let profile = std::env::var_os("VOLANT_PROFILE").is_some();
+    if profile {
+        rt.interp.profile = Some(Default::default());
+    }
     row.ms[1] = t.elapsed().as_secs_f64() * 1000.0;
     let t = Instant::now();
     timed.spent.set(0.0);
@@ -177,6 +182,9 @@ pub fn one(url: &str) {
     }
     row.ms[5] = t.elapsed().as_secs_f64() * 1000.0;
     let t = Instant::now();
+    if profile {
+        eprintln!("JavaScript profile (share of samples, function, where it starts):\n{}", rt.interp.profile_report(30));
+    }
     let laid = script::render_snapshot(&snap, &sheets, env, &volant_engine::ApproxFonts, &crate::PreviewImages);
     row.ms[6] = t.elapsed().as_secs_f64() * 1000.0;
     row.items = laid.items.len();
