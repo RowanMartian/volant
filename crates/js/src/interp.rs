@@ -152,7 +152,9 @@ impl Object {
             Kind::Typed(t) if !t.data_view => (0..t.len).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
+        let start = out.len();
         out.extend(self.props.iter().filter(|e| !e.key.starts_with('\0')).map(|e| e.key.clone()));
+        indices_first(&mut out, start);
         if matches!(self.kind, Kind::Array(_)) {
             out.push("length".into());
         }
@@ -180,8 +182,18 @@ impl Object {
         match self.find(k, 0) {
             Some(i) => self.props[i].slot = Slot::Data(v),
             None => {
-                self.push(k.into(), Slot::Data(v), 0);
+                let flags = self.lazy_hidden(k);
+                self.push(k.into(), Slot::Data(v), flags);
             }
+        }
+    }
+    /// A function's `prototype`, `name` and `length` are made lazily, but
+    /// they're never enumerable, even when assigned before first read.
+    fn lazy_hidden(&self, k: &str) -> u8 {
+        if matches!(k, "prototype" | "name" | "length") && matches!(self.kind, Kind::Function(_)) {
+            HIDDEN
+        } else {
+            0
         }
     }
     /// Like [`set_own`](Self::set_own) with a key already shared; where it went.
@@ -191,7 +203,10 @@ impl Object {
                 self.props[i].slot = Slot::Data(v);
                 i
             }
-            None => self.push(k.clone(), Slot::Data(v), 0),
+            None => {
+                let flags = self.lazy_hidden(k);
+                self.push(k.clone(), Slot::Data(v), flags)
+            }
         }
     }
     /// A non-enumerable own data property (methods, internals).
@@ -236,12 +251,27 @@ impl Object {
             Kind::Typed(t) if !t.data_view => (0..t.len).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
+        let start = out.len();
         out.extend(self.props.iter().filter(|e| e.flags & HIDDEN == 0 && !e.key.starts_with('\0')).map(|e| e.key.clone()));
+        indices_first(&mut out, start);
         out
     }
     /// The own properties, in order (for copying).
     pub fn entries(&self) -> impl Iterator<Item = (&Rc<str>, &Slot, bool)> {
         self.props.iter().map(|e| (&e.key, &e.slot, e.flags & HIDDEN == 0))
+    }
+}
+
+/// Whether `k` is an array index ("0", "7", not "07" or "4294967295").
+pub fn is_index(k: &str) -> bool {
+    !k.is_empty() && k.len() <= 10 && k.bytes().all(|b| b.is_ascii_digit()) && (k == "0" || !k.starts_with('0')) && k.parse::<u64>().is_ok_and(|n| n < u32::MAX as u64)
+}
+
+/// Puts integer keys first, ascending, as OrdinaryOwnPropertyKeys does.
+fn indices_first(keys: &mut [Rc<str>], start: usize) {
+    let tail = &mut keys[start..];
+    if tail.iter().any(|k| is_index(k)) {
+        tail.sort_by_key(|k| if is_index(k) { (0, k.parse::<u64>().unwrap_or(0)) } else { (1, 0) });
     }
 }
 

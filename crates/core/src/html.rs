@@ -33,6 +33,9 @@ pub struct Node {
 /// parent comes before it, which makes bottom-up passes a reverse loop.
 pub struct Dom {
     pub nodes: Vec<Node>,
+    /// The namespace and prefix of elements made by `createElementNS` and
+    /// in XML documents. Other elements are HTML's (`<svg>` SVG's, `<math>` MathML's).
+    pub ns: std::collections::HashMap<NodeId, (Option<Box<str>>, Option<Box<str>>)>,
 }
 
 pub const ROOT: NodeId = 0;
@@ -412,7 +415,7 @@ fn parse_opts(html: &str, scripts: bool) -> Dom {
         b.text("<");
         i += 1;
     }
-    Dom { nodes: b.nodes }
+    Dom { nodes: b.nodes, ns: Default::default() }
 }
 
 fn read_name(html: &str, start: usize) -> (String, usize) {

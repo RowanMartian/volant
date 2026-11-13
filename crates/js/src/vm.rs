@@ -481,7 +481,7 @@ impl Interp {
                             let ra = pop!();
                             let r = match (&ra, &rb) {
                                 (Value::Num(x), Value::Num(y)) => x.partial_cmp(y),
-                                (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+                                (Value::Str(x), Value::Str(y)) => Some(str_cmp(x, y)),
                                 _ => tri!(self.compare(&ra, &rb)),
                             };
                             let t: fn(std::cmp::Ordering) -> bool = $test;
@@ -1413,7 +1413,7 @@ impl Interp {
     fn compare(&mut self, a: &Value, b: &Value) -> Res<Option<std::cmp::Ordering>> {
         let (pa, pb) = (self.to_primitive(a, true)?, self.to_primitive(b, true)?);
         Ok(if let (Value::Str(x), Value::Str(y)) = (&pa, &pb) {
-            Some(x.cmp(y))
+            Some(str_cmp(x, y))
         } else {
             let (x, y) = (self.to_number(&pa)?, self.to_number(&pb)?);
             x.partial_cmp(&y)
@@ -1585,5 +1585,17 @@ fn define_accessor(o: &Obj, k: &str, f: Value, getter: bool, enumerable: bool) {
     b.set_slot(k, Slot::Accessor(g, s));
     if !enumerable {
         b.set_enumerable(k, false);
+    }
+}
+
+/// Compares strings by UTF-16 code units, as JavaScript does.
+pub fn str_cmp(x: &str, y: &str) -> std::cmp::Ordering {
+    // UTF-8 order matches code-point order, which only differs from UTF-16
+    // order between astral characters and U+E000..U+FFFF.
+    let astral = |s: &str| s.bytes().any(|b| b >= 0xF0);
+    if astral(x) || astral(y) {
+        x.encode_utf16().cmp(y.encode_utf16())
+    } else {
+        x.cmp(y)
     }
 }

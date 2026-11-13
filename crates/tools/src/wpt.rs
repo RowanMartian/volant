@@ -117,6 +117,8 @@ pub fn one(root: &str, path: &str) {
     let html = String::from_utf8_lossy(&reply.body).into_owned();
     let host: std::rc::Rc<dyn script::Host> = host;
     let mut rt = script::Runtime::new(&html, &url, volant_engine::Env { width: 800.0, dark: false }, host);
+    // Test files run thousands of tests in one script; the wall-clock limits apply instead.
+    rt.budget = 2_000_000_000;
     rt.run_scripts();
     let long = html.contains("name=timeout content=long") || html.contains("name=\"timeout\" content=\"long\"") || html.contains("META: timeout=long");
     let wait = if long { WAIT_LONG } else { WAIT };

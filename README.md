@@ -86,6 +86,15 @@ backed by the real cascade. `prelude.js` builds the rest of the platform in Java
 `URLSearchParams`, `fetch`, `XMLHttpRequest`, `Headers`/`Response`, storage, observers, `FormData`, `atob`/`btoa`,
 `TextEncoder` and more. jQuery and MediaWiki's module loader run on it.
 
+Underneath, volant-core carries the platform's standards as plain Rust: `url.rs` is the WHATWG URL Standard (the
+basic URL parser with its setter state overrides, IPv4/IPv6/opaque hosts, Punycode, origins and form encoding),
+behind `URL`, `URLSearchParams`, `<a>`'s URL parts and every link, script and form the engine resolves (with
+`<base href>`); `encoding.rs` is the Encoding Standard's labels and decoders, behind `TextDecoder`; `xml.rs` parses
+XML with namespaces for XML documents, SVG and `DOMParser` (malformed input gives a `<parsererror>` document).
+Elements carry namespaces and prefixes (`createElementNS`, `namespaceURI`, XML documents and `XMLDocument`), and
+iframes get documents of their own: about:blank, `srcdoc`, or a same-origin `src` loaded before the window's load
+event (their scripts don't run yet; cross-origin frames stay empty).
+
 **Simple Page is the default** for web pages (Settings → Experimental → Open pages in Simple Page). `sites.rs` in
 volant-core picks the engine per site: WebKit for web apps (video, maps, office suites, chat, social apps), for
 sites the person switched with **View → Simple Page (⌥⌘E)** (remembered in `sites.txt`), and for two weeks after
@@ -116,7 +125,8 @@ queue, and timers on a virtual clock; `await` runs the event loop in place until
 library covers Object, Function, Array, String, Number, Boolean, Math, JSON, the Error types, Map, Set, Date,
 Symbol and iterators. Scripts run under a step budget and a recursion limit, so a page can't hang the browser.
 ES modules (static `import`/`export` and dynamic `import()`) load through the page's host. `volant-tools js
-file.js` runs a script. Not yet: Proxy, typed arrays (plain arrays stand in), and binary data.
+file.js` runs a script. Proxy and Reflect, typed arrays and `ArrayBuffer`, and `new.target` are there too; own keys
+come in the standard's order (integer keys first) and strings compare by UTF-16 code units, as in browsers.
 
 ## Blocking engine
 
@@ -176,7 +186,24 @@ cargo run --release -p volant-core --example compile_lists -- easylist.txt easyp
 `compile_lists` takes `OUT=dir` to write the rule lists and `LOOKUP=host` to print what a page on that host gets.
 `bench` and `fuzz` are the other examples.
 
+## Conformance
+
+`volant-tools wpt WPT_DIR scripts/wpt/tests.txt OUT` runs a slice of the
+[web-platform-tests](https://github.com/web-platform-tests/wpt) (DOM, events, ranges, traversal, encoding, URL and
+HTML's DOM interfaces, at the commit in `scripts/wpt/WPT_COMMIT`) through the engine with no browser: each file
+in its own process, the tests served from the checkout, and testharness.js reporting back. It writes a table by
+folder and the most common failures; `--baseline scripts/wpt/baseline.tsv` fails when a file passes fewer subtests
+than before. In the latest run 82,067 of 92,781 subtests pass (88.5%), and 210 of
+the 962 files pass completely (the first run passed 53.2%).
+
+`volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Simple Page and reports what
+it showed, how long each phase took and the most common script errors. Sites that turn automated clients away are
+counted apart, not worked around. In the latest survey Simple Page showed 108 of the 129 sites that answered (84%).
+
 ## CI
+
+`.github/workflows/conformance.yml` runs the web-platform-tests slice on every change to the engines and checks it
+against the baseline; the site survey runs weekly or by hand.
 
 `.github/workflows/build-macos.yml`, on every push to `main`:
 

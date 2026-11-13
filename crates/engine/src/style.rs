@@ -1408,10 +1408,17 @@ fn element_siblings(dom: &Dom, id: NodeId) -> Vec<NodeId> {
     dom.children(p).iter().copied().filter(|&c| element(dom, c).is_some()).collect()
 }
 
+/// Whether an element is an HTML one, for type selectors' case: the HTML
+/// parser's elements are (it lower-cases their names); `createElementNS` and
+/// XML documents record a namespace.
+fn is_html(dom: &Dom, id: NodeId) -> bool {
+    dom.ns.get(&id).is_none_or(|(ns, _)| ns.as_deref() == Some("http://www.w3.org/1999/xhtml"))
+}
+
 fn matches_compound(dom: &Dom, id: NodeId, c: &Compound) -> bool {
     let Some((tag, attrs)) = element(dom, id) else { return false };
     if let Some(t) = &c.tag {
-        if t != tag {
+        if t != tag && !(t.eq_ignore_ascii_case(tag) && is_html(dom, id)) {
             return false;
         }
     }
@@ -1538,7 +1545,7 @@ fn bucket(sel: &css::Selector) -> (u8, String) {
     } else if let Some(cl) = c.classes.first() {
         (1, cl.clone())
     } else if let Some(t) = &c.tag {
-        (2, t.clone())
+        (2, t.to_ascii_lowercase())
     } else {
         (3, String::new())
     }
@@ -1685,7 +1692,7 @@ fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, St
         for cl in attr(attrs, "class").unwrap_or("").split_ascii_whitespace() {
             cands.extend(index.get(&(1, cl.to_string())).unwrap_or(&empty));
         }
-        cands.extend(index.get(&(2, tag.to_string())).unwrap_or(&empty));
+        cands.extend(index.get(&(2, tag.to_ascii_lowercase())).unwrap_or(&empty));
         cands.extend(index.get(&(3, String::new())).unwrap_or(&empty));
         cands.sort_by_key(|e| (e.1, e.3));
         cands.dedup();

@@ -404,14 +404,29 @@ fn is_xml_name(s: &str) -> bool {
     matches!(c.next(), Some(f) if start(f)) && c.all(|ch| start(ch) || ch.is_ascii_digit() || ch == '-' || ch == '.' || ch == '\u{B7}')
 }
 
-/// A name with at most one `:`, not at either end (as DOM's "validate a qualified name" wants).
-fn is_qualified_name(s: &str) -> bool {
-    is_xml_name(s) && s.matches(':').count() <= 1 && !s.starts_with(':') && !s.ends_with(':')
+/// DOM's "valid element local name".
+fn is_element_local_name(s: &str) -> bool {
+    let mut c = s.chars();
+    match c.next() {
+        None => false,
+        Some(f) if f.is_ascii_alphabetic() => !s.contains(|ch: char| matches!(ch, '\t' | '\n' | '\x0c' | '\r' | ' ' | '\0' | '/' | '>')),
+        Some(f) if f == ':' || f == '_' || f >= '\u{80}' => c.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | ':' | '_') || ch >= '\u{80}'),
+        _ => false,
+    }
+}
+
+/// DOM's "valid namespace prefix", "valid attribute local name" and "valid doctype name".
+fn no_ws_or(s: &str, extra: &[char]) -> bool {
+    !s.contains(|ch: char| matches!(ch, '\t' | '\n' | '\x0c' | '\r' | ' ' | '\0') || extra.contains(&ch))
+}
+fn is_doctype_name(s: &str) -> bool {
+    no_ws_or(s, &['>'])
 }
 /// The native stack a thread running a [`Runtime`] needs.
 pub const STACK: usize = 512 << 20;
-/// The step budget for each script and each event (about a second of work).
-const BUDGET: u64 = 30_000_000;
+/// The step budget for each script and each event (about three seconds of
+/// work), unless [`Runtime::budget`] says otherwise.
+const BUDGET: u64 = 100_000_000;
 
 struct Listener {
     ty: String,
@@ -425,8 +440,15 @@ struct Protos {
     /// HTMLElement.prototype (under Element's), and each element interface's own
     /// prototype by tag (HTMLScriptElement.prototype for `script`, …).
     html_element: Obj,
+    /// Element interfaces by local name, for HTML's and SVG's namespaces.
     by_tag: HashMap<&'static str, Obj>,
+    svg_tags: HashMap<&'static str, Obj>,
+    element: Obj,
+    svg: Obj,
+    mathml: Obj,
+    unknown: Obj,
     html_document: Obj,
+    xml_document: Obj,
     text: Obj,
     comment: Obj,
     doctype: Obj,
@@ -475,9 +497,13 @@ pub struct State {
     /// Bumped on every change to the document (so the app knows to lay it out again).
     pub generation: u64,
     computed: Option<Computed>,
+    /// The document's base URL, for the generation and URL it was worked out at.
+    base_cache: RefCell<Option<(u64, String, String)>>,
     /// The document each node made by (or adopted into) a document other than
     /// the page's belongs to, where its tree doesn't say.
     owners: HashMap<NodeId, NodeId>,
+    /// The URLs of documents other than the page's (those frames loaded).
+    doc_urls: HashMap<NodeId, String>,
     /// Documents other than the page's, and their content types.
     documents: HashMap<NodeId, String>,
 }
@@ -584,6 +610,9 @@ fn remove_dots(path: &str) -> String {
 
 /// Resolves `href` against `base` (RFC 3986), keeping fragments.
 pub fn resolve_url(base: &str, href: &str) -> String {
+    if let Some(u) = volant_core::url::resolve(base, href) {
+        return u;
+    }
     let h = href.trim();
     if scheme_len(h).is_some() {
         return h.to_string();
@@ -635,6 +664,58 @@ pub fn resolve_url(base: &str, href: &str) -> String {
 
 fn is_element(dom: &Dom, id: NodeId) -> bool {
     matches!(&dom.nodes.get(id as usize).map(|n| &n.data), Some(Data::Element { name, .. }) if !name.starts_with('#'))
+}
+
+pub const HTML_NS: &str = "http://www.w3.org/1999/xhtml";
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+const MATHML_NS: &str = "http://www.w3.org/1998/Math/MathML";
+const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
+
+/// An element's namespace and prefix.
+fn ns_of(dom: &Dom, id: NodeId) -> (Option<&str>, Option<&str>) {
+    match dom.ns.get(&id) {
+        Some((n, p)) => (n.as_deref(), p.as_deref()),
+        None => match dom.tag(id) {
+            Some("svg") => (Some(SVG_NS), None),
+            Some("math") => (Some(MATHML_NS), None),
+            _ => (Some(HTML_NS), None),
+        },
+    }
+}
+
+/// Whether the document `id` belongs to is an HTML document (not XML).
+fn in_html_doc(s: &State, id: NodeId) -> bool {
+    s.documents.get(&owner_doc(s, id)).is_none_or(|t| t == "text/html")
+}
+
+/// An element's `tagName`: its qualified name, upper-cased for HTML elements in HTML documents.
+fn tag_name(s: &State, id: NodeId) -> String {
+    let name = tag_of(&s.dom, id);
+    if ns_of(&s.dom, id).0 == Some(HTML_NS) && in_html_doc(s, id) {
+        name.to_ascii_uppercase()
+    } else {
+        name
+    }
+}
+
+/// Validates and splits a qualified name for `namespace`, as `createElementNS` does.
+fn validate_and_extract(namespace: Option<&str>, qname: &str) -> Result<(Option<String>, String), (&'static str, &'static str)> {
+    let (prefix, local) = match qname.split_once(':') {
+        Some((p, l)) => (Some(p.to_string()), l.to_string()),
+        None => (None, qname.to_string()),
+    };
+    if prefix.as_deref().is_some_and(|p| p.is_empty() || !no_ws_or(p, &['/', '>'])) || !is_element_local_name(&local) {
+        return Err(("InvalidCharacterError", "not a valid qualified name"));
+    }
+    let bad = (prefix.is_some() && namespace.is_none())
+        || (prefix.as_deref() == Some("xml") && namespace != Some(XML_NS))
+        || ((qname == "xmlns" || prefix.as_deref() == Some("xmlns")) && namespace != Some(XMLNS_NS))
+        || (namespace == Some(XMLNS_NS) && qname != "xmlns" && prefix.as_deref() != Some("xmlns"));
+    if bad {
+        return Err(("NamespaceError", "the name doesn't fit the namespace"));
+    }
+    Ok((prefix, local))
 }
 
 fn tag_of(dom: &Dom, id: NodeId) -> String {
@@ -799,6 +880,9 @@ fn clone_node(dom: &mut Dom, id: NodeId, deep: bool) -> NodeId {
         other => other.clone(),
     };
     let copy = new_node(dom, data);
+    if let Some(ns) = dom.ns.get(&id).cloned() {
+        dom.ns.insert(copy, ns);
+    }
     if deep {
         for c in dom.nodes[id as usize].children.clone() {
             let cc = clone_node(dom, c, true);
@@ -818,6 +902,9 @@ fn import(dom: &mut Dom, src: &Dom) -> NodeId {
             other => other.clone(),
         };
         let id = new_node(dom, data);
+        if let Some(ns) = src.ns.get(&sid) {
+            dom.ns.insert(id, ns.clone());
+        }
         let _ = insert(dom, parent, id, None);
         for &c in src.children(sid) {
             copy(dom, src, c, id);
@@ -939,6 +1026,48 @@ fn inner_html(dom: &Dom, id: NodeId) -> String {
     out
 }
 
+/// A document's URL: the page's, a frame's, or about:blank.
+fn doc_url(s: &State, doc: NodeId) -> String {
+    if doc == ROOT {
+        s.url.clone()
+    } else {
+        s.doc_urls.get(&doc).cloned().unwrap_or_else(|| "about:blank".into())
+    }
+}
+
+/// The document's base URL: its first `<base href>`, resolved against its URL.
+pub fn base_url(dom: &Dom, url: &str) -> String {
+    base_url_in(dom, ROOT, url)
+}
+
+fn base_url_in(dom: &Dom, doc: NodeId, url: &str) -> String {
+    let mut stack: Vec<NodeId> = dom.children(doc).iter().rev().copied().collect();
+    while let Some(n) = stack.pop() {
+        if dom.tag(n) == Some("base") {
+            if let Some(h) = dom.attr(n, "href") {
+                return volant_core::url::resolve(url, h).unwrap_or_else(|| url.to_string());
+            }
+        }
+        stack.extend(dom.children(n).iter().rev());
+    }
+    url.to_string()
+}
+
+impl State {
+    /// [`base_url`] for the page, worked out again only after a change.
+    fn base(&self) -> String {
+        let mut c = self.base_cache.borrow_mut();
+        if let Some((g, u, b)) = &*c {
+            if *g == self.generation && *u == self.url {
+                return b.clone();
+            }
+        }
+        let b = base_url(&self.dom, &self.url);
+        *c = Some((self.generation, self.url.clone(), b.clone()));
+        b
+    }
+}
+
 /// Descendants of `id` in document order (not `id` itself).
 fn descendants(dom: &Dom, id: NodeId) -> Vec<NodeId> {
     let mut out = Vec::new();
@@ -1047,6 +1176,7 @@ fn proto_for(st: &S, id: NodeId) -> Obj {
     let s = st.borrow();
     let p = s.protos.as_ref().expect("protos");
     match &s.dom.nodes[id as usize].data {
+        Data::Document if s.documents.get(&id).is_some_and(|t| t != "text/html") => p.xml_document.clone(),
         Data::Document => p.html_document.clone(),
         Data::Text(_) => p.text.clone(),
         Data::Comment(_) => p.comment.clone(),
@@ -1054,7 +1184,17 @@ fn proto_for(st: &S, id: NodeId) -> Obj {
         Data::Pi { .. } => p.pi.clone(),
         Data::Element { name, .. } if &**name == FRAGMENT => p.fragment.clone(),
         Data::Element { name, .. } if name.starts_with('#') => p.node.clone(),
-        Data::Element { name, .. } => p.by_tag.get(&**name).unwrap_or(&p.html_element).clone(),
+        Data::Element { name, .. } => {
+            let (ns, prefix) = ns_of(&s.dom, id);
+            let local = if prefix.is_some() { name.split_once(':').map_or(&**name, |(_, l)| l) } else { name };
+            match ns {
+                // Unknown HTML elements are HTMLUnknownElements, unless they could be custom elements.
+                Some(HTML_NS) => p.by_tag.get(local).unwrap_or(if local.contains('-') { &p.html_element } else { &p.unknown }).clone(),
+                Some(SVG_NS) => p.svg_tags.get(local).unwrap_or(&p.svg).clone(),
+                Some(MATHML_NS) => p.mathml.clone(),
+                _ => p.element.clone(),
+            }
+        }
     }
 }
 
@@ -1385,7 +1525,7 @@ fn is_js(dom: &Dom, id: NodeId) -> bool {
 fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
     let (src, text, url, host) = {
         let s = st.borrow();
-        (s.dom.attr(id, "src").map(|x| resolve_url(&s.url, x)), s.dom.text(id), s.url.clone(), s.host.clone())
+        (s.dom.attr(id, "src").map(|x| resolve_url(&s.base(), x)), s.dom.text(id), s.url.clone(), s.host.clone())
     };
     match src {
         Some(abs) => match host.get_for(&abs, &url) {
@@ -1496,13 +1636,25 @@ fn inserted(i: &mut Interp, st: &S, node: NodeId) {
         }
         let mut all = vec![node];
         all.extend(descendants(&s.dom, node));
-        all.into_iter().filter(|&n| s.dom.tag(n) == Some("script") && !s.ran.contains(&n) && is_js(&s.dom, n)).collect()
+        all.into_iter().filter(|&n| matches!(s.dom.tag(n), Some("script" | "iframe")) && !s.ran.contains(&n)).collect()
     };
+    // Frames get their documents as they're connected.
+    let (frames, new): (Vec<NodeId>, Vec<NodeId>) = new.into_iter().partition(|&n| st.borrow().dom.tag(n) == Some("iframe"));
+    let new: Vec<NodeId> = new.into_iter().filter(|&n| is_js(&st.borrow().dom, n)).collect();
+    if !frames.is_empty() {
+        let hook = i.global_obj.borrow().get_own("__frameInserted").cloned();
+        if let Some(Slot::Data(hook)) = hook {
+            for f in frames {
+                let el = wrap(i, st, f);
+                let _ = i.call(&hook, Value::Undefined, vec![el]);
+            }
+        }
+    }
     // Their files all start downloading now, side by side, as browsers do; each
     // script runs when its turn comes (an inserted script is async).
     let (urls, page, host) = {
         let s = st.borrow();
-        let urls: Vec<String> = new.iter().filter_map(|&n| s.dom.attr(n, "src")).map(|x| resolve_url(&s.url, x)).filter(|u| u.starts_with("http://") || u.starts_with("https://")).collect();
+        let urls: Vec<String> = new.iter().filter_map(|&n| s.dom.attr(n, "src")).map(|x| resolve_url(&s.base(), x)).filter(|u| u.starts_with("http://") || u.starts_with("https://")).collect();
         (urls, s.url.clone(), s.host.clone())
     };
     if !urls.is_empty() {
@@ -1631,7 +1783,7 @@ fn submit(i: &mut Interp, st: &S, form: NodeId, submitter: Option<NodeId>) {
         let over = submitter.and_then(|b| dom.attr(b, &format!("form{name}"))).filter(|v| !v.trim().is_empty());
         over.or_else(|| dom.attr(form, name)).map(|v| v.trim().to_string())
     };
-    let action = attr("action").filter(|a| !a.is_empty()).map(|a| resolve_url(&s.url, &a)).unwrap_or_else(|| s.url.clone());
+    let action = attr("action").filter(|a| !a.is_empty()).map(|a| resolve_url(&s.base(), &a)).unwrap_or_else(|| s.url.clone());
     let method = attr("method").map(|m| m.to_ascii_uppercase()).filter(|m| m == "POST" || m == "DIALOG").unwrap_or_else(|| "GET".into());
     if method == "DIALOG" {
         return;
@@ -1833,7 +1985,7 @@ fn activate(i: &mut Interp, st: &S, target: NodeId) {
                     match href.trim().strip_prefix("javascript:") {
                         Some(code) => Act::Script(code.to_string()),
                         None => {
-                            let abs = resolve_url(&s.url, href);
+                            let abs = resolve_url(&s.base(), href);
                             // Another place on this page: no new page, just the address and a scroll.
                             let same_doc = abs.split('#').next() == s.url.split('#').next() && href.contains('#');
                             if same_doc { Act::Hash(abs) } else { Act::Link(abs) }
@@ -1986,6 +2138,7 @@ fn install(i: &mut Interp, st: &S) {
     let node_list = mk(i, Some(i.array_proto.clone()));
     // Each element interface: (name, its tags, the interface it extends).
     let mut by_tag: HashMap<&'static str, Obj> = HashMap::new();
+    let mut svg_tags: HashMap<&'static str, Obj> = HashMap::new();
     let mut ifaces: Vec<(&'static str, Obj)> = Vec::new();
     let media = mk(i, Some(html_element.clone()));
     let svg = mk(i, Some(element.clone()));
@@ -2001,22 +2154,32 @@ fn install(i: &mut Interp, st: &S) {
             "mathml" => &mathml,
             _ => &html_element,
         };
+        let is_svg = parent.as_ptr() == svg.as_ptr() || parent.as_ptr() == svg_graphics.as_ptr();
         let proto = mk(i, Some(parent.clone()));
         for t in tags.iter() {
-            by_tag.entry(t).or_insert_with(|| proto.clone());
+            if is_svg {
+                svg_tags.entry(t).or_insert_with(|| proto.clone());
+            } else {
+                by_tag.entry(t).or_insert_with(|| proto.clone());
+            }
         }
         ifaces.push((name, proto));
     }
-    for t in ["math", "mi", "mo", "mn", "mrow", "msup", "msub", "mfrac", "msqrt", "mtext", "semantics", "annotation"] {
-        by_tag.insert(t, mathml.clone());
+    // HTML's elements that are plain HTMLElements.
+    for t in HTML_PLAIN {
+        by_tag.entry(t).or_insert_with(|| html_element.clone());
     }
-    for t in ["blink", "marquee-unknown"] {
-        by_tag.insert(t, unknown.clone());
-    }
+    let xml_document = mk(i, Some(document.clone()));
     st.borrow_mut().protos = Some(Protos {
         html_element: html_element.clone(),
         by_tag,
+        svg_tags,
+        element: element.clone(),
+        svg: svg.clone(),
+        mathml: mathml.clone(),
+        unknown: unknown.clone(),
         html_document: html_document.clone(),
+        xml_document: xml_document.clone(),
         node: node.clone(),
         text: text.clone(),
         comment: comment.clone(),
@@ -2065,6 +2228,7 @@ fn install(i: &mut Interp, st: &S) {
     let _ = element_ctor;
     ctor(i, "HTMLElement", &html_element);
     ctor(i, "HTMLDocument", &html_document);
+    ctor(i, "XMLDocument", &xml_document);
     ctor(i, "NodeList", &node_list);
     node_list.borrow_mut().set_own("\0@toStringTag", str_val("NodeList"));
     def(i, &node_list, "item", |i, t, a| {
@@ -2255,7 +2419,7 @@ fn install(i: &mut Interp, st: &S) {
             Data::Doctype { name, .. } => name.to_string(),
             Data::Pi { target, .. } => target.to_string(),
             Data::Element { name, .. } if name.starts_with('#') => name.to_string(),
-            Data::Element { name, .. } => name.to_ascii_uppercase(),
+            Data::Element { .. } => tag_name(&s, id),
         }))
     });
     let parent_of = |st: &S, id: NodeId| -> Option<NodeId> {
@@ -2695,9 +2859,17 @@ fn install(i: &mut Interp, st: &S) {
     });
 
     // ---------------------------------------------------------- Element
-    getter(i, st, &element, "tagName", |_i, st, id| Ok(str_val(&tag_of(&st.borrow().dom, id).to_ascii_uppercase())));
-    getter(i, st, &element, "localName", |_i, st, id| Ok(str_val(&tag_of(&st.borrow().dom, id))));
-    getter(i, st, &element, "namespaceURI", |_i, _st, _id| Ok(str_val("http://www.w3.org/1999/xhtml")));
+    getter(i, st, &element, "tagName", |_i, st, id| Ok(str_val(&tag_name(&st.borrow(), id))));
+    getter(i, st, &element, "localName", |_i, st, id| {
+        let s = st.borrow();
+        let name = tag_of(&s.dom, id);
+        Ok(str_val(match ns_of(&s.dom, id).1 {
+            Some(_) => name.split_once(':').map_or(name.as_str(), |(_, l)| l),
+            None => &name,
+        }))
+    });
+    getter(i, st, &element, "namespaceURI", |_i, st, id| Ok(ns_of(&st.borrow().dom, id).0.map(str_val).unwrap_or(Value::Null)));
+    getter(i, st, &element, "prefix", |_i, st, id| Ok(ns_of(&st.borrow().dom, id).1.map(str_val).unwrap_or(Value::Null)));
     method(i, st, &element, "getAttribute", |i, st, id, a| {
         let k = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
         if k == "style" {
@@ -2776,17 +2948,17 @@ fn install(i: &mut Interp, st: &S) {
         }
         Ok(i.array(list))
     });
-    // Reflected string attributes.
-    for (prop, attr) in [
-        ("id", "id"), ("className", "class"), ("title", "title"), ("lang", "lang"), ("dir", "dir"), ("name", "name"), ("type", "type"),
+    // Reflected string attributes: Element's own, then HTML's (not on SVG or MathML elements).
+    for (proto, prop, attr) in [("id", "id"), ("className", "class"), ("role", "role"), ("slot", "slot")].map(|(p, a)| (&element, p, a)).into_iter().chain([
+        ("title", "title"), ("lang", "lang"), ("dir", "dir"), ("name", "name"), ("type", "type"),
         ("placeholder", "placeholder"), ("alt", "alt"), ("rel", "rel"), ("target", "target"), ("method", "method"), ("htmlFor", "for"),
-        ("role", "role"), ("slot", "slot"), ("download", "download"), ("accept", "accept"), ("autocomplete", "autocomplete"), ("pattern", "pattern"),
+        ("download", "download"), ("accept", "accept"), ("autocomplete", "autocomplete"), ("pattern", "pattern"),
         ("min", "min"), ("max", "max"), ("step", "step"), ("charset", "charset"), ("content", "content"), ("media", "media"), ("sizes", "sizes"), ("srcset", "srcset"),
-    ] {
+    ].map(|(p, a)| (&html_element, p, a))) {
         accessor(
             i,
             st,
-            &element,
+            proto,
             prop,
             move |_i, st, id| Ok(str_val(st.borrow().dom.attr(id, attr).unwrap_or(""))),
             move |i, st, id, v| {
@@ -2806,7 +2978,7 @@ fn install(i: &mut Interp, st: &S) {
         accessor(
             i,
             st,
-            &element,
+            &html_element,
             prop,
             move |_i, st, id| Ok(Value::Bool(st.borrow().dom.attr(id, attr).is_some())),
             move |_i, st, id, v| {
@@ -2833,7 +3005,8 @@ fn install(i: &mut Interp, st: &S) {
             move |_i, st, id| {
                 let s = st.borrow();
                 Ok(str_val(&match s.dom.attr(id, attr) {
-                    Some(v) => resolve_url(&s.url, v),
+                    // A URL that doesn't parse comes back as written.
+                    Some(v) => volant_core::url::resolve(&s.base(), v).unwrap_or_else(|| v.to_string()),
                     None if attr == "action" => s.url.clone(),
                     None => String::new(),
                 }))
@@ -3011,6 +3184,66 @@ fn install(i: &mut Interp, st: &S) {
             Ok(token_list(i, &st2, &el, id, &attr))
         });
         i.global_obj.borrow_mut().set_own("__tokenList", f);
+    }
+    {
+        // URL Standard natives behind URL and URLSearchParams.
+        fn parts(i: &mut Interp, u: &volant_core::url::Url) -> Value {
+            let opt = |p: &str, v: &Option<String>| match v.as_deref() {
+                None | Some("") => String::new(),
+                Some(x) => format!("{p}{x}"),
+            };
+            let items = [
+                u.href(),
+                u.origin(),
+                format!("{}:", u.scheme),
+                u.username.clone(),
+                u.password.clone(),
+                u.host_port(),
+                u.host.clone().unwrap_or_default(),
+                u.port.map(|p| p.to_string()).unwrap_or_default(),
+                u.pathname(),
+                opt("?", &u.query),
+                opt("#", &u.fragment),
+                u.query.clone().unwrap_or_default(),
+            ];
+            let v = items.iter().map(|x| str_val(x)).collect();
+            i.array(v)
+        }
+        let f = i.native(|i, _t, a| {
+            let input = i.to_str(&arg(&a, 0))?.to_string();
+            let base = match arg(&a, 1) {
+                Value::Undefined => None,
+                b => match volant_core::url::parse(&i.to_str(&b)?, None) {
+                    Some(u) => Some(u),
+                    None => return Ok(Value::Null),
+                },
+            };
+            Ok(match volant_core::url::parse(&input, base.as_ref()) {
+                Some(u) => parts(i, &u),
+                None => Value::Null,
+            })
+        });
+        i.global_obj.borrow_mut().set_own("__urlParse", f);
+        let f = i.native(|i, _t, a| {
+            let href = i.to_str(&arg(&a, 0))?.to_string();
+            let which = i.to_str(&arg(&a, 1))?.to_string();
+            let value = i.to_str(&arg(&a, 2))?.to_string();
+            let Some(mut u) = volant_core::url::parse(&href, None) else { return Ok(Value::Null) };
+            u.set(&which, &value);
+            Ok(parts(i, &u))
+        });
+        i.global_obj.borrow_mut().set_own("__urlSet", f);
+        let f = i.native(|i, _t, a| {
+            let input = i.to_str(&arg(&a, 0))?.to_string();
+            let pairs = volant_core::url::form_parse(&input).into_iter().map(|(k, v)| i.array(vec![str_val(&k), str_val(&v)])).collect();
+            Ok(i.array(pairs))
+        });
+        i.global_obj.borrow_mut().set_own("__formParse", f);
+        let f = i.native(|i, _t, a| {
+            let input = i.to_str(&arg(&a, 0))?.to_string();
+            Ok(str_val(&volant_core::url::form_encode(&input)))
+        });
+        i.global_obj.borrow_mut().set_own("__formEncode", f);
     }
     {
         // Encoding Standard natives behind TextDecoder and TextEncoder.
@@ -3549,11 +3782,16 @@ fn install(i: &mut Interp, st: &S) {
             Ok(())
         },
     );
-    getter(i, st, &document, "URL", |_i, st, id| Ok(if id == ROOT { str_val(&st.borrow().url) } else { str_val("about:blank") }));
-    getter(i, st, &document, "documentURI", |_i, st, id| Ok(if id == ROOT { str_val(&st.borrow().url) } else { str_val("about:blank") }));
-    getter(i, st, &document, "baseURI", |_i, st, _id| Ok(str_val(&st.borrow().url)));
+    getter(i, st, &document, "URL", |_i, st, id| Ok(str_val(&doc_url(&st.borrow(), id))));
+    getter(i, st, &document, "documentURI", |_i, st, id| Ok(str_val(&doc_url(&st.borrow(), id))));
+    getter(i, st, &document, "baseURI", |_i, st, id| {
+        let s = st.borrow();
+        Ok(str_val(&if id == ROOT { s.base() } else { base_url_in(&s.dom, id, &doc_url(&s, id)) }))
+    });
     getter(i, st, &document, "referrer", |_i, _st, _id| Ok(str_val("")));
-    getter(i, st, &document, "characterSet", |_i, _st, _id| Ok(str_val("UTF-8")));
+    for name in ["characterSet", "charset", "inputEncoding"] {
+        getter(i, st, &document, name, |_i, _st, _id| Ok(str_val("UTF-8")));
+    }
     getter(i, st, &document, "compatMode", |_i, _st, _id| Ok(str_val("CSS1Compat")));
     getter(i, st, &document, "contentType", |_i, st, id| Ok(str_val(st.borrow().documents.get(&id).map(String::as_str).unwrap_or("text/html"))));
     {
@@ -3569,11 +3807,33 @@ fn install(i: &mut Interp, st: &S) {
         let st3 = st.clone();
         let f = i.native(move |i, _t, a| {
             let markup = i.to_str(&arg(&a, 0))?;
-            let mut parsed = html::parse_with_scripts(&markup);
-            ensure_structure(&mut parsed);
+            let ty = match arg(&a, 1) {
+                Value::Undefined => "text/html".to_string(),
+                v => i.to_str(&v)?.to_string(),
+            };
+            let url = match arg(&a, 2) {
+                Value::Undefined => None,
+                v => Some(i.to_str(&v)?.to_string()),
+            };
+            let xml = ty != "text/html" && (ty.ends_with("/xml") || ty.ends_with("+xml"));
+            let mut parsed = if xml {
+                volant_core::xml::parse(&markup).unwrap_or_else(|e| {
+                    // Not well-formed: the document says so, as browsers do.
+                    let msg = format!("<parsererror xmlns=\"http://www.mozilla.org/newlayout/xml/parsererror.xml\">XML Parsing Error: {}</parsererror>", e.replace('<', "&lt;"));
+                    volant_core::xml::parse(&msg).expect("parsererror")
+                })
+            } else {
+                html::parse_with_scripts(&markup)
+            };
+            if ty == "text/html" {
+                ensure_structure(&mut parsed);
+            }
             let mut s = st3.borrow_mut();
             let d = new_node(&mut s.dom, Data::Document);
-            s.documents.insert(d, "text/html".into());
+            s.documents.insert(d, ty);
+            if let Some(u) = url {
+                s.doc_urls.insert(d, u);
+            }
             let frag = import(&mut s.dom, &parsed);
             for c in s.dom.children(frag).to_vec() {
                 let _ = insert(&mut s.dom, d, c, None);
@@ -3643,19 +3903,33 @@ fn install(i: &mut Interp, st: &S) {
     }
     method(i, st, &document, "createElement", |i, st, doc, a| {
         let t = i.to_str(&arg(&a, 0))?;
-        if !is_xml_name(&t) {
+        if !is_element_local_name(&t) {
             return i.throw("InvalidCharacterError", "not a valid element name");
         }
         // HTML documents lower-case the name; XML ones keep it.
-        let html = st.borrow().documents.get(&owner_doc(&st.borrow(), doc)).is_none_or(|t| t == "text/html");
+        let ty = st.borrow().documents.get(&owner_doc(&st.borrow(), doc)).cloned();
+        let html = ty.as_deref().is_none_or(|t| t == "text/html");
         let t = if html { t.to_ascii_lowercase() } else { t.to_string() };
         let n = new_node(&mut st.borrow_mut().dom, Data::Element { name: t.into(), attrs: Vec::new() });
+        // Elements of XML documents (other than XHTML) are in no namespace.
+        if !html && ty.as_deref() != Some("application/xhtml+xml") {
+            st.borrow_mut().dom.ns.insert(n, (None, None));
+        }
         made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
     method(i, st, &document, "createElementNS", |i, st, doc, a| {
-        let t = i.to_str(&arg(&a, 1))?.to_ascii_lowercase();
-        let n = new_node(&mut st.borrow_mut().dom, Data::Element { name: t.into(), attrs: Vec::new() });
+        let namespace = match arg(&a, 0) {
+            Value::Null | Value::Undefined => None,
+            v => Some(i.to_str(&v)?.to_string()).filter(|n| !n.is_empty()),
+        };
+        let qname = i.to_str(&arg(&a, 1))?.to_string();
+        let (prefix, _local) = match validate_and_extract(namespace.as_deref(), &qname) {
+            Ok(x) => x,
+            Err((name, msg)) => return i.throw(name, msg),
+        };
+        let n = new_node(&mut st.borrow_mut().dom, Data::Element { name: qname.into(), attrs: Vec::new() });
+        st.borrow_mut().dom.ns.insert(n, (namespace.map(Into::into), prefix.map(Into::into)));
         made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
@@ -3689,12 +3963,16 @@ fn install(i: &mut Interp, st: &S) {
         let st2 = st.clone();
         let f = i.native(move |i, _t, a| {
             let name = i.to_str(&arg(&a, 0))?;
-            if !is_qualified_name(&name) {
+            if !is_doctype_name(&name) {
                 return i.throw("InvalidCharacterError", "not a valid doctype name");
             }
             let public_id = i.to_str(&arg(&a, 1))?.to_string();
             let system_id = i.to_str(&arg(&a, 2))?.to_string();
             let n = new_node(&mut st2.borrow_mut().dom, Data::Doctype { name: name.to_string().into(), public_id, system_id });
+            // Made by the document whose DOMImplementation was asked.
+            if let Some(doc) = node_of(&arg(&a, 3)) {
+                made_by(&st2, doc, n);
+            }
             Ok(wrap(i, &st2, n))
         });
         i.global_obj.borrow_mut().set_own("__createDocumentType", f);
@@ -3950,6 +4228,13 @@ const ELEMENT_INTERFACES: &[(&str, &[&str], &str)] = &[
     ("SVGClipPathElement", &["clippath", "clipPath"], "svg"), ("SVGMaskElement", &["mask"], "svg"), ("SVGTitleElement", &["title-svg-unused"], "svg"),
 ];
 
+/// HTML elements whose interface is HTMLElement itself.
+const HTML_PLAIN: &[&str] = &[
+    "abbr", "acronym", "address", "article", "aside", "b", "basefont", "bdi", "bdo", "big", "center", "cite", "code", "dd", "dfn", "dt", "em", "figcaption",
+    "figure", "footer", "header", "hgroup", "i", "kbd", "main", "mark", "nav", "nobr", "noembed", "noframes", "noscript", "plaintext", "rb", "rp", "rt", "rtc",
+    "ruby", "s", "samp", "search", "section", "small", "strike", "sub", "summary", "sup", "tt", "u", "var", "wbr",
+];
+
 /// Events with an `on…` property on HTMLElement's prototype.
 const EVENT_HANDLERS: &[&str] = &[
     "abort", "blur", "cancel", "change", "click", "close", "contextmenu", "dblclick", "drag", "dragend", "dragenter", "dragleave", "dragover", "dragstart", "drop",
@@ -4144,6 +4429,8 @@ pub struct Runtime {
     pub state: S,
     started: std::time::Instant,
     preload: std::sync::Arc<Preload>,
+    /// Steps each script, timer or event may take before it's stopped.
+    pub budget: u64,
 }
 
 const PRELUDE: &str = include_str!("prelude.js");
@@ -4156,7 +4443,7 @@ impl Runtime {
         // Everything the page will need first starts on its way now, all at once.
         let preload = std::sync::Arc::new(Preload::default());
         if let Some(fetch) = host.background() {
-            preload.start(subresources(&dom, url), url, fetch);
+            preload.start(subresources(&dom, &base_url(&dom, url)), url, fetch);
         }
         let host: Rc<dyn Host> = Rc::new(Preloading { inner: host, preload: preload.clone() });
         let state = Rc::new(RefCell::new(State {
@@ -4185,7 +4472,9 @@ impl Runtime {
             protos: None,
             generation: 1,
             computed: None,
+            base_cache: RefCell::new(None),
             owners: HashMap::new(),
+            doc_urls: HashMap::new(),
             documents: HashMap::new(),
         }));
         let mut interp = Interp::new();
@@ -4198,7 +4487,7 @@ impl Runtime {
         if let Err(e) = interp.run(PRELUDE) {
             interp.errors.push(format!("prelude: {e}"));
         }
-        Runtime { interp, state, started: std::time::Instant::now(), preload }
+        Runtime { interp, state, started: std::time::Instant::now(), preload, budget: BUDGET }
     }
 
     /// The page's network (preloaded files come from the preload), for its style sheets and the like.
@@ -4237,14 +4526,20 @@ impl Runtime {
             if !self.state.borrow_mut().ran.insert(id) {
                 continue;
             }
-            self.interp.reset_steps(BUDGET);
+            self.interp.reset_steps(self.budget);
             execute(&mut self.interp, &self.state, id);
         }
         self.state.borrow_mut().current_script = None;
-        self.interp.reset_steps(BUDGET);
+        self.interp.reset_steps(self.budget);
         let i = &mut self.interp;
         fire(i, &self.state, ROOT, "readystatechange", false);
         fire(i, &self.state, ROOT, "DOMContentLoaded", true);
+        // The page's frames load first (same-origin ones are fetched now).
+        let start = i.global_obj.borrow().get_own("__startFrames").cloned();
+        if let Some(Slot::Data(f)) = start {
+            let _ = i.call(&f, Value::Undefined, Vec::new());
+            i.run_microtasks();
+        }
         fire(i, &self.state, WINDOW, "load", false);
         fire(i, &self.state, WINDOW, "pageshow", false);
         self.interp.run_microtasks();
@@ -4253,7 +4548,7 @@ impl Runtime {
 
     /// Runs timers due within the next `ms` of virtual time.
     fn settle(&mut self, ms: f64) {
-        self.interp.reset_steps(BUDGET);
+        self.interp.reset_steps(self.budget);
         let until = self.interp.now + ms;
         self.interp.run_jobs(until, 20_000);
         self.interp.now = self.interp.now.max(until);
@@ -4275,7 +4570,7 @@ impl Runtime {
 
     /// A click on a node (from hit testing a snapshot).
     pub fn click(&mut self, node: NodeId) {
-        self.interp.reset_steps(BUDGET);
+        self.interp.reset_steps(self.budget);
         let target = {
             let s = self.state.borrow();
             if node as usize >= s.dom.nodes.len() {
@@ -4307,7 +4602,7 @@ impl Runtime {
 
     /// Typed text goes into the focused field.
     pub fn type_text(&mut self, text: &str) {
-        self.interp.reset_steps(BUDGET);
+        self.interp.reset_steps(self.budget);
         let Some(f) = self.state.borrow().focus else { return };
         if !is_text_field(&self.state.borrow().dom, f) {
             return;
@@ -4341,7 +4636,7 @@ impl Runtime {
 
     /// A special key: "Backspace", "Delete", "Enter", "Tab", "Escape", the arrows, "Home" or "End".
     pub fn key(&mut self, key: &str) {
-        self.interp.reset_steps(BUDGET);
+        self.interp.reset_steps(self.budget);
         let target = {
             let s = self.state.borrow();
             s.focus.or_else(|| s.dom.find("body")).unwrap_or(ROOT)
@@ -4488,7 +4783,7 @@ impl Runtime {
 
     /// The person picked the `index`th option (counting options only, not group headers).
     pub fn choose(&mut self, select: NodeId, index: usize) {
-        self.interp.reset_steps(BUDGET);
+        self.interp.reset_steps(self.budget);
         let changed = {
             let mut s = self.state.borrow_mut();
             if s.dom.tag(select) != Some("select") {
@@ -4526,7 +4821,7 @@ impl Runtime {
         if old == node {
             return false;
         }
-        self.interp.reset_steps(BUDGET);
+        self.interp.reset_steps(self.budget);
         let (old_chain, new_chain) = {
             let s = self.state.borrow();
             (old.map(|n| element_chain(&s.dom, n)).unwrap_or_default(), node.map(|n| element_chain(&s.dom, n)).unwrap_or_default())
@@ -4664,7 +4959,7 @@ impl Runtime {
     pub fn snapshot(&mut self) -> Snapshot {
         flush(&mut self.interp, &self.state);
         let s = self.state.borrow();
-        let mut dom = Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }] };
+        let mut dom = Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default() };
         let mut map = vec![ROOT];
         // Interaction states, marked on the copy for `:hover`, `:focus`, `:focus-within` and `:target`.
         let mut marks: HashMap<NodeId, Vec<&'static str>> = HashMap::new();

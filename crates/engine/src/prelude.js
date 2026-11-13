@@ -100,93 +100,129 @@
   g.AbortController = AbortController
 
   // ---------------------------------------------------------------- URLs
-  const enc = s => encodeURIComponent(s).replace(/%20/g, '+').replace(/[!'()~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
-  const dec = s => { try { return decodeURIComponent(s.replace(/\+/g, ' ')) } catch (_) { return s } }
+  // USVString conversion. Strings here are UTF-8 underneath, so lone
+  // surrogates are already U+FFFD and this is just ToString.
+  const usv = String
+  const needs = (n, k, what) => { if (n < k) throw new TypeError(what + ': ' + k + ' argument' + (k > 1 ? 's' : '') + ' required, but only ' + n + ' present.') }
   class URLSearchParams {
     constructor(init) {
       this._p = []
       this._owner = null
-      if (init == null) return
-      if (typeof init === 'string') {
-        for (const part of init.replace(/^\?/, '').split('&')) {
-          if (!part) continue
-          const i = part.indexOf('=')
-          this._p.push(i < 0 ? [dec(part), ''] : [dec(part.slice(0, i)), dec(part.slice(i + 1))])
+      if (init === undefined) return
+      if (init !== null && (typeof init === 'object' || typeof init === 'function')) {
+        const it = init[Symbol.iterator]
+        if (it !== undefined) {
+          if (typeof it !== 'function') throw new TypeError("URLSearchParams: the iterator isn't callable")
+          for (const pair of init) {
+            if (pair === null || typeof pair !== 'object' && typeof pair !== 'function' || typeof pair[Symbol.iterator] !== 'function') throw new TypeError('URLSearchParams: each pair must be a sequence')
+            const kv = Array.from(pair)
+            if (kv.length !== 2) throw new TypeError('URLSearchParams: each pair must hold a name and a value')
+            this._p.push([usv(kv[0]), usv(kv[1])])
+          }
+        } else {
+          for (const k of Reflect.ownKeys(init)) {
+            if (typeof k !== 'string') continue
+            const d = Object.getOwnPropertyDescriptor(init, k)
+            if (d && d.enumerable) this._p.push([usv(k), usv(init[k])])
+          }
         }
-      } else if (init instanceof URLSearchParams) {
-        this._p = init._p.map(x => x.slice())
-      } else if (Array.isArray(init) || typeof init[Symbol.iterator] === 'function') {
-        for (const [k, v] of init) this._p.push([String(k), String(v)])
-      } else {
-        for (const k of Object.keys(init)) this._p.push([k, String(init[k])])
+        return
       }
+      let str = usv(init)
+      if (str[0] === '?') str = str.slice(1)
+      this._p = __formParse(str)
     }
-    _changed() { if (this._owner) this._owner._setSearch(this.toString()) }
+    _changed() { const o = this._owner; if (o) { const s = UrlState.get(o); s.p = __urlSet(s.p[0], 'query', this.toString()) } }
     get size() { return this._p.length }
-    append(k, v) { this._p.push([String(k), String(v)]); this._changed() }
-    delete(k) { this._p = this._p.filter(x => x[0] !== k); this._changed() }
-    get(k) { const f = this._p.find(x => x[0] === k); return f ? f[1] : null }
-    getAll(k) { return this._p.filter(x => x[0] === k).map(x => x[1]) }
-    has(k) { return this._p.some(x => x[0] === k) }
-    set(k, v) {
-      const i = this._p.findIndex(x => x[0] === k)
-      if (i < 0) this._p.push([String(k), String(v)])
-      else { this._p[i][1] = String(v); this._p = this._p.filter((x, j) => j <= i || x[0] !== k) }
+    append(k, v) { needs(arguments.length, 2, "URLSearchParams.append"); this._p.push([usv(k), usv(v)]); this._changed() }
+    delete(k, v) {
+      needs(arguments.length, 1, 'URLSearchParams.delete'); k = usv(k)
+      if (v === undefined) this._p = this._p.filter(x => x[0] !== k)
+      else { v = usv(v); this._p = this._p.filter(x => x[0] !== k || x[1] !== v) }
       this._changed()
     }
-    sort() { this._p.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); this._changed() }
-    forEach(f, t) { for (const [k, v] of this._p) f.call(t, v, k, this) }
-    keys() { return this._p.map(x => x[0]).values() }
-    values() { return this._p.map(x => x[1]).values() }
-    entries() { return this._p.map(x => [x[0], x[1]]).values() }
-    [Symbol.iterator]() { return this.entries() }
-    toString() { return this._p.map(([k, v]) => enc(k) + '=' + enc(v)).join('&') }
+    get(k) { needs(arguments.length, 1, 'URLSearchParams.get'); k = usv(k); const f = this._p.find(x => x[0] === k); return f ? f[1] : null }
+    getAll(k) { needs(arguments.length, 1, 'URLSearchParams.getAll'); k = usv(k); return this._p.filter(x => x[0] === k).map(x => x[1]) }
+    has(k, v) {
+      needs(arguments.length, 1, 'URLSearchParams.has'); k = usv(k)
+      if (v === undefined) return this._p.some(x => x[0] === k)
+      v = usv(v); return this._p.some(x => x[0] === k && x[1] === v)
+    }
+    set(k, v) {
+      needs(arguments.length, 2, 'URLSearchParams.set'); k = usv(k); v = usv(v)
+      const i = this._p.findIndex(x => x[0] === k)
+      if (i < 0) this._p.push([k, v])
+      else { this._p[i][1] = v; this._p = this._p.filter((x, j) => j <= i || x[0] !== k) }
+      this._changed()
+    }
+    sort() {
+      // Stable, by UTF-16 code units of the names.
+      this._p = this._p.map((x, i) => [x, i]).sort((a, b) => (a[0][0] < b[0][0] ? -1 : a[0][0] > b[0][0] ? 1 : a[1] - b[1])).map(x => x[0])
+      this._changed()
+    }
+    forEach(f, t) {
+      if (typeof f !== 'function') throw new TypeError('URLSearchParams.forEach: the callback must be a function')
+      for (let i = 0; i < this._p.length; i++) { const [k, v] = this._p[i]; f.call(t, v, k, this) }
+    }
+    *_iter(kind) { for (let i = 0; i < this._p.length; i++) { const [k, v] = this._p[i]; yield kind === 0 ? k : kind === 1 ? v : [k, v] } }
+    keys() { return this._iter(0) }
+    values() { return this._iter(1) }
+    entries() { return this._iter(2) }
+    [Symbol.iterator]() { return this._iter(2) }
+    toString() { return this._p.map(([k, v]) => __formEncode(k) + '=' + __formEncode(v)).join('&') }
+    get [Symbol.toStringTag]() { return 'URLSearchParams' }
   }
+  Object.defineProperty(URLSearchParams.prototype, '_iter', { enumerable: false })
+  Object.defineProperty(URLSearchParams.prototype, '_changed', { enumerable: false })
   g.URLSearchParams = URLSearchParams
 
-  const URL_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*:)(?:\/\/(?:([^@/?#]*)@)?([^/?#:]*|\[[^\]]*\])(?::(\d*))?)?([^?#]*)(\?[^#]*)?(#.*)?$/
+  // A URL's state: the native parser's parts (href, origin, protocol,
+  // username, password, host, hostname, port, pathname, search, hash,
+  // query) and its URLSearchParams.
+  const UrlState = new WeakMap()
+  const urlState = u => { const s = UrlState.get(u); if (!s) throw new TypeError('Illegal invocation'); return s }
+  const syncParams = s => { s.params._p = __formParse(s.p[11]) }
   class URL {
     constructor(url, base) {
-      url = String(url)
-      if (base === undefined && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) throw new TypeError('Invalid URL: ' + url)
-      this._set(__resolve(url, base === undefined ? undefined : String(base)))
+      needs(arguments.length, 1, 'URL constructor')
+      const p = __urlParse(usv(url), base === undefined ? undefined : usv(base))
+      if (!p) throw new TypeError("URL constructor: " + String(url) + ' is not a valid URL.')
+      const params = new URLSearchParams()
+      params._owner = this
+      const s = { p, params }
+      UrlState.set(this, s)
+      syncParams(s)
     }
-    _set(href) {
-      const m = URL_RE.exec(href)
-      if (!m) throw new TypeError('Invalid URL: ' + href)
-      this.protocol = m[1].toLowerCase()
-      const auth = m[2] || ''
-      this.username = auth.split(':')[0] || ''
-      this.password = auth.split(':')[1] || ''
-      this.hostname = (m[3] || '').toLowerCase()
-      const defaultPort = { 'http:': '80', 'https:': '443' }[this.protocol]
-      this.port = m[4] && m[4] !== defaultPort ? m[4] : ''
-      this.pathname = m[5] || (m[3] !== undefined ? '/' : '')
-      this._search = m[6] && m[6] !== '?' ? m[6] : ''
-      this.hash = m[7] && m[7] !== '#' ? m[7] : ''
-      this._params = new URLSearchParams(this._search)
-      this._params._owner = this
+    get href() { return urlState(this).p[0] }
+    set href(v) {
+      const s = urlState(this)
+      const p = __urlParse(usv(v))
+      if (!p) throw new TypeError("URL.href: " + String(v) + ' is not a valid URL.')
+      s.p = p
+      syncParams(s)
     }
-    _setSearch(s) { this._search = s ? '?' + s : '' }
-    get search() { return this._search }
-    set search(s) { s = String(s); this._search = s && s !== '?' ? (s[0] === '?' ? s : '?' + s) : ''; this._params = new URLSearchParams(this._search); this._params._owner = this }
-    get searchParams() { return this._params }
-    get host() { return this.hostname + (this.port ? ':' + this.port : '') }
-    set host(h) { const [n, p] = String(h).split(':'); this.hostname = n; this.port = p || '' }
-    get origin() { return this.hostname ? this.protocol + '//' + this.host : 'null' }
-    get href() {
-      const auth = this.username ? this.username + (this.password ? ':' + this.password : '') + '@' : ''
-      const slashes = this.hostname || this.protocol === 'file:' ? '//' : ''
-      return this.protocol + slashes + auth + this.host + this.pathname + this._search + this.hash
-    }
-    set href(h) { this._set(__resolve(String(h))) }
-    toString() { return this.href }
-    toJSON() { return this.href }
-    static canParse(u, b) { try { new URL(u, b); return true } catch (_) { return false } }
-    static parse(u, b) { try { return new URL(u, b) } catch (_) { return null } }
-    static createObjectURL() { return 'blob:' + __url() + '#' + Math.random().toString(36).slice(2) }
+    get origin() { return urlState(this).p[1] }
+    get searchParams() { return urlState(this).params }
+    toString() { return urlState(this).p[0] }
+    toJSON() { return urlState(this).p[0] }
+    static canParse(u, b) { needs(arguments.length, 1, 'URL.canParse'); return __urlParse(usv(u), b === undefined ? undefined : usv(b)) !== null }
+    static parse(u, b) { needs(arguments.length, 1, 'URL.parse'); try { return new URL(u, b) } catch (_) { return null } }
+    static createObjectURL() { return 'blob:' + new URL(__url()).origin + '/' + Math.random().toString(36).slice(2) }
     static revokeObjectURL() {}
   }
+  ;['protocol', 'username', 'password', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach((k, n) => {
+    const idx = n + 2
+    Object.defineProperty(URL.prototype, k, {
+      get() { return urlState(this).p[idx] },
+      set(v) {
+        const s = urlState(this)
+        s.p = __urlSet(s.p[0], k, usv(v))
+        if (k === 'search') syncParams(s)
+      },
+      enumerable: true, configurable: true,
+    })
+  })
+  Object.defineProperty(URL.prototype, Symbol.toStringTag, { value: 'URL', configurable: true })
   g.URL = URL
   g.webkitURL = URL
 
@@ -203,6 +239,8 @@
   location.ancestorOrigins = []
   g.location = location
   define(document, 'location', () => location, v => __navigate(String(v)))
+  // Documents without a browsing context have no location.
+  Object.defineProperty(Document.prototype, 'location', { get() { return null }, set(_) {}, configurable: true, enumerable: true })
   const history = {
     length: 1, state: null, scrollRestoration: 'auto',
     pushState(state, _t, url) { this.state = state; if (url != null) __setURL(String(url)); this.length++ },
@@ -219,7 +257,7 @@
     deviceMemory: 8, webdriver: false, doNotTrack: '1', pdfViewerEnabled: false,
     clipboard: { writeText: () => Promise.resolve(), readText: () => Promise.resolve('') },
     permissions: { query: () => Promise.resolve({ state: 'prompt', onchange: null }) },
-    sendBeacon: () => true, vibrate: () => false, share: () => Promise.reject(new Error('NotAllowedError')),
+    sendBeacon(url) { if (!__urlParse(String(url), document.baseURI)) throw new TypeError('sendBeacon: ' + url + ' is not a valid URL.'); return true }, vibrate: () => false, share: () => Promise.reject(new Error('NotAllowedError')),
     javaEnabled: () => false,
   }
   g.screen = { width: 1512, height: 982, availWidth: 1512, availHeight: 950, colorDepth: 24, pixelDepth: 24, orientation: { type: 'landscape-primary', angle: 0, addEventListener: noop } }
@@ -233,7 +271,7 @@
   g.print = noop
   g.confirm = () => false
   g.prompt = () => null
-  g.open = () => null
+  g.open = (url = '') => { url = String(url); if (url !== '' && !__urlParse(url, document.baseURI)) throw new DOMException(url + ' is not a valid URL.', 'SyntaxError'); return null }
   g.focus = g.blur = g.close = g.stop = noop
   g.top = g.parent = g.frames = g
   g.opener = null
@@ -405,7 +443,7 @@
       this.upload = new EventTarget()
       this._type = ''
     }
-    open(method, url) { this._method = String(method).toUpperCase(); this._url = String(url); this._headers = new Headers(); this.readyState = 1 }
+    open(method, url) { this._method = String(method).toUpperCase(); this._url = String(url); if (!__urlParse(this._url, document.baseURI)) throw new DOMException(this._url + ' is not a valid URL.', 'SyntaxError'); this._headers = new Headers(); this.readyState = 1 }
     setRequestHeader(k, v) { (this._headers || (this._headers = new Headers())).append(k, v) }
     overrideMimeType() {}
     getResponseHeader(k) { return this._res ? this._res.get(k) : null }
@@ -619,16 +657,16 @@
     }
     createDocument(namespace, qualifiedName, doctype) {
       if (arguments.length < 2) throw new TypeError('createDocument needs 2 arguments')
-      const ns = namespace == null ? null : String(namespace)
+      const ns = namespace == null || namespace === '' ? null : String(namespace)
       const d = __newDocument(ns === NS.html ? 'application/xhtml+xml' : ns === NS.svg ? 'image/svg+xml' : 'application/xml')
       if (doctype != null) d.appendChild(doctype)
-      const q = qualifiedName == null ? '' : String(qualifiedName)
+      const q = qualifiedName === null ? '' : String(qualifiedName)
       if (q !== '') d.appendChild(d.createElementNS(ns, q))
       return d
     }
     createDocumentType(name, publicId, systemId) {
       if (arguments.length < 3) throw new TypeError('createDocumentType needs 3 arguments')
-      return __createDocumentType(name, publicId, systemId)
+      return __createDocumentType(name, publicId, systemId, this._doc)
     }
   }
   g.DOMImplementation = DOMImplementation
@@ -639,13 +677,11 @@
   })
   {
     const P = Document.prototype
-    const D = function Document() { if (!new.target) throw new TypeError("Constructor Document requires 'new'"); return __newDocument('application/xml') }
+    const D = function Document() { if (!new.target) throw new TypeError("Constructor Document requires 'new'"); const d = __newDocument('application/xml'); Object.setPrototypeOf(d, P); return d }
     D.prototype = P
     Object.defineProperty(P, 'constructor', { value: D, writable: true, configurable: true })
     Object.setPrototypeOf(D, g.Node)
     g.Document = D
-    g.XMLDocument = function XMLDocument() { throw new TypeError('Illegal constructor') }
-    g.XMLDocument.prototype = P
   }
   g.Image = function (w, h) { const i = document.createElement('img'); if (w) i.width = w; if (h) i.height = h; return i }
   g.Audio = function (src) { const a = document.createElement('audio'); if (src) a.src = src; return a }
@@ -661,7 +697,6 @@
       if (arguments.length < 2) throw new TypeError('parseFromString needs 2 arguments')
       type = String(type)
       if (!['text/html', 'text/xml', 'application/xml', 'application/xhtml+xml', 'image/svg+xml'].includes(type)) throw new TypeError('unsupported type ' + type)
-      // XML gets the HTML parser too, for now (tag names lose their case).
       return __parseDocument(String(markup), type)
     }
   }
@@ -1040,6 +1075,8 @@
   // ------------------------------------------------- node comparisons, hit tests
   Node.prototype.isEqualNode = function (o) {
     if (!o || o.nodeType !== this.nodeType || o.nodeName !== this.nodeName) return false
+    if (this.nodeType === 10) return o.publicId === this.publicId && o.systemId === this.systemId
+    if (this.nodeType === 1 && (o.namespaceURI !== this.namespaceURI || o.prefix !== this.prefix || o.localName !== this.localName)) return false
     if (this.nodeType !== 1) return o.nodeValue === this.nodeValue && (this.nodeType !== 11 && this.nodeType !== 9 || sameKids(this, o))
     const a = this.attributes, b = o.attributes
     if (a.length !== b.length) return false
@@ -1133,14 +1170,17 @@
   }
 
   // <a> and <area> expose the parts of their address, like location does.
+  // HTMLHyperlinkElementUtils: the href attribute parsed against the document's base URL.
+  const URL_PART = { origin: 1, protocol: 2, username: 3, password: 4, host: 5, hostname: 6, port: 7, pathname: 8, search: 9, hash: 10 }
+  const linkURL = el => { const a = el.getAttribute('href'); return a === null ? null : __urlParse(a, document.baseURI) }
   for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement]) {
     if (!C) continue
     for (const k of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) {
       if (Object.getOwnPropertyDescriptor(C.prototype, k)) continue
       Object.defineProperty(C.prototype, k, {
         configurable: true, enumerable: true,
-        get() { const h = this.href; if (!h) return k === 'origin' ? 'null' : ''; try { return new URL(h)[k] } catch (_) { return '' } },
-        set(v) { if (k === 'origin') return; try { const u = new URL(this.href); u[k] = v; this.setAttribute('href', u.href) } catch (_) {} },
+        get() { const r = linkURL(this); return r ? r[URL_PART[k]] : k === 'protocol' ? ':' : '' },
+        set(v) { if (k === 'origin') return; const r = linkURL(this); if (r) this.setAttribute('href', __urlSet(r[0], k, String(v))[0]) },
       })
     }
   }
@@ -1347,5 +1387,84 @@
         Object.defineProperty(C.prototype, prop, { get: d.get, set: d.set, configurable: true, enumerable: true })
       }
     }
+  }
+
+  // ---------------------------------------------------------------- frames
+  // Each iframe gets a document of its own: about:blank, its srcdoc, or its
+  // src when that's same-origin (scripts in it don't run). Its window shares
+  // this one's globals, with its own document and location.
+  {
+    const frames = new WeakMap()
+    const frameOf = el => {
+      let f = frames.get(el)
+      if (f) return f
+      f = { el, url: 'about:blank', doc: __parseDocument(''), blocked: false, gen: 0 }
+      const win = Object.create(g)
+      const loc = {
+        get href() { return f.url },
+        set href(v) { navigate(f, v) },
+        get origin() { const p = __urlParse(f.url); return p ? p[1] : 'null' },
+        get protocol() { const p = __urlParse(f.url); return p ? p[2] : '' },
+        get pathname() { const p = __urlParse(f.url); return p ? p[8] : '' },
+        get search() { const p = __urlParse(f.url); return p ? p[9] : '' },
+        get hash() { const p = __urlParse(f.url); return p ? p[10] : '' },
+        assign(v) { navigate(f, v) }, replace(v) { navigate(f, v) }, reload() {},
+        toString() { return f.url },
+      }
+      Object.defineProperties(win, {
+        document: { get: () => (f.blocked ? null : f.doc), configurable: true },
+        window: { get: () => win, configurable: true },
+        self: { get: () => win, configurable: true },
+        frames: { get: () => win, configurable: true },
+        parent: { get: () => g, configurable: true },
+        top: { get: () => g.top, configurable: true },
+        frameElement: { get: () => el, configurable: true },
+        location: { get: () => loc, set: v => navigate(f, v), configurable: true },
+      })
+      f.win = win
+      frames.set(el, f)
+      return f
+    }
+    const fireLoad = f => setTimeout(() => f.el.dispatchEvent(new Event('load')), 0)
+    const navigate = (f, v) => {
+      v = String(v)
+      const p = __urlParse(v, document.baseURI)
+      if (!p) throw new DOMException(v + ' is not a valid URL.', 'SyntaxError')
+      load(f, p[0])
+    }
+    const load = (f, href) => {
+      const gen = ++f.gen
+      if (href === 'about:blank') { f.url = href; f.blocked = false; f.doc = __parseDocument(''); fireLoad(f); return }
+      const p = __urlParse(href)
+      if (!p || p[1] !== location.origin) { f.url = href; f.blocked = true; fireLoad(f); return }
+      fetch(href).then(r => r.text().then(t => {
+        if (gen !== f.gen) return
+        const ty = (r.headers.get('content-type') || 'text/html').split(';')[0].trim().toLowerCase()
+        f.url = r.url || href
+        f.blocked = false
+        f.doc = __parseDocument(t, ty, f.url)
+        f.el.dispatchEvent(new Event('load'))
+      })).catch(() => { if (gen === f.gen) fireLoad(f) })
+    }
+    const start = el => {
+      const f = frameOf(el)
+      const sd = el.getAttribute('srcdoc')
+      if (sd !== null) { f.gen++; f.url = 'about:srcdoc'; f.blocked = false; f.doc = __parseDocument(sd); fireLoad(f); return }
+      const src = el.getAttribute('src')
+      const p = src && src.trim() ? __urlParse(src, document.baseURI) : null
+      load(f, p ? p[0] : 'about:blank')
+    }
+    g.__frameInserted = el => { frames.delete(el); start(el) }
+    const IF = g.HTMLIFrameElement && g.HTMLIFrameElement.prototype
+    if (IF) {
+      Object.defineProperty(IF, 'contentDocument', { get() { if (!this.isConnected) return null; const f = frameOf(this); return f.blocked ? null : f.doc }, configurable: true, enumerable: true })
+      Object.defineProperty(IF, 'contentWindow', { get() { return this.isConnected ? frameOf(this).win : null }, configurable: true, enumerable: true })
+      for (const a of ['src', 'srcdoc']) {
+        const d = Object.getOwnPropertyDescriptor(IF, a)
+        if (d && d.set) Object.defineProperty(IF, a, { get: d.get, set(v) { d.set.call(this, v); if (this.isConnected) start(this) }, configurable: true, enumerable: true })
+      }
+    }
+    // Frames already in the page when it was parsed: they load before the window's load event.
+    g.__startFrames = () => { for (const el of document.getElementsByTagName('iframe')) if (!frames.has(el)) start(el) }
   }
 })(window)

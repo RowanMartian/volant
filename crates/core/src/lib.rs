@@ -29,6 +29,8 @@
 pub mod cookies;
 pub mod deflate;
 pub mod encoding;
+pub mod url;
+pub mod xml;
 pub mod favicon;
 pub mod hash;
 pub mod fuzzy;

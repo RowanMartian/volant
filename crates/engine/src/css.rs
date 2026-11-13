@@ -579,7 +579,8 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
                 if has {
                     return None;
                 }
-                cur.tag = Some(read_ident(&mut i).to_ascii_lowercase());
+                // As written: HTML elements match it in any case, others exactly.
+                cur.tag = Some(read_ident(&mut i));
                 has = true;
             }
             _ => return None,
