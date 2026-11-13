@@ -1,0 +1,68 @@
+name: Engine conformance
+
+# web-platform-tests on Volant's own engine (every change), and the
+# compatibility survey of real sites through Simple Page (weekly, or by hand).
+on:
+  push:
+    branches: [main]
+    paths: ["crates/core/**", "crates/engine/**", "crates/js/**", "crates/tools/**", "scripts/wpt/**", "scripts/compat/**", ".github/workflows/conformance.yml"]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wpt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build volant-tools
+        run: cargo build --locked --release -p volant-tools
+
+      - name: Fetch the web-platform-tests slice (pinned)
+        run: |
+          git init -q wpt
+          cd wpt
+          git remote add origin https://github.com/web-platform-tests/wpt.git
+          git sparse-checkout set resources common $(grep -v '^[#!]' ../scripts/wpt/tests.txt | grep .)
+          git fetch -q --depth 1 --filter=blob:none origin "$(cat ../scripts/wpt/WPT_COMMIT)"
+          git checkout -q FETCH_HEAD
+
+      - name: Run it against the baseline
+        run: target/release/volant-tools wpt wpt scripts/wpt/tests.txt wpt-results --jobs 4 --baseline scripts/wpt/baseline.tsv --tolerance 25 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wpt-results
+          path: wpt-results/
+
+  survey:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build volant-tools
+        run: cargo build --locked --release -p volant-tools
+
+      # Real sites change and some turn scripts away, so this reports; it doesn't fail.
+      - name: Survey the sites
+        run: target/release/volant-tools survey scripts/compat/sites.txt survey-results --jobs 4 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: survey-results
+          path: survey-results/

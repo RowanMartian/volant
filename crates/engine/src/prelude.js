@@ -491,21 +491,51 @@
   }
   g.TextEncoder = class TextEncoder {
     get encoding() { return 'utf-8' }
-    encode(s) {
-      const out = []
-      for (const ch of unescape(encodeURIComponent(String(s === undefined ? '' : s)))) out.push(ch.charCodeAt(0))
-      return new Uint8Array(out)
+    encode(s) { return __encode(s === undefined ? '' : String(s)) }
+    encodeInto(s, dest) {
+      if (!(dest instanceof Uint8Array)) throw new TypeError('encodeInto needs a Uint8Array')
+      s = String(s)
+      let read = 0, written = 0
+      for (const ch of s) {
+        const b = __encode(ch)
+        if (written + b.length > dest.length) break
+        dest.set(b, written)
+        written += b.length
+        read += ch.length
+      }
+      return { read, written }
     }
   }
   g.TextDecoder = class TextDecoder {
-    constructor(label) { this.encoding = label || 'utf-8' }
-    decode(bytes) {
-      if (!bytes) return ''
-      if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes)
-      else if (bytes instanceof DataView) bytes = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-      let s = ''
-      for (const b of Array.from(bytes)) s += '%' + (b < 16 ? '0' : '') + b.toString(16)
-      try { return decodeURIComponent(s) } catch (_) { return Array.from(bytes).map(b => String.fromCharCode(b)).join('') }
+    constructor(label, options) {
+      const enc = __encodingFor(label === undefined ? 'utf-8' : String(label))
+      if (enc === null || enc === 'replacement') throw new RangeError('The encoding label provided (' + label + ') is invalid.')
+      options = options == null ? {} : options
+      if (typeof options !== 'object' && typeof options !== 'function') throw new TypeError('options must be an object')
+      Object.defineProperty(this, '_s', { value: { enc, fatal: !!options.fatal, ignoreBOM: !!options.ignoreBOM, pending: [], bomSeen: false } })
+    }
+    get encoding() { return this._s.enc.toLowerCase() }
+    get fatal() { return this._s.fatal }
+    get ignoreBOM() { return this._s.ignoreBOM }
+    decode(input, options) {
+      const s = this._s
+      const stream = !!(options && options.stream)
+      let bytes
+      if (input === undefined) bytes = new Uint8Array(0)
+      else if (input instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && input instanceof SharedArrayBuffer)) bytes = new Uint8Array(input)
+      else if (ArrayBuffer.isView(input)) bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+      else throw new TypeError('decode needs an ArrayBuffer or a view of one')
+      if (s.pending.length) { const all = new Uint8Array(s.pending.length + bytes.length); all.set(s.pending); all.set(bytes, s.pending.length); bytes = all }
+      const [text, used] = __decode(s.enc, bytes, s.fatal, stream)
+      s.pending = stream ? Array.from(bytes.subarray(used)) : []
+      let out = text
+      // A byte order mark at the very start is dropped (unless ignoreBOM).
+      if (!s.bomSeen && out.length) {
+        s.bomSeen = true
+        if (!s.ignoreBOM && ['UTF-8', 'UTF-16LE', 'UTF-16BE'].includes(s.enc) && out.charCodeAt(0) === 0xFEFF) out = out.slice(1)
+      }
+      if (!stream) s.bomSeen = false
+      return out
     }
   }
   g.unescape = g.unescape || (s => String(s).replace(/%([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))))

@@ -3012,6 +3012,28 @@ fn install(i: &mut Interp, st: &S) {
         });
         i.global_obj.borrow_mut().set_own("__tokenList", f);
     }
+    {
+        // Encoding Standard natives behind TextDecoder and TextEncoder.
+        let f = i.native(|i, _t, a| {
+            let l = i.to_str(&arg(&a, 0))?;
+            Ok(volant_core::encoding::for_label(&l).map(str_val).unwrap_or(Value::Null))
+        });
+        i.global_obj.borrow_mut().set_own("__encodingFor", f);
+        let f = i.native(|i, _t, a| {
+            let enc = i.to_str(&arg(&a, 0))?;
+            let bytes = volant_js::typed::bytes_of(&arg(&a, 1)).unwrap_or_default();
+            match volant_core::encoding::decode(&enc, &bytes, Interp::truthy(&arg(&a, 2)), Interp::truthy(&arg(&a, 3))) {
+                Ok((text, used)) => Ok(i.array(vec![str_val(&text), Value::Num(used as f64)])),
+                Err(()) => i.throw("TypeError", "The encoded data was not valid"),
+            }
+        });
+        i.global_obj.borrow_mut().set_own("__decode", f);
+        let f = i.native(|i, _t, a| {
+            let t = i.to_str(&arg(&a, 0))?;
+            Ok(volant_js::typed::new_bytes(i, t.as_bytes().to_vec()))
+        });
+        i.global_obj.borrow_mut().set_own("__encode", f);
+    }
     /// The element and attribute a DOMTokenList stands for.
     fn list_of(i: &Interp, this: &Value) -> Res<(NodeId, String)> {
         let id = this_node(i, this)?;

@@ -1,6 +1,6 @@
 //! A slice of web-platform-tests, run on Volant's own engine.
 //!
-//! `wpt WPT_DIR LIST OUT_DIR [--jobs N] [--baseline FILE] [--write-baseline]`
+//! `wpt WPT_DIR LIST OUT_DIR [--jobs N] [--baseline FILE [--write-baseline | --tolerance N]]`
 //! runs every testharness.js test that LIST names (files or folders, relative
 //! to a checkout of github.com/web-platform-tests/wpt), each in a process of
 //! its own, and writes `OUT_DIR/wpt.md` (pass rates by folder, the commonest
@@ -332,7 +332,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let Some((p, n)) = l.split_once('\t') else { continue };
             let n: usize = n.trim().parse().unwrap_or(0);
             match now.get(p) {
-                Some(&m) if m < n => worse.push(format!("{p}: {m} passing, was {n}")),
+                Some(&m) if m < n => worse.push((p, m, n)),
                 Some(&m) if m > n => better += m - n,
                 _ => {}
             }
@@ -340,8 +340,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
         if better > 0 {
             println!("{better} more subtests pass than the baseline; update it with --write-baseline.");
         }
-        if !worse.is_empty() {
-            return Err(format!("fewer subtests pass than the baseline:\n{}", worse.join("\n")));
+        // --tolerance N: timing-dependent tests can lose a few passes from run to run.
+        let tolerance: usize = flag("--tolerance").and_then(|t| t.parse().ok()).unwrap_or(0);
+        let lost: usize = worse.iter().map(|(_, m, n)| n - m).sum();
+        let listed: Vec<String> = worse.iter().map(|(p, m, n)| format!("{p}: {m} passing, was {n}")).collect();
+        if lost > tolerance {
+            return Err(format!("{lost} fewer subtests pass than the baseline:\n{}", listed.join("\n")));
+        }
+        if !listed.is_empty() {
+            println!("Within the tolerance, these lost passes:\n{}", listed.join("\n"));
         }
     }
     Ok(())
