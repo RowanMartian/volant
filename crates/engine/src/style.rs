@@ -147,6 +147,16 @@ pub enum Align {
     Right,
 }
 
+/// `object-fit`: how an image fills its box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    Fill,
+    Contain,
+    Cover,
+    None,
+    ScaleDown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Space {
     Normal,
@@ -213,6 +223,18 @@ pub struct Style {
     pub border_box: bool,
     /// `caption-side: bottom` (inherited).
     pub caption_bottom: bool,
+    /// `border-spacing` (horizontal, vertical), inherited.
+    pub border_spacing: (f32, f32),
+    /// `border-collapse: collapse`, inherited.
+    pub border_collapse: bool,
+    /// `z-index` (`None` for `auto`).
+    pub z_index: Option<i32>,
+    /// `aspect-ratio` as width / height, and whether `auto` came with it
+    /// (an image's own ratio then wins).
+    pub aspect: Option<(f32, bool)>,
+    /// `object-fit` and `object-position` (x, y) for images.
+    pub object_fit: Fit,
+    pub object_pos: (Len, Len),
     /// 0 (invisible) to 1.
     pub opacity: f32,
     /// Painted through a CSS mask (icons): the background alone would be a solid square.
@@ -292,6 +314,12 @@ impl Default for Style {
             radius: 0.0,
             border_box: false,
             caption_bottom: false,
+            border_spacing: (0.0, 0.0),
+            border_collapse: false,
+            z_index: None,
+            aspect: None,
+            object_fit: Fit::Fill,
+            object_pos: (Len::Pct(50.0), Len::Pct(50.0)),
             opacity: 1.0,
             masked: false,
             cell_padding: None,
@@ -332,7 +360,7 @@ html, address, blockquote, body, center, dialog, div, figure, figcaption, footer
 main, p, plaintext, pre, xmp, search, details, summary, dl, dt, dd, ol, ul, menu, dir, h1, h2, h3, h4, h5, h6, hgroup,
 article, aside, nav, section, fieldset, picture, video, canvas { display: block }
 li { display: list-item }
-table { display: table }
+table { display: table; border-spacing: 2px }
 thead, tbody, tfoot { display: table-row-group }
 tr { display: table-row }
 td, th { display: table-cell }
@@ -1050,6 +1078,53 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         "visibility" => s.hidden = lower == "hidden" || lower == "collapse",
         "box-sizing" => s.border_box = lower == "border-box",
         "caption-side" => s.caption_bottom = lower == "bottom",
+        "border-collapse" => s.border_collapse = lower == "collapse",
+        "z-index" => s.z_index = lower.trim().parse::<i32>().ok(),
+        "object-fit" => {
+            s.object_fit = match lower.trim() {
+                "contain" => Fit::Contain,
+                "cover" => Fit::Cover,
+                "none" => Fit::None,
+                "scale-down" => Fit::ScaleDown,
+                _ => Fit::Fill,
+            }
+        }
+        "object-position" => {
+            let (mut x, mut y) = (None, None);
+            let mut rest = Vec::new();
+            for p in split_spaces(&lower) {
+                match p.as_str() {
+                    "left" => x = Some(Len::Pct(0.0)),
+                    "right" => x = Some(Len::Pct(100.0)),
+                    "top" => y = Some(Len::Pct(0.0)),
+                    "bottom" => y = Some(Len::Pct(100.0)),
+                    "center" => rest.push(Len::Pct(50.0)),
+                    p => rest.extend(len(p)),
+                }
+            }
+            let mut rest = rest.into_iter();
+            let x = x.or_else(|| rest.next()).unwrap_or(Len::Pct(50.0));
+            let y = y.or_else(|| rest.next()).unwrap_or(Len::Pct(50.0));
+            s.object_pos = (x, y);
+        }
+        "aspect-ratio" => {
+            let auto = lower.split_whitespace().any(|w| w == "auto");
+            let rest = lower.replace("auto", "");
+            let mut nums = rest.split('/').map(|p| p.trim().parse::<f32>().ok());
+            s.aspect = match (nums.next().flatten(), nums.next(), nums.next()) {
+                (Some(w), None, None) if w > 0.0 => Some((w, auto)),
+                (Some(w), Some(Some(h)), None) if w > 0.0 && h > 0.0 => Some((w / h, auto)),
+                _ => None,
+            };
+        }
+        "border-spacing" => {
+            let parts: Vec<f32> = split_spaces(v).iter().filter_map(|p| len(p)).map(|l| l.resolve(0.0).max(0.0)).collect();
+            match parts[..] {
+                [a] => s.border_spacing = (a, a),
+                [a, b] => s.border_spacing = (a, b),
+                _ => {}
+            }
+        }
         "mask" | "mask-image" | "-webkit-mask" | "-webkit-mask-image" => s.masked = lower.contains("url(") || lower.contains("gradient("),
         "opacity" => {
             let t = lower.trim();
@@ -1384,6 +1459,8 @@ pub(crate) fn inherited(p: &Style) -> Style {
         hidden: p.hidden,
         vars: p.vars.clone(),
         caption_bottom: p.caption_bottom,
+        border_spacing: p.border_spacing,
+        border_collapse: p.border_collapse,
         ..Style::default()
     }
 }
@@ -1536,6 +1613,8 @@ pub struct Styled {
     pub styles: Vec<Style>,
     pub before: HashMap<NodeId, NodeId>,
     pub after: HashMap<NodeId, NodeId>,
+    /// Block containers' `::first-letter` styles.
+    pub first_letter: HashMap<NodeId, NodeId>,
 }
 
 /// Where to look a rule's selector up: by the subject's id, a class, its tag, or anywhere.
@@ -1630,13 +1709,14 @@ pub fn compute(&self, dom: &Dom) -> Styled {
         styles.push(s);
     }
     // Pseudo-element styles go after the nodes'.
-    let mut out = Styled { styles, before: HashMap::new(), after: HashMap::new() };
+    let mut out = Styled { styles, before: HashMap::new(), after: HashMap::new(), first_letter: HashMap::new() };
     for (id, el, st) in extra {
         let k = out.styles.len() as NodeId;
         out.styles.push(st);
         match el {
             PseudoElement::Before => out.before.insert(id, k),
             PseudoElement::After => out.after.insert(id, k),
+            PseudoElement::FirstLetter => out.first_letter.insert(id, k),
         };
     }
     out
@@ -1699,7 +1779,7 @@ fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, St
         cands.dedup();
         // (important, origin, specificity, order) → declaration, for the element and its pseudo-elements
         type Found<'a> = Vec<((bool, u8, (u16, u16, u16), usize), &'a Decl)>;
-        let (mut found, mut before, mut after): (Found, Found, Found) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut found, mut before, mut after, mut first_letter): (Found, Found, Found, Found) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         // Group candidates by rule: a rule applies once, at its most specific matching selector.
         let mut per_rule: Vec<(usize, Option<PseudoElement>, (u16, u16, u16))> = Vec::new();
         for e in &cands {
@@ -1716,6 +1796,7 @@ fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, St
                 None => &mut found,
                 Some(PseudoElement::Before) => &mut before,
                 Some(PseudoElement::After) => &mut after,
+                Some(PseudoElement::FirstLetter) => &mut first_letter,
             };
             for d in &rules[ri].decls {
                 target.push(((d.important, origins[ri], spec, ri), d));
@@ -1766,6 +1847,11 @@ fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, St
             if let Some(px) = attr(attrs, "cellpadding").and_then(|v| v.trim().parse::<f32>().ok()) {
                 s.cell_padding = Some(px);
             }
+            if s.border_spacing == (2.0, 2.0) {
+                if let Some(px) = attr(attrs, "cellspacing").and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok()) {
+                    s.border_spacing = (px.max(0.0), px.max(0.0));
+                }
+            }
         }
         if matches!(tag, "td" | "th") && !s.padding_set {
             // cellpadding comes down through the row (and row group) to the cells; 1px otherwise.
@@ -1792,6 +1878,15 @@ fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, St
         if s.valign != VAlign::Baseline && matches!(tag, "sup" | "sub") && s.display == Display::Inline {
             // Superscripts don't make their line taller.
             s.line_height = s.line_height.min(parent.line_height);
+        }
+        // ::first-letter: for block containers; it can't be a block itself.
+        if !first_letter.is_empty() && matches!(s.display, Display::Block | Display::ListItem | Display::InlineBlock | Display::TableCell | Display::TableCaption) {
+            let mut p = inherited(&s);
+            p.display = Display::Inline;
+            cascade(&mut p, &mut first_letter, &s, rem);
+            p.display = Display::Inline;
+            p.shift = 0.0;
+            extra.push((id, PseudoElement::FirstLetter, p));
         }
         for (el, list) in [(PseudoElement::Before, &mut before), (PseudoElement::After, &mut after)] {
             if list.is_empty() {

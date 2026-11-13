@@ -19,7 +19,7 @@
 //!   their tallest cell, captions.
 
 use crate::fonts::{Font, Fonts};
-use crate::style::{self as css_style, Align, AlignItems, Clear, Color, Display, Float, Justify, Len, ListStyle, Position, Space, Style, Track, Transform, VAlign};
+use crate::style::{self as css_style, Align, Fit, AlignItems, Clear, Color, Display, Float, Justify, Len, ListStyle, Position, Space, Style, Track, Transform, VAlign};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use volant_core::html::{Data, Dom, NodeId};
@@ -222,6 +222,7 @@ struct Builder<'a> {
     styles: &'a [Style],
     before: &'a HashMap<NodeId, NodeId>,
     after: &'a HashMap<NodeId, NodeId>,
+    first_letter: &'a HashMap<NodeId, NodeId>,
     /// Styles for anonymous boxes (text directly in a flex or grid container), numbered after `styles`.
     anon: Vec<Style>,
     hrefs: Vec<String>,
@@ -354,6 +355,9 @@ impl Builder<'_> {
             run.push(g);
         }
         flush(&mut b.children, &mut run);
+        if let Some(&ps) = self.first_letter.get(&id) {
+            first_letter(&mut b.children, ps, needs_box(&self.styles[ps as usize]));
+        }
         b
     }
 
@@ -482,6 +486,66 @@ impl Builder<'_> {
 }
 
 /// Ends the current inline run as an anonymous block.
+/// Gives the first letter of the first line (with the punctuation around it) the
+/// `::first-letter` style `ps`; looks into a first child block. True once it is done
+/// (or there's no letter to style: the line starts with something else).
+fn first_letter(children: &mut [Child], ps: NodeId, boxed: bool) -> bool {
+    for child in children.iter_mut() {
+        match child {
+            Child::Block(b) => {
+                // The first line is inside it (if it holds lines at all).
+                if matches!(b.kind, BoxKind::Flow) {
+                    first_letter(&mut b.children, ps, boxed);
+                }
+                return true;
+            }
+            Child::Inline(run) => {
+                for k in 0..run.len() {
+                    match &run[k] {
+                        Inline::Open(_) | Inline::Close(_) | Inline::Float(_) | Inline::Abs(_) => continue,
+                        Inline::Text { text, .. } if text.trim().is_empty() => continue,
+                        Inline::Text { text, style, link } => {
+                            let (style, link) = (*style, *link);
+                            // Collapsible spaces come before it; any other space means there's no first letter.
+                            let lead = text.len() - text.trim_start_matches([' ', '\t', '\n', '\r', '\x0c']).len();
+                            let rest = &text[lead..];
+                            let Some(end) = first_letter_len(rest) else { return true };
+                            let (head, letter, tail) = (text[..lead].to_string(), rest[..end].to_string(), rest[end..].to_string());
+                            let mut parts = Vec::new();
+                            if !head.is_empty() {
+                                parts.push(Inline::Text { text: head, style, link });
+                            }
+                            if boxed {
+                                parts.push(Inline::Open(ps));
+                            }
+                            parts.push(Inline::Text { text: letter, style: ps, link });
+                            if boxed {
+                                parts.push(Inline::Close(ps));
+                            }
+                            if !tail.is_empty() {
+                                parts.push(Inline::Text { text: tail, style, link });
+                            }
+                            run.splice(k..k + 1, parts);
+                            return true;
+                        }
+                        _ => return true,
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The length of the first letter at the start of `s`, with the punctuation
+/// before and after it; `None` when `s` doesn't start with one.
+fn first_letter_len(s: &str) -> Option<usize> {
+    let mut chars = s.char_indices().skip_while(|&(_, c)| crate::punct::is_punct(c));
+    let (i, c) = chars.next().filter(|(_, c)| !c.is_whitespace())?;
+    let after = chars.take_while(|&(_, c)| crate::punct::is_punct(c)).last();
+    Some(after.map_or(i + c.len_utf8(), |(j, d)| j + d.len_utf8()))
+}
+
 fn flush(out: &mut Vec<Child>, run: &mut Vec<Inline>) {
     if !run.is_empty() {
         out.push(Child::Inline(std::mem::take(run)));
@@ -564,7 +628,21 @@ struct Ctx<'a> {
     /// positioned ancestor's padding box, the viewport first.
     cbs: Vec<(f32, f32, f32)>,
     layers: Vec<Layer>,
+    /// Positioned boxes, to be painted in stacking order at the end.
+    segs: Vec<Seg>,
+    /// The root element (it starts the root stacking context).
+    root_el: NodeId,
     dom: &'a Dom,
+}
+
+/// A positioned box's run of items: the first `bg` are its own background and
+/// borders. `ctx` when it starts a stacking context of its own.
+#[derive(Debug, Clone, Copy)]
+struct Seg {
+    items: (usize, usize),
+    bg: usize,
+    z: Option<i32>,
+    ctx: bool,
 }
 
 fn font_of(s: &Style) -> Font {
@@ -626,12 +704,61 @@ impl<'r> Ctx<'_> {
         w
     }
 
+    /// An image drawn in a w x h box, as `object-fit` and `object-position` place it
+    /// (clipped to the box where it spills out).
+    fn image_items(&self, s: &Style, x: f32, y: f32, w: f32, h: f32, src: &str) -> Vec<Item> {
+        let natural = if s.object_fit == Fit::Fill || src.starts_with("canvas:") { None } else { self.images.size(src).filter(|(nw, nh)| *nw > 0.0 && *nh > 0.0) };
+        let Some((nw, nh)) = natural else {
+            return vec![Item::Image { x, y, w, h, src: src.to_string(), radius: s.radius }];
+        };
+        let contain = (w / nw).min(h / nh);
+        let k = match s.object_fit {
+            Fit::Contain => contain,
+            Fit::Cover => (w / nw).max(h / nh),
+            Fit::None => 1.0,
+            Fit::ScaleDown => contain.min(1.0),
+            Fit::Fill => unreachable!(),
+        };
+        let (dw, dh) = (nw * k, nh * k);
+        let at = |l: Len, free: f32| match l {
+            Len::Pct(p) => free * p / 100.0,
+            l => l.resolve(0.0),
+        };
+        let (dx, dy) = (x + at(s.object_pos.0, w - dw), y + at(s.object_pos.1, h - dh));
+        if dx >= x - FIT && dy >= y - FIT && dx + dw <= x + w + FIT && dy + dh <= y + h + FIT {
+            return vec![Item::Image { x: dx, y: dy, w: dw, h: dh, src: src.to_string(), radius: if s.object_fit == Fit::Contain { 0.0 } else { s.radius } }];
+        }
+        vec![Item::Clip { x, y, w, h, radius: s.radius }, Item::Image { x: dx, y: dy, w: dw, h: dh, src: src.to_string(), radius: 0.0 }, Item::Unclip]
+    }
+
+    /// The border-box width `aspect-ratio` gives a box with an auto width and a fixed height.
+    fn ratio_width(&self, s: &Style, frame: f32) -> Option<f32> {
+        let (r, auto) = s.aspect?;
+        let Len::Px(h) = s.height else { return None };
+        if s.width != Len::Auto {
+            return None;
+        }
+        // The ratio holds between the sizes box-sizing names (the content box when `auto` comes with it).
+        if s.border_box && !auto {
+            return Some(h * r);
+        }
+        let vframe = px_only(s.padding[0]) + px_only(s.padding[2]) + s.border_width[0] + s.border_width[2];
+        let content_h = if s.border_box { (h - vframe).max(0.0) } else { h };
+        Some(content_h * r + frame)
+    }
+
     /// An image's size in px: CSS width/height, then attributes, then its
     /// intrinsic size, keeping the aspect ratio; `max-width` scales it down.
     fn replaced_size(&self, node: NodeId, img: &Img, cb_w: f32) -> Option<(f32, f32)> {
         let s = &self.styles[node as usize];
         let intrinsic = if img.src.is_empty() || img.src.starts_with("canvas:") { None } else { self.images.size(&img.src) };
-        let ratio = intrinsic.filter(|(w, _)| *w > 0.0).map(|(w, h)| h / w).or_else(|| Some(img.attr_h? / img.attr_w?));
+        let mut ratio = intrinsic.filter(|(w, _)| *w > 0.0).map(|(w, h)| h / w).or_else(|| Some(img.attr_h? / img.attr_w?));
+        // aspect-ratio, unless it says `auto` and the image has a ratio of its own.
+        if let Some((r, auto)) = s.aspect {
+            if !auto || ratio.is_none() {
+                ratio = Some(1.0 / r);
+            }
+        }
         let mut w = match s.width {
             Len::Px(v) => Some(v),
             Len::Pct(p) if cb_w > 0.0 => Some(cb_w * p / 100.0),
@@ -744,6 +871,7 @@ impl<'r> Ctx<'_> {
         if let Len::Px(w) = s.width {
             return (w + frame, w + frame);
         }
+        let ratio_w = self.ratio_width(&s, frame);
         let (min, max) = match &b.kind {
             BoxKind::Image(img) => {
                 let w = self.replaced_size(b.node, img, 0.0).map(|(w, _)| w).unwrap_or(0.0);
@@ -808,6 +936,11 @@ impl<'r> Ctx<'_> {
                 (mn, mx)
             }
         };
+        if let Some(w) = ratio_w {
+            // Not narrower than its content (the automatic minimum size).
+            let w = if s.overflow_clip || s.min_width != Len::Auto { w } else { w.max(min + frame) };
+            return (w, w);
+        }
         (min + frame, max.max(min) + frame)
     }
 
@@ -886,7 +1019,10 @@ impl<'r> Ctx<'_> {
             w
         } else {
             match s.width {
-                Len::Auto => cb_w - ml - mr - frame,
+                Len::Auto => match self.ratio_width(&s, frame) {
+                    Some(_) => self.intrinsic(b).0 - frame,
+                    None => cb_w - ml - mr - frame,
+                },
                 w => inner(w),
             }
         };
@@ -921,11 +1057,12 @@ impl<'r> Ctx<'_> {
             BoxKind::Image(img) => {
                 let (w, h) = replaced.unwrap_or((0.0, 0.0));
                 if w > 0.0 && h > 0.0 && !img.src.is_empty() && !s.hidden {
-                    self.items.push(Item::Image { x: content_x, y: content_y, w, h, src: img.src.clone(), radius: s.radius });
+                    let drawn = self.image_items(&s, content_x, content_y, w, h, &img.src);
+                    self.items.extend(drawn);
                 }
                 cursor += h;
             }
-            BoxKind::Table(t) => cursor += self.table(t, content_x, content_y, content_w),
+            BoxKind::Table(t) => cursor += self.table(t, spacing(&s), content_x, content_y, content_w),
             BoxKind::Flex(items) => cursor += self.flex(items, &s, content_x, content_y, content_w),
             BoxKind::Grid(items) => cursor += self.grid(items, &s, content_x, content_y, content_w),
             BoxKind::Flow => {}
@@ -973,6 +1110,11 @@ impl<'r> Ctx<'_> {
             if replaced.is_none() {
                 cursor = content_y + if s.border_box { (h - vframe).max(0.0) } else { h };
             }
+        }
+        // aspect-ratio gives an auto height from the width; the content can still make it taller.
+        if let (Len::Auto, Some((r, auto)), None) = (s.height, s.aspect, replaced) {
+            let h = if s.border_box && !auto { ((content_w + frame) / r - vframe).max(0.0) } else { content_w / r };
+            cursor = if s.overflow_clip || s.min_height != Len::Auto { content_y + h } else { cursor.max(content_y + h) };
         }
         if let Len::Px(h) = s.min_height {
             cursor = cursor.max(content_y + if s.border_box { (h - vframe).max(0.0) } else { h });
@@ -1029,6 +1171,7 @@ impl<'r> Ctx<'_> {
             if s.opacity <= 0.01 {
                 self.items.truncate(paint_at);
                 self.layers.retain(|l| l.items.0 < paint_at);
+                self.segs.retain(|g| g.items.0 < paint_at);
                 self.links.truncate(links_at);
             } else {
                 for it in &mut self.items[paint_at..] {
@@ -1037,6 +1180,14 @@ impl<'r> Ctx<'_> {
                     }
                 }
             }
+        }
+        // Positioned boxes, flex and grid items with a z-index, and the root element are painted in stacking order.
+        let flex_item = s.z_index.is_some() && self.dom.nodes.get(b.node as usize).and_then(|n| self.styles.get(n.parent as usize)).is_some_and(|p| matches!(p.display, Display::Flex | Display::Grid));
+        let root = b.node == self.root_el;
+        if (positioned || flex_item || root) && self.items.len() > paint_at {
+            let ctx = s.z_index.is_some() || root || matches!(s.position, Position::Fixed | Position::Sticky);
+            let z = if root { Some(0) } else { s.z_index };
+            self.segs.push(Seg { items: (paint_at, self.items.len()), bg: n_under.min(self.items.len() - paint_at), z, ctx });
         }
         // position: relative and transform: translate move the box (and everything in it) after layout.
         let (mut dx, mut dy) = (0.0, 0.0);
@@ -1078,6 +1229,14 @@ impl<'r> Ctx<'_> {
             if l.items.0 >= at {
                 l.items.0 += n;
                 l.items.1 += n;
+            }
+        }
+        for g in &mut self.segs {
+            if g.items.0 >= at {
+                g.items.0 += n;
+                g.items.1 += n;
+            } else if g.items.1 > at {
+                g.items.1 += n;
             }
         }
     }
@@ -1148,9 +1307,10 @@ impl<'r> Ctx<'_> {
         for cap in &t.captions {
             sum_min = sum_min.max(self.intrinsic(cap).0);
         }
+        let sp = spacing(s).0 * if mins.is_empty() { 0.0 } else { mins.len() as f32 + 1.0 };
         match s.width {
-            Len::Auto => sum_max.min(avail).max(sum_min),
-            w => w.resolve(avail).max(sum_min),
+            Len::Auto => (sum_max + sp).min(avail).max(sum_min + sp),
+            w => w.resolve(avail).max(sum_min + sp),
         }
     }
 
@@ -1161,17 +1321,22 @@ impl<'r> Ctx<'_> {
         let h = self.block(b, 0.0, 0.0, w, Opts { bfc: true, width: Some(w), ..Default::default() });
         self.items.truncate(ni);
         self.layers.retain(|l| l.items.0 < ni);
+        self.segs.retain(|g| g.items.0 < ni);
         self.links.truncate(nl);
         self.hits.truncate(nh);
         self.floats = floats;
         h
     }
 
-    /// Lays out a table's captions and rows in a box `width` wide; returns the height.
-    fn table(&mut self, t: &Table, x: f32, y: f32, width: f32) -> f32 {
+    /// Lays out a table's captions and rows in a box `width` wide, `border-spacing`
+    /// `(hs, vs)` around and between its cells; returns the height.
+    fn table(&mut self, t: &Table, (hs, vs): (f32, f32), x: f32, y: f32, width: f32) -> f32 {
         let (mins, maxs) = self.columns(t);
         let (sum_min, sum_max): (f32, f32) = (mins.iter().sum(), maxs.iter().sum());
         let n = mins.len();
+        // The columns share what the spacing leaves.
+        let table_w = width;
+        let width = if n == 0 { width } else { (width - hs * (n as f32 + 1.0)).max(0.0) };
         let widths: Vec<f32> = if n == 0 {
             Vec::new()
         } else if width >= sum_max {
@@ -1191,26 +1356,29 @@ impl<'r> Ctx<'_> {
             }
         };
         place_captions(self, &mut cursor, false);
+        if !t.rows.is_empty() {
+            cursor += vs;
+        }
         for (row, cells) in &t.rows {
             let mut row_h = 0f32;
             let mut col = 0;
             let mut placed = Vec::new();
             for (cell, span) in cells {
                 let span = (*span).min(n.saturating_sub(col)).max(1);
-                let cx = x + widths[..col.min(n)].iter().sum::<f32>();
-                let cw: f32 = widths[col.min(n)..(col + span).min(n)].iter().sum();
+                let cx = x + hs * (col.min(n) as f32 + 1.0) + widths[..col.min(n)].iter().sum::<f32>();
+                let cw: f32 = widths[col.min(n)..(col + span).min(n)].iter().sum::<f32>() + hs * (span as f32 - 1.0);
                 row_h = row_h.max(self.measure_block(cell, cw));
                 placed.push((cell, cx, cw));
                 col += span;
             }
             let row_bg = row.map(|r| self.styles[r as usize].background).filter(|c| c.a > 0);
             if let Some(color) = row_bg {
-                self.items.push(Item::Rect { x, y: cursor, w: width, h: row_h, color, radius: 0.0 });
+                self.items.push(Item::Rect { x: x + hs, y: cursor, w: (table_w - 2.0 * hs).max(0.0), h: row_h, color, radius: 0.0 });
             }
             for (cell, cx, cw) in placed {
                 self.block(cell, cx, cursor, cw, Opts { min_h: row_h, bfc: true, ..Default::default() });
             }
-            cursor += row_h;
+            cursor += row_h + vs;
         }
         place_captions(self, &mut cursor, true);
         cursor - y
@@ -1886,7 +2054,8 @@ impl<'r> Ctx<'_> {
                     if let Some((ml, w, h, src)) = a.image {
                         let y = if s.valign == VAlign::Middle { baseline - mid - h / 2.0 } else { baseline + s.shift - h };
                         if !s.hidden && !src.is_empty() {
-                            self.items.push(Item::Image { x: xs[i] + ml, y, w, h, src: src.to_string(), radius: s.radius });
+                            let drawn = self.image_items(s, xs[i] + ml, y, w, h, src);
+                            self.items.extend(drawn);
                         }
                         self.hits.push(Hit { x: xs[i] + ml, y, w, h, node: a.style });
                         if let Some(l) = a.link {
@@ -1928,11 +2097,11 @@ impl<'r> Ctx<'_> {
 /// Lays out `dom` (styled by `styles`) for a viewport `width` px wide.
 pub fn layout(dom: &Dom, styled: &css_style::Styled, width: f32, fonts: &dyn Fonts, images: &dyn Images) -> Page {
     let styles = &styled.styles;
-    let mut builder = Builder { dom, styles, before: &styled.before, after: &styled.after, anon: Vec::new(), hrefs: Vec::new() };
+    let mut builder = Builder { dom, styles, before: &styled.before, after: &styled.after, first_letter: &styled.first_letter, anon: Vec::new(), hrefs: Vec::new() };
     let root = builder.block(0, 0);
     let mut all: Vec<Style> = styles.clone();
     all.extend(std::mem::take(&mut builder.anon));
-    let mut ctx = Ctx { styles: &all, fonts, images, hrefs: builder.hrefs, items: Vec::new(), links: Vec::new(), hits: Vec::new(), cache: HashMap::new(), floats: Vec::new(), cbs: vec![(0.0, 0.0, width)], layers: Vec::new(), dom };
+    let mut ctx = Ctx { styles: &all, fonts, images, hrefs: builder.hrefs, items: Vec::new(), links: Vec::new(), hits: Vec::new(), cache: HashMap::new(), floats: Vec::new(), cbs: vec![(0.0, 0.0, width)], layers: Vec::new(), segs: Vec::new(), root_el: dom.find("html").unwrap_or(NodeId::MAX), dom };
     // The canvas takes the root's background, or else the body's.
     let bg_of = |tag: &str| dom.find(tag).map(|id| styles[id as usize].background).filter(|c| c.a > 0);
     let background = bg_of("html").or_else(|| bg_of("body")).unwrap_or(Color::rgb(255, 255, 255));
@@ -1948,8 +2117,149 @@ pub fn layout(dom: &Dom, styled: &css_style::Styled, width: f32, fonts: &dyn Fon
             }
         }
     }
+    let items = stack(ctx.items, &ctx.segs, &mut layers);
     layers.sort_by_key(|l| l.items.0);
-    Page { width, height, background, items: ctx.items, links: ctx.links, hits: ctx.hits, layers }
+    Page { width, height, background, items, links: ctx.links, hits: ctx.hits, layers }
+}
+
+/// A table's `border-spacing` (none when its borders collapse).
+fn spacing(s: &Style) -> (f32, f32) {
+    if s.border_collapse {
+        (0.0, 0.0)
+    } else {
+        s.border_spacing
+    }
+}
+
+/// Puts the display list in CSS painting order (CSS 2 appendix E): in each
+/// stacking context, its background, then children with negative `z-index`,
+/// then its flow, then positioned boxes (`z-index: auto` or 0) in tree order,
+/// then positive `z-index`. Boxes moved out of a clipped run keep its clip.
+/// Layers' item ranges are updated to match.
+fn stack(items: Vec<Item>, segs: &[Seg], layers: &mut [Layer]) -> Vec<Item> {
+    if segs.is_empty() {
+        return items;
+    }
+    let n = segs.len();
+    // segs[n] is the page itself.
+    let mut all: Vec<Seg> = segs.to_vec();
+    all.push(Seg { items: (0, items.len()), bg: 0, z: Some(0), ctx: true });
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (all[i].items.0, std::cmp::Reverse(all[i].items.1)));
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
+    let mut open = vec![n];
+    // The clips in force where each box starts.
+    let mut clips: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
+    let mut clip_stack: Vec<usize> = Vec::new();
+    let mut at = 0;
+    for &i in &order {
+        let (s, e) = all[i].items;
+        while at < s {
+            match items[at] {
+                Item::Clip { .. } => clip_stack.push(at),
+                Item::Unclip => {
+                    clip_stack.pop();
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        clips[i] = clip_stack.clone();
+        while let Some(&top) = open.last() {
+            let (ts, te) = all[top].items;
+            if ts <= s && e <= te {
+                break;
+            }
+            open.pop();
+        }
+        children[*open.last().unwrap_or(&n)].push(i);
+        open.push(i);
+    }
+    struct Painter<'a> {
+        items: &'a [Item],
+        all: &'a [Seg],
+        children: &'a [Vec<usize>],
+        clips: &'a [Vec<usize>],
+        out: Vec<Item>,
+        placed: Vec<Option<(usize, usize)>>,
+    }
+    impl Painter<'_> {
+        /// A box's items less those of the positioned boxes inside it, skipping the first `skip`.
+        fn own(&mut self, i: usize, skip: usize) {
+            let (s, e) = self.all[i].items;
+            let mut k = s + skip;
+            for &c in &self.children[i] {
+                let (cs, ce) = self.all[c].items;
+                if cs > k {
+                    self.out.extend_from_slice(&self.items[k..cs]);
+                }
+                k = k.max(ce);
+            }
+            if e > k {
+                self.out.extend_from_slice(&self.items[k..e]);
+            }
+        }
+        fn gather(&self, i: usize, list: &mut Vec<usize>) {
+            for &c in &self.children[i] {
+                list.push(c);
+                if !self.all[c].ctx {
+                    self.gather(c, list);
+                }
+            }
+        }
+        /// A stacking context.
+        fn context(&mut self, i: usize) {
+            let start = self.out.len();
+            let Seg { items: (s, e), bg, .. } = self.all[i];
+            let bg = bg.min(e - s);
+            self.out.extend_from_slice(&self.items[s..s + bg]);
+            let mut list = Vec::new();
+            self.gather(i, &mut list);
+            let z = |c: usize| self.all[c].z.filter(|_| self.all[c].ctx).unwrap_or(0);
+            let mut neg: Vec<usize> = list.iter().copied().filter(|&c| z(c) < 0).collect();
+            neg.sort_by_key(|&c| z(c));
+            let mut pos: Vec<usize> = list.iter().copied().filter(|&c| z(c) > 0).collect();
+            pos.sort_by_key(|&c| z(c));
+            for c in neg {
+                self.entry(i, c);
+            }
+            self.own(i, bg);
+            for c in list.iter().copied().filter(|&c| z(c) == 0) {
+                self.entry(i, c);
+            }
+            for c in pos {
+                self.entry(i, c);
+            }
+            self.placed[i] = Some((start, self.out.len()));
+        }
+        /// A positioned box painted as part of context `ctx`, inside the clips it had there.
+        fn entry(&mut self, ctx: usize, c: usize) {
+            let from = self.all[ctx].items.0;
+            let wrap: Vec<usize> = self.clips[c].iter().copied().filter(|&k| k >= from && (ctx == self.all.len() - 1 || k > from)).collect();
+            for &k in &wrap {
+                self.out.push(self.items[k].clone());
+            }
+            if self.all[c].ctx {
+                self.context(c);
+            } else {
+                self.own(c, 0);
+            }
+            for _ in &wrap {
+                self.out.push(Item::Unclip);
+            }
+        }
+    }
+    let mut p = Painter { items: &items, all: &all, children: &children, clips: &clips, out: Vec::with_capacity(items.len()), placed: vec![None; n + 1] };
+    p.context(n);
+    let (out, placed) = (p.out, p.placed);
+    for l in layers.iter_mut() {
+        if let Some(i) = (0..n).find(|&i| all[i].items == l.items) {
+            if let Some(range) = placed[i] {
+                l.items = range;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2139,6 +2449,32 @@ mod tests {
     }
 
     #[test]
+    fn stacking_first_letter_and_ratio() {
+        let colors = |p: &Page| -> Vec<Color> { p.items.iter().filter_map(|i| if let Item::Rect { color, .. } = i { Some(*color) } else { None }).collect() };
+        let (red, green, blue) = (Color::rgb(255, 0, 0), Color::rgb(0, 128, 0), Color::rgb(0, 0, 255));
+        // Higher z-index paints later, whatever the tree order; positioned boxes paint over the flow after them.
+        let p = page(
+            "<div style='position:relative; z-index:2; background:green; height:10px'></div>\
+             <div style='position:relative; z-index:1; background:red; height:10px'></div>\
+             <div style='position:relative; background:blue; height:10px'></div><p style='background:#fff'>x</p>",
+            BASE,
+            100.0,
+        );
+        let c = colors(&p);
+        let at = |k: Color| c.iter().position(|&x| x == k).unwrap();
+        assert!(at(red) < at(green) && at(blue) < at(red), "{c:?}");
+        assert!(at(Color::rgb(255, 255, 255)) < at(blue), "in-flow content goes under positioned boxes");
+        // ::first-letter takes the punctuation around the letter.
+        let p = page("<p>\u{201c}Hello, world</p>", &format!("{BASE} p::first-letter {{ color: red }}"), 300.0);
+        let first = p.items.iter().find_map(|i| if let Item::Text { text, color, .. } = i { Some((text.clone(), *color)) } else { None }).unwrap();
+        assert_eq!(first, ("\u{201c}H".to_string(), red));
+        // aspect-ratio: an auto height from the width, and an auto width from a fixed height.
+        let p = page("<div style='width:100px; aspect-ratio:2/1; background:red'></div><div style='height:30px; aspect-ratio:2; background:blue; float:left'></div>", BASE, 300.0);
+        let rects: Vec<(f32, f32)> = p.items.iter().filter_map(|i| if let Item::Rect { w, h, .. } = i { Some((*w, *h)) } else { None }).collect();
+        assert_eq!(rects, vec![(100.0, 50.0), (60.0, 30.0)]);
+    }
+
+    #[test]
     fn tables() {
         let css = format!("{BASE} td, th {{ padding: 2px }} table {{ background: #fff }}");
         let html = "<table><caption>Cap</caption><tr><th>Name</th><th>Speed</th></tr>\
@@ -2147,8 +2483,8 @@ mod tests {
         let t = texts(&p);
         let get = |w: &str| t.iter().find(|x| x.0 == w).cloned().unwrap();
         // Columns line up and the second starts where the first ends.
-        // First column starts at the cell padding; headers are centred within their columns.
-        assert_eq!(get("Comet").1, 2.0);
+        // First column starts after the border spacing (2px) and cell padding; headers are centred within their columns.
+        assert_eq!(get("Comet").1, 4.0);
         assert!(get("Name").1 >= 2.0 && get("Name").1 < get("Speed").1);
         assert!(get("Speed").1 > get("Name").1 + 20.0);
         assert!((get("740 km/h").1 - get("Speed").1).abs() < 25.0, "same column");

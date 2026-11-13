@@ -171,7 +171,7 @@ dom/nodes/ParentNode-properties.html	12
 dom/nodes/ParentNode-querySelector-All-comma-selector.html	2
 dom/nodes/ParentNode-querySelector-All-multiple-not.html	0
 dom/nodes/ParentNode-querySelector-All-scope.html	2
-dom/nodes/ParentNode-querySelector-All.html	1475
+dom/nodes/ParentNode-querySelector-All.html	1507
 dom/nodes/ParentNode-querySelector-argument-stringification.html	3
 dom/nodes/ParentNode-querySelector-attribute-change.html	7
 dom/nodes/ParentNode-querySelector-basic-has.html	0

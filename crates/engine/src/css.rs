@@ -108,11 +108,12 @@ pub struct Compound {
     pub pseudos: Vec<Pseudo>,
 }
 
-/// `::before` and `::after`.
+/// `::before`, `::after` and `::first-letter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PseudoElement {
     Before,
     After,
+    FirstLetter,
 }
 
 /// A complex selector, read right to left: `parts[0]` is the subject, then
@@ -456,8 +457,12 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
                 if element.is_some() {
                     return None; // nothing may follow a pseudo-element
                 }
-                if matches!(name.as_str(), "before" | "after") {
-                    element = Some(if name == "before" { PseudoElement::Before } else { PseudoElement::After });
+                if matches!(name.as_str(), "before" | "after" | "first-letter") {
+                    element = Some(match name.as_str() {
+                        "before" => PseudoElement::Before,
+                        "after" => PseudoElement::After,
+                        _ => PseudoElement::FirstLetter,
+                    });
                     has = true;
                     continue;
                 }

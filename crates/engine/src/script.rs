@@ -1140,7 +1140,8 @@ fn selector_list(text: &str) -> Option<Vec<css::Selector>> {
 }
 
 fn matches_any(dom: &Dom, id: NodeId, sels: &[css::Selector]) -> bool {
-    is_element(dom, id) && sels.iter().any(|s| style::matches(dom, id, s))
+    // A selector of a pseudo-element (::before, ::first-letter) matches no element.
+    is_element(dom, id) && sels.iter().any(|s| s.element.is_none() && style::matches(dom, id, s))
 }
 
 fn camel(kebab: &str) -> String {
