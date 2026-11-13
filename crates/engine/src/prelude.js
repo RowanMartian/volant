@@ -1162,4 +1162,160 @@
     this.data = d.slice(0, off)
     return rest
   }
+
+  // ---------------------------------------------------------------- reflected attributes
+  // HTML's IDL attributes that reflect content attributes, per interface:
+  // [prop, type, attribute name (when not the lower-cased prop), extra]. Types:
+  // s string, sn string ([LegacyNullToEmptyString]), u URL, b boolean, l long,
+  // ul unsigned long, lul unsigned long > 0, cl clamped [min, max], d double,
+  // e enumerated {k: keywords, m: missing default, i: invalid default, n: nullable}, t DOMTokenList.
+  const REF = { k: ['', 'no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url'] }
+  const CORS = { k: ['anonymous', 'use-credentials'], m: null, i: 'anonymous', n: true }
+  const LOADING = { k: ['lazy', 'eager'], m: 'eager', i: 'eager' }
+  const ENCTYPE = { k: ['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain'], m: 'application/x-www-form-urlencoded', i: 'application/x-www-form-urlencoded' }
+  const FMETHOD = { k: ['get', 'post', 'dialog'], m: 'get', i: 'get' }
+  const CELL = [['align', 's'], ['ch', 's', 'char'], ['chOff', 's', 'charoff'], ['vAlign', 's']]
+  const LINK = [['target', 's'], ['download', 's'], ['ping', 's'], ['rel', 's'], ['relList', 't', 'rel'], ['hreflang', 's'], ['type', 's'], ['referrerPolicy', 'e', 0, REF]]
+  const REFLECT = {
+    HTMLElement: [['title', 's'], ['lang', 's'], ['accessKey', 's'], ['dir', 'e', 0, { k: ['ltr', 'rtl', 'auto'] }], ['hidden', 'b'], ['inert', 'b'], ['autofocus', 'b'],
+      ['nonce', 's'], ['enterKeyHint', 'e', 0, { k: ['enter', 'done', 'go', 'next', 'previous', 'search', 'send'] }],
+      ['inputMode', 'e', 0, { k: ['none', 'text', 'tel', 'url', 'email', 'numeric', 'decimal', 'search'] }]],
+    HTMLAnchorElement: LINK.concat([['coords', 's'], ['charset', 's'], ['name', 's'], ['rev', 's'], ['shape', 's']]),
+    HTMLAreaElement: LINK.filter(a => a[0] !== 'hreflang' && a[0] !== 'type').concat([['alt', 's'], ['coords', 's'], ['shape', 's'], ['noHref', 'b']]),
+    HTMLBaseElement: [['target', 's']],
+    HTMLQuoteElement: [['cite', 'u']],
+    HTMLModElement: [['cite', 'u'], ['dateTime', 's']],
+    HTMLBodyElement: [['text', 'sn'], ['link', 'sn'], ['vLink', 'sn', 'vlink'], ['aLink', 'sn', 'alink'], ['bgColor', 'sn', 'bgcolor'], ['background', 's']],
+    HTMLBRElement: [['clear', 's']],
+    HTMLButtonElement: [['disabled', 'b'], ['formAction', 'u', 'formaction'], ['formEnctype', 'e', 'formenctype', Object.assign({}, ENCTYPE, { m: '' })],
+      ['formMethod', 'e', 'formmethod', Object.assign({}, FMETHOD, { m: '' })], ['formNoValidate', 'b', 'formnovalidate'], ['formTarget', 's', 'formtarget'],
+      ['name', 's'], ['type', 'e', 0, { k: ['submit', 'reset', 'button'], m: 'submit', i: 'submit' }], ['value', 's']],
+    // HTMLCanvasElement's width and height stay native: setting them clears the canvas.
+    HTMLDataElement: [['value', 's']],
+    HTMLDetailsElement: [['open', 'b'], ['name', 's']],
+    HTMLDialogElement: [['open', 'b']],
+    HTMLDivElement: [['align', 's']],
+    HTMLDListElement: [['compact', 'b']],
+    HTMLDirectoryElement: [['compact', 'b']],
+    HTMLMenuElement: [['compact', 'b']],
+    HTMLEmbedElement: [['src', 'u'], ['type', 's'], ['width', 's'], ['height', 's'], ['align', 's'], ['name', 's']],
+    HTMLFieldSetElement: [['disabled', 'b'], ['name', 's']],
+    HTMLFontElement: [['color', 'sn'], ['face', 's'], ['size', 's']],
+    HTMLFormElement: [['acceptCharset', 's', 'accept-charset'], ['autocomplete', 'e', 0, { k: ['on', 'off'], m: 'on', i: 'on' }], ['enctype', 'e', 0, ENCTYPE],
+      ['encoding', 'e', 'enctype', ENCTYPE], ['method', 'e', 0, FMETHOD], ['name', 's'], ['noValidate', 'b', 'novalidate'], ['target', 's'], ['rel', 's'], ['relList', 't', 'rel']],
+    HTMLHeadingElement: [['align', 's']],
+    HTMLHRElement: [['align', 's'], ['color', 's'], ['noShade', 'b', 'noshade'], ['size', 's'], ['width', 's']],
+    HTMLHtmlElement: [['version', 's']],
+    HTMLIFrameElement: [['src', 'u'], ['srcdoc', 's'], ['name', 's'], ['sandbox', 't'], ['allow', 's'], ['allowFullscreen', 'b', 'allowfullscreen'], ['width', 's'], ['height', 's'],
+      ['referrerPolicy', 'e', 0, REF], ['loading', 'e', 0, LOADING], ['align', 's'], ['scrolling', 's'], ['frameBorder', 's', 'frameborder'], ['longDesc', 'u', 'longdesc'],
+      ['marginHeight', 'sn', 'marginheight'], ['marginWidth', 'sn', 'marginwidth']],
+    HTMLImageElement: [['alt', 's'], ['src', 'u'], ['srcset', 's'], ['sizes', 's'], ['crossOrigin', 'e', 'crossorigin', CORS], ['useMap', 's', 'usemap'], ['isMap', 'b', 'ismap'],
+      ['referrerPolicy', 'e', 0, REF], ['decoding', 'e', 0, { k: ['sync', 'async', 'auto'], m: 'auto', i: 'auto' }], ['loading', 'e', 0, LOADING], ['name', 's'],
+      ['lowsrc', 'u'], ['align', 's'], ['hspace', 'ul'], ['vspace', 'ul'], ['longDesc', 'u', 'longdesc'], ['border', 'sn']],
+    HTMLInputElement: [['accept', 's'], ['alt', 's'], ['defaultChecked', 'b', 'checked'], ['dirName', 's', 'dirname'], ['disabled', 'b'], ['formAction', 'u', 'formaction'],
+      ['formNoValidate', 'b', 'formnovalidate'], ['formTarget', 's', 'formtarget'], ['height', 'ul'], ['max', 's'], ['min', 's'], ['multiple', 'b'], ['name', 's'],
+      ['pattern', 's'], ['placeholder', 's'], ['readOnly', 'b', 'readonly'], ['required', 'b'], ['size', 'lul', 0, 20], ['src', 'u'], ['step', 's'],
+      ['type', 'e', 0, { k: ['hidden', 'text', 'search', 'tel', 'url', 'email', 'password', 'date', 'month', 'week', 'time', 'datetime-local', 'number', 'range', 'color', 'checkbox', 'radio', 'file', 'submit', 'image', 'reset', 'button'], m: 'text', i: 'text' }],
+      ['defaultValue', 's', 'value'], ['width', 'ul'], ['align', 's'], ['useMap', 's', 'usemap']],
+    HTMLLabelElement: [['htmlFor', 's', 'for']],
+    HTMLLegendElement: [['align', 's']],
+    HTMLLIElement: [['value', 'l'], ['type', 's']],
+    HTMLLinkElement: [['href', 'u'], ['crossOrigin', 'e', 'crossorigin', CORS], ['rel', 's'], ['relList', 't', 'rel'], ['media', 's'], ['integrity', 's'], ['hreflang', 's'],
+      ['type', 's'], ['sizes', 't'], ['referrerPolicy', 'e', 0, REF], ['charset', 's'], ['rev', 's'], ['target', 's'], ['imageSrcset', 's', 'imagesrcset'],
+      ['imageSizes', 's', 'imagesizes'], ['blocking', 't']],
+    HTMLMapElement: [['name', 's']],
+    HTMLMetaElement: [['name', 's'], ['httpEquiv', 's', 'http-equiv'], ['content', 's'], ['media', 's'], ['scheme', 's']],
+    HTMLObjectElement: [['data', 'u'], ['type', 's'], ['name', 's'], ['useMap', 's', 'usemap'], ['width', 's'], ['height', 's'], ['align', 's'], ['archive', 's'], ['code', 's'],
+      ['declare', 'b'], ['hspace', 'ul'], ['standby', 's'], ['vspace', 'ul'], ['codeBase', 'u', 'codebase'], ['codeType', 's', 'codetype'], ['border', 'sn']],
+    HTMLOListElement: [['reversed', 'b'], ['start', 'l', 0, 1], ['type', 's'], ['compact', 'b']],
+    HTMLOptGroupElement: [['disabled', 'b'], ['label', 's']],
+    HTMLOptionElement: [['disabled', 'b'], ['defaultSelected', 'b', 'selected']],
+    HTMLOutputElement: [['htmlFor', 't', 'for'], ['name', 's']],
+    HTMLParagraphElement: [['align', 's']],
+    HTMLParamElement: [['name', 's'], ['value', 's'], ['type', 's'], ['valueType', 's', 'valuetype']],
+    HTMLPreElement: [['width', 'l']],
+    HTMLScriptElement: [['src', 'u'], ['type', 's'], ['noModule', 'b', 'nomodule'], ['defer', 'b'], ['crossOrigin', 'e', 'crossorigin', CORS], ['integrity', 's'],
+      ['referrerPolicy', 'e', 0, REF], ['charset', 's'], ['event', 's'], ['htmlFor', 's', 'for'], ['blocking', 't']],
+    HTMLSelectElement: [['disabled', 'b'], ['multiple', 'b'], ['name', 's'], ['required', 'b'], ['size', 'ul', 0, 0]],
+    HTMLSlotElement: [['name', 's']],
+    HTMLSourceElement: [['src', 'u'], ['type', 's'], ['srcset', 's'], ['sizes', 's'], ['media', 's'], ['width', 'ul'], ['height', 'ul']],
+    HTMLStyleElement: [['media', 's'], ['type', 's'], ['blocking', 't']],
+    HTMLTableElement: [['align', 's'], ['border', 's'], ['frame', 's'], ['rules', 's'], ['summary', 's'], ['width', 's'], ['bgColor', 'sn', 'bgcolor'],
+      ['cellPadding', 'sn', 'cellpadding'], ['cellSpacing', 'sn', 'cellspacing']],
+    HTMLTableCaptionElement: [['align', 's']],
+    HTMLTableColElement: [['span', 'cl', 0, [1, 1000, 1]], ['width', 's']].concat(CELL),
+    HTMLTableSectionElement: CELL,
+    HTMLTableRowElement: CELL.concat([['bgColor', 'sn', 'bgcolor']]),
+    HTMLTableCellElement: [['colSpan', 'cl', 'colspan', [1, 1000, 1]], ['rowSpan', 'cl', 'rowspan', [0, 65534, 1]], ['headers', 's'], ['abbr', 's'],
+      ['scope', 'e', 0, { k: ['row', 'col', 'rowgroup', 'colgroup'] }], ['axis', 's'], ['height', 's'], ['width', 's'], ['noWrap', 'b', 'nowrap'],
+      ['bgColor', 'sn', 'bgcolor']].concat(CELL),
+    HTMLTextAreaElement: [['cols', 'lul', 0, 20], ['dirName', 's', 'dirname'], ['disabled', 'b'], ['name', 's'], ['placeholder', 's'], ['readOnly', 'b', 'readonly'],
+      ['required', 'b'], ['rows', 'lul', 0, 2], ['wrap', 's']],
+    HTMLTimeElement: [['dateTime', 's', 'datetime']],
+    HTMLTrackElement: [['kind', 'e', 0, { k: ['subtitles', 'captions', 'descriptions', 'chapters', 'metadata'], m: 'subtitles', i: 'metadata' }], ['src', 'u'],
+      ['srclang', 's'], ['label', 's'], ['default', 'b']],
+    HTMLUListElement: [['compact', 'b'], ['type', 's']],
+    HTMLVideoElement: [['width', 'ul'], ['height', 'ul'], ['poster', 'u'], ['playsInline', 'b', 'playsinline']],
+  }
+  for (const m of ['HTMLVideoElement', 'HTMLAudioElement']) REFLECT[m] = (REFLECT[m] || []).concat([['src', 'u'], ['crossOrigin', 'e', 'crossorigin', CORS],
+    ['autoplay', 'b'], ['loop', 'b'], ['controls', 'b'], ['defaultMuted', 'b', 'muted']])
+  {
+    const MAX = 2147483647
+    const lower = v => v.replace(/[A-Z]/g, c => c.toLowerCase())
+    // HTML's rules for parsing integers (and non-negative ones), and floating-point numbers.
+    const int = v => { const m = /^[\t\n\f\r ]*([-+]?)([0-9]+)/.exec(v); return m ? (m[1] === '-' ? -1 : 1) * Number(m[2]) : null }
+    const float = v => { const m = /^[\t\n\f\r ]*(-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)/.exec(v); if (!m) return null; const n = Number(m[1]); return isFinite(n) ? (n === 0 ? 0 : n) : null }
+    const str = (el, a) => { const v = el.getAttribute(a); return v === null ? '' : v }
+    const kinds = {
+      s: (a) => ({ get() { return str(this, a) }, set(v) { this.setAttribute(a, String(v)) } }),
+      sn: (a) => ({ get() { return str(this, a) }, set(v) { this.setAttribute(a, v === null ? '' : String(v)) } }),
+      u: (a) => ({
+        get() { const v = this.getAttribute(a); if (v === null) return ''; try { return new URL(v, document.baseURI).href } catch (e) { return v } },
+        set(v) { this.setAttribute(a, String(v)) },
+      }),
+      b: (a) => ({ get() { return this.hasAttribute(a) }, set(v) { if (v) this.setAttribute(a, ''); else this.removeAttribute(a) } }),
+      l: (a, def = 0) => ({
+        get() { const n = int(str(this, a)); return n === null || n < -MAX - 1 || n > MAX ? def : n },
+        set(v) { this.setAttribute(a, String(+v | 0)) },
+      }),
+      ul: (a, def = 0) => ({
+        get() { const n = int(str(this, a)); return n === null || n < 0 || n > MAX ? def : n },
+        set(v) { let n = +v >>> 0; if (n > MAX) n = def; this.setAttribute(a, String(n)) },
+      }),
+      lul: (a, def = 1) => ({
+        get() { const n = int(str(this, a)); return n === null || n <= 0 || n > MAX ? def : n },
+        set(v) { let n = +v >>> 0; if (n === 0) throw new DOMException('the value must be greater than zero', 'IndexSizeError'); if (n > MAX) n = def; this.setAttribute(a, String(n)) },
+      }),
+      cl: (a, [min, max, def]) => ({
+        get() { const n = int(str(this, a)); return n === null || n < 0 || n > MAX ? def : Math.min(max, Math.max(min, n)) },
+        set(v) { let n = +v >>> 0; if (n > MAX) n = def; this.setAttribute(a, String(n)) },
+      }),
+      d: (a, def = 0) => ({
+        get() { const n = float(str(this, a)); return n === null ? def : n },
+        set(v) { const n = +v; if (!isFinite(n)) throw new TypeError('the value must be finite'); this.setAttribute(a, String(n)) },
+      }),
+      e: (a, spec) => ({
+        get() {
+          const v = this.getAttribute(a)
+          if (v === null) return spec.m === undefined ? '' : spec.m
+          const k = lower(v)
+          if (spec.k.includes(k)) return k
+          return spec.i === undefined ? '' : spec.i
+        },
+        set(v) { if (spec.n && v === null) this.removeAttribute(a); else this.setAttribute(a, String(v)) },
+      }),
+      t: (a) => ({ get() { return __tokenList(this, a) }, set(v) { this.setAttribute(a, String(v)) } }),
+    }
+    // Native accessors that already reflect the attribute exactly stay as they are.
+    const plain = { s: 1, u: 1, b: 1 }
+    for (const iface in REFLECT) {
+      const C = g[iface]
+      if (!C || !C.prototype) continue
+      for (const [prop, type, attrName, extra] of REFLECT[iface]) {
+        if (plain[type] && Object.getOwnPropertyDescriptor(C.prototype, prop)) continue
+        const d = kinds[type](attrName || prop.toLowerCase(), extra)
+        Object.defineProperty(C.prototype, prop, { get: d.get, set: d.set, configurable: true, enumerable: true })
+      }
+    }
+  }
 })(window)

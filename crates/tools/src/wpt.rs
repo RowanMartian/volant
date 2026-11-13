@@ -19,9 +19,10 @@ use volant_engine::script;
 
 const ORIGIN: &str = "http://web-platform.test";
 /// How long one test file may take, everything included.
-const LIMIT: Duration = Duration::from_secs(40);
-/// testharness.js's own timeout for a normal test is 10 s, a long one 60 s; ours waits this long.
+const LIMIT: Duration = Duration::from_secs(100);
+/// testharness.js times a test out after 10 s (60 s for a long one); ours waits a little longer.
 const WAIT: Duration = Duration::from_secs(12);
+const WAIT_LONG: Duration = Duration::from_secs(65);
 
 /// Takes testharness.js's results as they're reported, instead of drawing them.
 const REPORT: &str = r#"
@@ -72,6 +73,8 @@ fn wrapper(root: &Path, path: &str) -> Option<String> {
             let s = s.trim();
             let url = if s.starts_with('/') || s.contains("://") { s.to_string() } else { format!("{dir}{s}") };
             page.push_str(&format!("<script src=\"{url}\"></script>\n"));
+        } else if meta.trim() == "timeout=long" {
+            page.push_str("<meta name=timeout content=long>\n");
         } else if let Some(t) = meta.trim().strip_prefix("title=") {
             page.push_str(&format!("<title>{}</title>\n", t.trim()));
         }
@@ -115,6 +118,8 @@ pub fn one(root: &str, path: &str) {
     let host: std::rc::Rc<dyn script::Host> = host;
     let mut rt = script::Runtime::new(&html, &url, volant_engine::Env { width: 800.0, dark: false }, host);
     rt.run_scripts();
+    let long = html.contains("name=timeout content=long") || html.contains("name=\"timeout\" content=\"long\"") || html.contains("META: timeout=long");
+    let wait = if long { WAIT_LONG } else { WAIT };
     let started = Instant::now();
     let probe = "typeof __wpt_result == 'string' ? __wpt_result : ''";
     let mut result = String::new();
@@ -123,7 +128,7 @@ pub fn one(root: &str, path: &str) {
         if let Ok(v) = rt.interp.run(probe) {
             result = rt.interp.to_str(&v).map(|s| s.to_string()).unwrap_or_default();
         }
-        if !result.is_empty() || started.elapsed() > WAIT {
+        if !result.is_empty() || started.elapsed() > wait {
             break;
         }
         rt.tick();

@@ -3916,6 +3916,8 @@ const ELEMENT_INTERFACES: &[(&str, &[&str], &str)] = &[
     ("HTMLTimeElement", &["time"], "html"), ("HTMLDataElement", &["data"], "html"), ("HTMLDataListElement", &["datalist"], "html"), ("HTMLMapElement", &["map"], "html"),
     ("HTMLAreaElement", &["area"], "html"), ("HTMLBaseElement", &["base"], "html"), ("HTMLTitleElement", &["title"], "html"),
     ("HTMLQuoteElement", &["blockquote", "q"], "html"), ("HTMLModElement", &["ins", "del"], "html"), ("HTMLMenuElement", &["menu"], "html"),
+    ("HTMLFontElement", &["font"], "html"), ("HTMLParamElement", &["param"], "html"), ("HTMLDirectoryElement", &["dir"], "html"),
+    ("HTMLFrameElement", &["frame"], "html"), ("HTMLFrameSetElement", &["frameset"], "html"), ("HTMLMarqueeElement", &["marquee"], "html"),
     ("HTMLFormControlsCollection-unused", &[], "html"), ("HTMLNoScriptElement-unused", &[], "html"),
     ("SVGSVGElement", &["svg"], "svg-graphics"), ("SVGPathElement", &["path"], "svg-graphics"), ("SVGGElement", &["g"], "svg-graphics"),
     ("SVGCircleElement", &["circle"], "svg-graphics"), ("SVGRectElement", &["rect"], "svg-graphics"), ("SVGUseElement", &["use"], "svg-graphics"),
