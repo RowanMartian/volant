@@ -53,6 +53,8 @@ pub enum Kind {
     /// A regular expression: (compiled, source, flags)
     RegExp(Rc<crate::regex::Regex>, Rc<str>, Rc<str>),
     Promise(Rc<RefCell<crate::promise::PState>>),
+    /// `new Proxy(target, handler)`; a revoked proxy's handler is null.
+    Proxy(Value, Value),
 }
 
 #[derive(Clone)]
@@ -66,11 +68,40 @@ pub struct Object {
     map: HashMap<Rc<str>, Slot>,
     pub proto: Option<Obj>,
     pub kind: Kind,
+    /// Own properties left out of `Object.keys` and `for in` (defineProperty's default).
+    hidden: Option<Box<Vec<Rc<str>>>>,
 }
 
 impl Object {
     pub fn new(proto: Option<Obj>, kind: Kind) -> Self {
-        Object { keys: Vec::new(), map: HashMap::new(), proto, kind }
+        Object { keys: Vec::new(), map: HashMap::new(), proto, kind, hidden: None }
+    }
+    /// Marks an own property enumerable or not.
+    pub fn set_enumerable(&mut self, k: &str, yes: bool) {
+        let hidden = self.hidden.get_or_insert_with(Default::default);
+        let at = hidden.iter().position(|x| &**x == k);
+        match (yes, at) {
+            (true, Some(p)) => {
+                hidden.remove(p);
+            }
+            (false, None) => hidden.push(k.into()),
+            _ => {}
+        }
+    }
+    pub fn is_enumerable(&self, k: &str) -> bool {
+        !self.hidden.as_ref().map(|h| h.iter().any(|x| &**x == k)).unwrap_or(false)
+    }
+    /// Every own key, enumerable or not (hidden internals excepted).
+    pub fn all_keys(&self) -> Vec<Rc<str>> {
+        let mut out: Vec<Rc<str>> = match &self.kind {
+            Kind::Array(a) => (0..a.len()).map(|i| i.to_string().into()).collect(),
+            _ => Vec::new(),
+        };
+        out.extend(self.keys.iter().filter(|k| !k.starts_with('\0')).cloned());
+        if matches!(self.kind, Kind::Array(_)) {
+            out.push("length".into());
+        }
+        out
     }
     pub fn get_own(&self, k: &str) -> Option<&Slot> {
         self.map.get(k)
@@ -93,6 +124,9 @@ impl Object {
     pub fn delete(&mut self, k: &str) -> bool {
         if self.map.remove(k).is_some() {
             self.keys.retain(|x| &**x != k);
+            if let Some(h) = &mut self.hidden {
+                h.retain(|x| &**x != k);
+            }
         }
         true
     }
@@ -103,7 +137,10 @@ impl Object {
             Kind::Boxed(Value::Str(s)) => (0..s.chars().count()).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
-        out.extend(self.keys.iter().filter(|k| !k.starts_with('\0')).cloned());
+        match &self.hidden {
+            Some(h) => out.extend(self.keys.iter().filter(|k| !k.starts_with('\0') && !h.contains(k)).cloned()),
+            None => out.extend(self.keys.iter().filter(|k| !k.starts_with('\0')).cloned()),
+        }
         out
     }
 }
@@ -121,16 +158,20 @@ pub enum Flow {
 const FIELDS: &str = "\0fields";
 
 pub struct ScopeData {
-    vars: HashMap<Rc<str>, (Value, bool)>,
+    pub(crate) vars: HashMap<Rc<str>, (Value, bool)>,
     parent: Option<Scope>,
     /// `this` (and `arguments`) for a function scope; arrows look outward.
     this: Option<Value>,
+    /// A module's imported names: (the exporting module's namespace, the name there).
+    pub(crate) imports: Option<Box<HashMap<Rc<str>, (Obj, Rc<str>)>>>,
+    /// The object of a `with` statement: its properties are variables here.
+    with: Option<Obj>,
 }
 
 pub type Scope = Rc<RefCell<ScopeData>>;
 
-fn scope(parent: Option<&Scope>, _func: bool, this: Option<Value>) -> Scope {
-    Rc::new(RefCell::new(ScopeData { vars: HashMap::new(), parent: parent.cloned(), this }))
+pub(crate) fn scope(parent: Option<&Scope>, _func: bool, this: Option<Value>) -> Scope {
+    Rc::new(RefCell::new(ScopeData { vars: HashMap::new(), parent: parent.cloned(), this, imports: None, with: None }))
 }
 
 /// How a number prints in JavaScript.
@@ -197,6 +238,12 @@ pub struct Interp {
     pub max_depth: u32,
     /// The names of the JS functions being called, innermost last (for error messages).
     pub call_names: Vec<(Option<Rc<str>>, u32)>,
+    /// Fetches modules (`import`); without one, imports fail.
+    pub loader: Option<Rc<dyn crate::module::Loader>>,
+    /// Modules by URL, loaded once each.
+    pub(crate) modules: HashMap<Rc<str>, crate::module::ModuleRef>,
+    /// What classic scripts' `import()` resolves against (the document's URL).
+    pub base_url: Rc<str>,
 }
 
 impl Default for Interp {
@@ -241,6 +288,9 @@ impl Interp {
             depth: 0,
             max_depth: 400,
             call_names: Vec::new(),
+            loader: None,
+            modules: HashMap::new(),
+            base_url: "".into(),
         };
         crate::builtins::install(&mut i);
         i
@@ -277,8 +327,22 @@ impl Interp {
             let mut o = o.borrow_mut();
             o.set_own("name", Value::Str(name.into()));
             o.set_own("message", Value::Str(msg.into()));
+            let stack = self.stack_trace();
+            if std::env::var_os("VOLANT_TRACE_ERRORS").is_some() {
+                eprintln!("{name}: {msg}\n{stack}");
+            }
+            o.set_own("stack", Value::Str(format!("{name}: {msg}\n{stack}").into()));
         }
         e
+    }
+
+    /// The JS functions being run, innermost first ("    at name (line N)").
+    pub fn stack_trace(&self) -> String {
+        let mut out = String::new();
+        for (n, line) in self.call_names.iter().rev().take(10) {
+            out.push_str(&format!("    at {} (line {line})\n", n.as_deref().unwrap_or("<anonymous>")));
+        }
+        out
     }
 
     pub fn throw<T>(&self, name: &str, msg: &str) -> Res<T> {
@@ -303,8 +367,8 @@ impl Interp {
             Value::Num(_) => "number",
             Value::Str(s) if s.starts_with("\0@") => "symbol",
             Value::Str(_) => "string",
-            Value::Obj(o) => {
-                if matches!(o.borrow().kind, Kind::Function(_)) {
+            Value::Obj(_) => {
+                if Self::is_callable(v) {
                     "function"
                 } else {
                     "object"
@@ -314,7 +378,14 @@ impl Interp {
     }
 
     pub fn is_callable(v: &Value) -> bool {
-        matches!(v, Value::Obj(o) if matches!(o.borrow().kind, Kind::Function(_)))
+        match v {
+            Value::Obj(o) => match &o.borrow().kind {
+                Kind::Function(_) => true,
+                Kind::Proxy(t, _) => Self::is_callable(t),
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// ToPrimitive, preferring strings (`valueOf` for numbers first when `number`).
@@ -444,6 +515,11 @@ impl Interp {
             Value::Obj(o) => {
                 let b = o.borrow();
                 match &b.kind {
+                    Kind::Proxy(t, h) => {
+                        let (t, h) = (t.clone(), h.clone());
+                        drop(b);
+                        return self.proxy_get(t, h, k, v);
+                    }
                     Kind::Array(a) => {
                         if k == "length" {
                             return Ok(Value::Num(a.len() as f64));
@@ -494,6 +570,9 @@ impl Interp {
             }
             return Ok(()); // setting on a primitive does nothing
         };
+        if let Some((t, h)) = Self::proxy_parts(v) {
+            return self.proxy_set(t, h, k, val, v);
+        }
         {
             let mut b = o.borrow_mut();
             if let Kind::Array(a) = &mut b.kind {
@@ -626,8 +705,15 @@ impl Interp {
     }
 
     /// Declares `var`s and functions before a body runs (hoisting).
-    fn hoist(&mut self, body: &[Stmt], sc: &Scope, func_scope: bool) {
+    pub(crate) fn hoist(&mut self, body: &[Stmt], sc: &Scope, func_scope: bool) {
         for s in body {
+            let s = match s {
+                Stmt::Export(e) => match &**e {
+                    crate::parse::Export::Decl(d, _) => d,
+                    _ => continue,
+                },
+                s => s,
+            };
             match s {
                 Stmt::Func(f) => {
                     let fv = self.closure(f, sc);
@@ -665,7 +751,7 @@ impl Interp {
                 }
                 self.hoist_vars(body, sc);
             }
-            Stmt::ForIn(_, _, _, _, body) | Stmt::While(_, body) | Stmt::DoWhile(body, _) | Stmt::Labeled(_, body) => self.hoist_vars(body, sc),
+            Stmt::ForIn(_, _, _, _, body) | Stmt::While(_, body) | Stmt::DoWhile(body, _) | Stmt::Labeled(_, body) | Stmt::With(_, body) => self.hoist_vars(body, sc),
             Stmt::Try(a, c, f) => {
                 a.iter().for_each(|s| self.hoist_vars(s, sc));
                 if let Some((_, c)) = c {
@@ -680,7 +766,7 @@ impl Interp {
         }
     }
 
-    fn closure(&self, f: &Rc<Func>, sc: &Scope) -> Value {
+    pub(crate) fn closure(&self, f: &Rc<Func>, sc: &Scope) -> Value {
         let this = if f.arrow { Some(self.lookup_this(sc)) } else { None };
         let fv = self.obj(Kind::Function(Callable::Closure { func: f.clone(), scope: sc.clone(), this, sup: None }));
         if let Value::Obj(o) = &fv {
@@ -691,6 +777,7 @@ impl Interp {
                 // Every ordinary function can be a constructor.
                 let proto = Rc::new(RefCell::new(Object::new(Some(self.object_proto.clone()), Kind::Plain)));
                 proto.borrow_mut().set_own("constructor", fv.clone());
+                proto.borrow_mut().set_enumerable("constructor", false);
                 b.set_own("prototype", Value::Obj(proto));
             }
         }
@@ -708,11 +795,22 @@ impl Interp {
         Value::Undefined
     }
 
-    fn lookup(&mut self, sc: &Scope, name: &str) -> Res<Value> {
+    pub(crate) fn lookup(&mut self, sc: &Scope, name: &str) -> Res<Value> {
         let mut cur = Some(sc.clone());
         while let Some(s) = cur {
             if let Some((v, _)) = s.borrow().vars.get(name) {
                 return Ok(v.clone());
+            }
+            let imported = s.borrow().imports.as_ref().and_then(|m| m.get(name).cloned());
+            if let Some((ns, k)) = imported {
+                return self.get(&Value::Obj(ns), &k);
+            }
+            let with = s.borrow().with.clone();
+            if let Some(w) = with {
+                let w = Value::Obj(w);
+                if self.has(&w, name)? {
+                    return self.get(&w, name);
+                }
             }
             cur = s.borrow().parent.clone();
         }
@@ -733,6 +831,16 @@ impl Interp {
                 }
                 slot.0 = v;
                 return Ok(());
+            }
+            if s.borrow().imports.as_ref().map(|m| m.contains_key(name)).unwrap_or(false) {
+                return self.throw("TypeError", &format!("assignment to imported binding '{name}'"));
+            }
+            let with = s.borrow().with.clone();
+            if let Some(w) = with {
+                let w = Value::Obj(w);
+                if self.has(&w, name)? {
+                    return self.set(&w, name, v);
+                }
             }
             cur = s.borrow().parent.clone();
         }
@@ -900,6 +1008,14 @@ impl Interp {
 
     fn call_inner(&mut self, f: &Value, this: Value, args: Vec<Value>) -> Res<Value> {
         let Value::Obj(o) = f else { return self.throw("TypeError", &format!("{f:?} is not a function")) };
+        if let Some((target, handler)) = Self::proxy_parts(f) {
+            let trap = self.get(&handler, "apply")?;
+            if !Self::is_callable(&trap) {
+                return self.call(&target, this, args);
+            }
+            let list = self.array(args);
+            return self.call(&trap, handler, vec![target, this, list]);
+        }
         let callable = match &o.borrow().kind {
             Kind::Function(Callable::Native(n)) => Ok(n.clone()),
             Kind::Function(Callable::Closure { func, scope, this: lexical, sup }) => Err((func.clone(), scope.clone(), lexical.clone(), sup.clone())),
@@ -991,6 +1107,14 @@ impl Interp {
     pub fn construct(&mut self, f: &Value, args: Vec<Value>) -> Res<Value> {
         if !Self::is_callable(f) {
             return self.throw("TypeError", "not a constructor");
+        }
+        if let Some((target, handler)) = Self::proxy_parts(f) {
+            let trap = self.get(&handler, "construct")?;
+            if !Self::is_callable(&trap) {
+                return self.construct(&target, args);
+            }
+            let list = self.array(args);
+            return self.call(&trap, handler, vec![target, list, f.clone()]);
         }
         let is_native = matches!(f, Value::Obj(o) if matches!(o.borrow().kind, Kind::Function(Callable::Native(_))));
         if is_native {
@@ -1103,7 +1227,21 @@ impl Interp {
                 }
                 Flow::Normal
             }
-            Stmt::Func(_) | Stmt::Empty => Flow::Normal,
+            Stmt::Func(_) | Stmt::Empty | Stmt::Import(..) => Flow::Normal,
+            Stmt::Export(e) => match &**e {
+                crate::parse::Export::Decl(d, _) => self.exec(d, sc)?,
+                crate::parse::Export::Default(e) => {
+                    let v = self.eval(e, sc)?;
+                    if let (Expr::Func(f), Value::Obj(o)) = (e, &v) {
+                        if f.name.is_none() {
+                            o.borrow_mut().set_own("name", Value::Str("default".into()));
+                        }
+                    }
+                    sc.borrow_mut().vars.insert("default".into(), (v, false));
+                    Flow::Normal
+                }
+                _ => Flow::Normal,
+            },
             Stmt::Return(e) => Flow::Return(match e {
                 Some(e) => self.eval(e, sc)?,
                 None => Value::Undefined,
@@ -1151,6 +1289,7 @@ impl Interp {
                     self.iterate(&it)?
                 } else {
                     match &it {
+                        Value::Obj(_) if Self::proxy_parts(&it).is_some() => self.keys_of(&it)?.into_iter().map(Value::Str).collect(),
                         Value::Obj(o) => {
                             // Own keys, then inherited enumerable ones (not built-in prototypes).
                             let mut keys = o.borrow().own_keys();
@@ -1264,6 +1403,13 @@ impl Interp {
                 }
                 Flow::Normal
             }
+            Stmt::With(o, body) => {
+                let ov = self.eval(o, sc)?;
+                let Value::Obj(w) = ov else { return self.throw("TypeError", "with needs an object") };
+                let wsc = scope(Some(sc), false, None);
+                wsc.borrow_mut().with = Some(w);
+                self.exec(body, &wsc)?
+            }
             Stmt::Labeled(l, body) => match self.exec_labeled(body, sc, Some(l))? {
                 Flow::Break(Some(b)) if &b == l => Flow::Normal,
                 other => other,
@@ -1339,6 +1485,7 @@ impl Interp {
                     let m = self.closure(f, sc);
                     set_super(&m, parent.clone());
                     target.borrow_mut().set_own(&key, m);
+                    target.borrow_mut().set_enumerable(&key, false);
                 }
                 Member::Get(f) | Member::Set(f) => {
                     let m = self.closure(f, sc);
@@ -1354,6 +1501,7 @@ impl Interp {
                         st = Some(m);
                     }
                     target.borrow_mut().set_slot(&key, Slot::Accessor(g, st));
+                    target.borrow_mut().set_enumerable(&key, false);
                 }
                 Member::StaticBlock(body) => statics.push(Stmt::Block(body.clone())),
                 Member::Field(init) => {
@@ -1481,6 +1629,12 @@ impl Interp {
             }
             Expr::Func(f) => self.closure(f, sc),
             Expr::Regex(body, flags) => self.regexp(body, flags)?,
+            Expr::Import(spec) => {
+                let v = self.eval(spec, sc)?;
+                let spec = self.to_str(&v)?;
+                self.dynamic_import(&spec, sc)
+            }
+            Expr::ImportMeta => self.import_meta(sc),
             Expr::Await(e) => {
                 let v = self.eval(e, sc)?;
                 self.await_value(v)?
@@ -1517,17 +1671,7 @@ impl Interp {
                         let ov = self.eval(o, sc)?;
                         let kv = self.eval(k, sc)?;
                         let key = self.key(&kv)?;
-                        if let Value::Obj(oo) = &ov {
-                            if let Kind::Array(a) = &mut oo.borrow_mut().kind {
-                                if let Ok(i) = key.parse::<usize>() {
-                                    if i < a.len() {
-                                        a[i] = Value::Undefined;
-                                    }
-                                    return Ok(Value::Bool(true));
-                                }
-                            }
-                            oo.borrow_mut().delete(&key);
-                        }
+                        return Ok(Value::Bool(self.delete_property(&ov, &key)?));
                     }
                     return Ok(Value::Bool(true));
                 }
@@ -1542,6 +1686,13 @@ impl Interp {
                 }
             }
             Expr::Update(op, prefix, target) => {
+                if let Some((obj, key)) = self.member_ref(target, sc)? {
+                    let old = self.get(&obj, &key)?;
+                    let n = self.to_number(&old)?;
+                    let new = if *op == "++" { n + 1.0 } else { n - 1.0 };
+                    self.set(&obj, &key, Value::Num(new))?;
+                    return Ok(Value::Num(if *prefix { new } else { n }));
+                }
                 let old = self.eval(target, sc)?;
                 let n = self.to_number(&old)?;
                 let new = if *op == "++" { n + 1.0 } else { n - 1.0 };
@@ -1567,6 +1718,31 @@ impl Interp {
                 }
             }
             Expr::Assign(op, target, value) => {
+                // `o.k = v`: the object and key are evaluated before the value.
+                if let Some((obj, key)) = self.member_ref(target, sc)? {
+                    let v = match *op {
+                        "=" => self.eval(value, sc)?,
+                        "&&=" | "||=" | "??=" => {
+                            let cur = self.get(&obj, &key)?;
+                            let keep = match *op {
+                                "&&=" => !Self::truthy(&cur),
+                                "||=" => Self::truthy(&cur),
+                                _ => !matches!(cur, Value::Undefined | Value::Null),
+                            };
+                            if keep {
+                                return Ok(cur);
+                            }
+                            self.eval(value, sc)?
+                        }
+                        _ => {
+                            let cur = self.get(&obj, &key)?;
+                            let rv = self.eval(value, sc)?;
+                            self.binary(&op[..op.len() - 1], &cur, &rv)?
+                        }
+                    };
+                    self.set(&obj, &key, v.clone())?;
+                    return Ok(v);
+                }
                 if *op == "=" {
                     let v = self.eval(value, sc)?;
                     if let (Expr::Ident(n), Expr::Func(f), Value::Obj(o)) = (&**target, &**value, &v) {
@@ -1705,6 +1881,18 @@ impl Interp {
         })
     }
 
+    /// For a member expression (not `super.x`): its object and key, evaluated.
+    fn member_ref(&mut self, target: &Expr, sc: &Scope) -> Res<Option<(Value, Rc<str>)>> {
+        let Expr::Member(o, k, _) = target else { return Ok(None) };
+        if matches!(&**o, Expr::Ident(n) if &**n == "super") {
+            return Ok(None);
+        }
+        let obj = self.eval(o, sc)?;
+        let kv = self.eval(k, sc)?;
+        let key = self.key(&kv)?;
+        Ok(Some((obj, key)))
+    }
+
     pub fn binary(&mut self, op: &str, a: &Value, b: &Value) -> Res<Value> {
         Ok(match op {
             "+" => {
@@ -1763,9 +1951,11 @@ impl Interp {
             }
             "instanceof" => Value::Bool(self.instance_of(a, b)?),
             "in" => {
-                let Value::Obj(o) = b else { return self.throw("TypeError", "'in' needs an object") };
+                if !matches!(b, Value::Obj(_)) {
+                    return self.throw("TypeError", "'in' needs an object");
+                }
                 let k = self.key(a)?;
-                Value::Bool(self.has_property(o, &k))
+                Value::Bool(self.has(b, &k)?)
             }
             _ => return self.throw("SyntaxError", &format!("unknown operator {op}")),
         })
@@ -1807,13 +1997,4 @@ pub fn str_to_number(s: &str) -> f64 {
     }
 }
 
-/// The names a pattern binds.
-fn pattern_names(p: &Expr, out: &mut Vec<Rc<str>>) {
-    match p {
-        Expr::Ident(n) => out.push(n.clone()),
-        Expr::Default(t, _) | Expr::Rest(t) => pattern_names(t, out),
-        Expr::ArrayPat(items) => items.iter().flatten().for_each(|i| pattern_names(i, out)),
-        Expr::ObjectPat(props) => props.iter().for_each(|(_, v)| pattern_names(v, out)),
-        _ => {}
-    }
-}
+use crate::parse::pattern_names;

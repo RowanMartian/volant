@@ -5,11 +5,11 @@ use crate::interp::{num_to_string, str_to_number, to_i32, Callable, Interp, Kind
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn arg(a: &[Value], i: usize) -> Value {
+pub(crate) fn arg(a: &[Value], i: usize) -> Value {
     a.get(i).cloned().unwrap_or(Value::Undefined)
 }
 
-fn def(i: &Interp, o: &Obj, name: &str, f: impl Fn(&mut Interp, Value, Vec<Value>) -> Res<Value> + 'static) {
+pub(crate) fn def(i: &Interp, o: &Obj, name: &str, f: impl Fn(&mut Interp, Value, Vec<Value>) -> Res<Value> + 'static) {
     let fv = i.native(f);
     if let Value::Obj(fo) = &fv {
         fo.borrow_mut().set_own("name", Value::Str(name.into()));
@@ -19,6 +19,44 @@ fn def(i: &Interp, o: &Obj, name: &str, f: impl Fn(&mut Interp, Value, Vec<Value
 
 fn global(i: &mut Interp, name: &str, v: Value) {
     i.global_obj.borrow_mut().set_own(name, v);
+}
+
+/// `Object.defineProperty`: an own data property or accessor, set directly
+/// (an inherited setter isn't run), enumerable only if the descriptor says so.
+fn define_property(i: &mut Interp, o: &Obj, k: &str, desc: &Value) -> Res<()> {
+    let ov = Value::Obj(o.clone());
+    let has = |i: &mut Interp, name: &str| -> Res<bool> { i.has(desc, name) };
+    let existed = i.has_own(&ov, k)?;
+    let (g, s) = (i.get(desc, "get")?, i.get(desc, "set")?);
+    if Interp::is_callable(&g) || Interp::is_callable(&s) {
+        let old = o.borrow().get_own(k).cloned();
+        let (mut og, mut os) = match old {
+            Some(Slot::Accessor(a, b)) => (a, b),
+            _ => (None, None),
+        };
+        if has(i, "get")? {
+            og = Interp::is_callable(&g).then_some(g);
+        }
+        if has(i, "set")? {
+            os = Interp::is_callable(&s).then_some(s);
+        }
+        o.borrow_mut().set_slot(k, Slot::Accessor(og, os));
+    } else if has(i, "value")? || !existed {
+        let v = i.get(desc, "value")?;
+        let is_array_slot = matches!(o.borrow().kind, Kind::Array(_)) && (k == "length" || k.parse::<usize>().is_ok());
+        if is_array_slot {
+            i.set(&ov, k, v)?;
+        } else {
+            o.borrow_mut().set_slot(k, Slot::Data(v));
+        }
+    }
+    if has(i, "enumerable")? {
+        let e = i.get(desc, "enumerable")?;
+        o.borrow_mut().set_enumerable(k, Interp::truthy(&e));
+    } else if !existed {
+        o.borrow_mut().set_enumerable(k, false);
+    }
+    Ok(())
 }
 
 /// A constructor function with a prototype object.
@@ -364,14 +402,7 @@ pub fn install(i: &mut Interp) {
     }));
     def(i, &op, "hasOwnProperty", |i, t, a| {
         let k = i.key(&arg(&a, 0))?;
-        Ok(Value::Bool(match &t {
-            Value::Obj(o) => {
-                let b = o.borrow();
-                b.get_own(&k).is_some() || matches!(&b.kind, Kind::Array(arr) if k.parse::<usize>().map(|x| x < arr.len()).unwrap_or(false))
-            }
-            Value::Str(s) => k.parse::<usize>().map(|x| x < s.chars().count()).unwrap_or(false),
-            _ => false,
-        }))
+        Ok(Value::Bool(i.has_own(&t, &k)?))
     });
     def(i, &op, "toString", |i, t, _a| {
         let tag: String = match &t {
@@ -394,6 +425,7 @@ pub fn install(i: &mut Interp) {
                         Kind::Map(_) => "Map".into(),
                         Kind::Set(_) => "Set".into(),
                         Kind::Promise(_) => "Promise".into(),
+                        Kind::Proxy(t, _) if matches!(t, Value::Obj(x) if matches!(x.borrow().kind, Kind::Array(_))) => "Array".into(),
                         Kind::Boxed(Value::Num(_)) => "Number".into(),
                         Kind::Boxed(Value::Str(_)) => "String".into(),
                         Kind::Boxed(Value::Bool(_)) => "Boolean".into(),
@@ -418,22 +450,18 @@ pub fn install(i: &mut Interp) {
     });
     def(i, &object, "keys", |i, _t, a| {
         let v = arg(&a, 0);
-        let keys = match &v {
-            Value::Obj(o) => o.borrow().own_keys(),
-            Value::Str(s) => (0..s.chars().count()).map(|k| k.to_string().into()).collect(),
-            _ => Vec::new(),
-        };
+        let keys = i.keys_of(&v)?;
         Ok(i.array(keys.into_iter().map(Value::Str).collect()))
     });
     def(i, &object, "values", |i, _t, a| {
         let v = arg(&a, 0);
-        let keys = if let Value::Obj(o) = &v { o.borrow().own_keys() } else { Vec::new() };
+        let keys = i.keys_of(&v)?;
         let vals = keys.iter().map(|k| i.get(&v, k)).collect::<Res<Vec<_>>>()?;
         Ok(i.array(vals))
     });
     def(i, &object, "entries", |i, _t, a| {
         let v = arg(&a, 0);
-        let keys = if let Value::Obj(o) = &v { o.borrow().own_keys() } else { Vec::new() };
+        let keys = i.keys_of(&v)?;
         let mut out = Vec::new();
         for k in keys {
             let val = i.get(&v, &k)?;
@@ -444,8 +472,8 @@ pub fn install(i: &mut Interp) {
     def(i, &object, "assign", |i, _t, a| {
         let target = arg(&a, 0);
         for src in a.iter().skip(1) {
-            if let Value::Obj(o) = src {
-                let keys = o.borrow().own_keys();
+            if let Value::Obj(_) = src {
+                let keys = i.keys_of(src)?;
                 for k in keys {
                     let v = i.get(src, &k)?;
                     i.set(&target, &k, v)?;
@@ -475,15 +503,8 @@ pub fn install(i: &mut Interp) {
         Ok(o)
     });
     def(i, &object, "hasOwn", |i, _t, a| {
-        let o = arg(&a, 0);
         let k = i.key(&arg(&a, 1))?;
-        Ok(Value::Bool(match &o {
-            Value::Obj(ob) => {
-                let b = ob.borrow();
-                b.get_own(&k).is_some() || matches!(&b.kind, Kind::Array(arr) if k.parse::<usize>().map(|x| x < arr.len()).unwrap_or(false) || &*k == "length")
-            }
-            _ => false,
-        }))
+        Ok(Value::Bool(i.has_own(&arg(&a, 0), &k)?))
     });
     def(i, &object, "getPrototypeOf", |i, _t, a| i.get(&arg(&a, 0), "__proto__"));
     def(i, &object, "setPrototypeOf", |i, _t, a| {
@@ -499,20 +520,50 @@ pub fn install(i: &mut Interp) {
         let (o, desc) = (arg(&a, 0), arg(&a, 2));
         let k = i.key(&arg(&a, 1))?;
         let Value::Obj(oo) = &o else { return i.throw("TypeError", "defineProperty on a non-object") };
-        let (g, s) = (i.get(&desc, "get")?, i.get(&desc, "set")?);
-        if Interp::is_callable(&g) || Interp::is_callable(&s) {
-            let g = Interp::is_callable(&g).then_some(g);
-            let s = Interp::is_callable(&s).then_some(s);
-            oo.borrow_mut().set_slot(&k, Slot::Accessor(g, s));
-        } else {
-            let v = i.get(&desc, "value")?;
-            i.set(&o, &k, v)?;
-        }
+        define_property(i, oo, &k, &desc)?;
         Ok(o)
     });
     def(i, &object, "getOwnPropertyNames", |i, _t, a| {
-        let keys = if let Value::Obj(o) = &arg(&a, 0) { o.borrow().own_keys() } else { Vec::new() };
+        let o = arg(&a, 0);
+        let keys = match &o {
+            Value::Obj(oo) if Interp::proxy_parts(&o).is_none() => oo.borrow().all_keys(),
+            _ => i.keys_of(&o)?,
+        };
         Ok(i.array(keys.into_iter().map(Value::Str).collect()))
+    });
+    def(i, &object, "getOwnPropertyDescriptor", |i, _t, a| {
+        let o = arg(&a, 0);
+        let k = i.key(&arg(&a, 1))?;
+        if !i.has_own(&o, &k)? {
+            return Ok(Value::Undefined);
+        }
+        let d = i.obj(Kind::Plain);
+        let (slot, enumerable) = match &o {
+            Value::Obj(oo) => {
+                let b = oo.borrow();
+                (b.get_own(&k).cloned(), b.is_enumerable(&k))
+            }
+            _ => (None, true),
+        };
+        match slot {
+            Some(Slot::Accessor(g, s)) => {
+                i.set(&d, "get", g.unwrap_or(Value::Undefined))?;
+                i.set(&d, "set", s.unwrap_or(Value::Undefined))?;
+            }
+            _ => {
+                let v = i.get(&o, &k)?;
+                i.set(&d, "value", v)?;
+                i.set(&d, "writable", Value::Bool(true))?;
+            }
+        }
+        i.set(&d, "enumerable", Value::Bool(enumerable))?;
+        i.set(&d, "configurable", Value::Bool(true))?;
+        Ok(d)
+    });
+    def(i, &op, "propertyIsEnumerable", |i, t, a| {
+        let k = i.key(&arg(&a, 0))?;
+        let own = i.has_own(&t, &k)?;
+        Ok(Value::Bool(own && matches!(&t, Value::Obj(o) if o.borrow().is_enumerable(&k))))
     });
 
     // ---------------------------------------------------------- Function
@@ -578,7 +629,13 @@ pub fn install(i: &mut Interp) {
             _ => i.array(a),
         })
     });
-    def(i, &array, "isArray", |_i, _t, a| Ok(Value::Bool(matches!(arg(&a, 0), Value::Obj(o) if matches!(o.borrow().kind, Kind::Array(_))))));
+    def(i, &array, "isArray", |_i, _t, a| {
+        let mut v = arg(&a, 0);
+        while let Some((t, _)) = Interp::proxy_parts(&v) {
+            v = t;
+        }
+        Ok(Value::Bool(matches!(v, Value::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)))))
+    });
     def(i, &array, "from", |i, _t, a| {
         let mut v = match arg(&a, 0) {
             Value::Undefined | Value::Null => Vec::new(),
@@ -1566,6 +1623,7 @@ pub fn install(i: &mut Interp) {
 
     // Promises, timers, iterators, Symbols, regular expressions.
     crate::promise::install(i);
+    crate::proxy::install(i);
     crate::regexp::install(i);
 
     // ---------------------------------------------------------- misc

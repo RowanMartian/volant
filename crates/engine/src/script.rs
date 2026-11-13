@@ -82,6 +82,7 @@ pub struct State {
     /// Scripts already run (or scheduled), so moving one doesn't run it again.
     ran: std::collections::HashSet<NodeId>,
     host: Rc<dyn Host>,
+    loader: Rc<PageLoader>,
     protos: Option<Protos>,
     /// Bumped on every change to the document (so the app knows to lay it out again).
     pub generation: u64,
@@ -810,41 +811,74 @@ fn fire(i: &mut Interp, st: &S, target: NodeId, ty: &str, bubbles: bool) -> bool
 
 // ------------------------------------------------------------------ scripts
 
-fn is_js(dom: &Dom, id: NodeId) -> bool {
-    let ty = dom.attr(id, "type").unwrap_or("").trim().to_ascii_lowercase();
-    (ty.is_empty() || ty == "module" || ty.contains("javascript") || ty.contains("ecmascript")) && dom.attr(id, "nomodule").is_none()
+#[derive(Clone, Copy, PartialEq)]
+enum ScriptKind {
+    Classic,
+    Module,
+    ImportMap,
 }
 
-/// A script's source: inline, or fetched from its `src`.
+/// What a `<script>` holds, if it's something to run.
+fn script_kind(dom: &Dom, id: NodeId) -> Option<ScriptKind> {
+    let ty = dom.attr(id, "type").unwrap_or("").trim().to_ascii_lowercase();
+    match ty.as_str() {
+        "module" => Some(ScriptKind::Module),
+        "importmap" => Some(ScriptKind::ImportMap),
+        // A `nomodule` script is the fallback for browsers without modules.
+        _ if dom.attr(id, "nomodule").is_some() => None,
+        t if t.is_empty() || t.contains("javascript") || t.contains("ecmascript") => Some(ScriptKind::Classic),
+        _ => None,
+    }
+}
+
+fn is_js(dom: &Dom, id: NodeId) -> bool {
+    script_kind(dom, id).is_some()
+}
+
+/// A script's source and where it came from: inline, or fetched from its `src`.
 fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
     let (src, text, url, host) = {
         let s = st.borrow();
         (s.dom.attr(id, "src").map(|x| resolve_url(&s.url, x)), s.dom.text(id), s.url.clone(), s.host.clone())
     };
-    let (code, origin) = match src {
+    match src {
         Some(abs) => match host.fetch("GET", &abs, None) {
-            Some((200..=299, _, body)) => (String::from_utf8_lossy(&body).into_owned(), abs),
-            _ => return Err(format!("couldn't load {abs}")),
+            Some((200..=299, _, body)) => Ok((String::from_utf8_lossy(&body).into_owned(), abs)),
+            _ => Err(format!("couldn't load {abs}")),
         },
-        None => (text, format!("inline script in {url}")),
-    };
-    let module = st.borrow().dom.attr(id, "type").map(|t| t.trim().eq_ignore_ascii_case("module")).unwrap_or(false);
-    let uses_modules = |c: &str| c.contains("\nimport ") || c.trim_start().starts_with("import ") || c.contains("\nexport ") || c.trim_start().starts_with("export ") || c.contains(";export{") || c.contains(";export ");
-    if uses_modules(&code) || (module && (code.contains("import ") || code.contains("export "))) {
-        return Err(format!("{origin}: modules (import/export) aren't supported yet"));
+        None => Ok((text, url)),
     }
-    Ok((code, origin))
 }
 
 /// Runs one script element now (fetching it if needed), then fires load or error at it.
 fn execute(i: &mut Interp, st: &S, id: NodeId) {
+    let (kind, external) = {
+        let s = st.borrow();
+        (script_kind(&s.dom, id), s.dom.attr(id, "src").is_some())
+    };
+    let Some(kind) = kind else { return };
     let ok = match script_source(st, id) {
         Ok((code, origin)) => {
-            let prev = st.borrow_mut().current_script.replace(id);
-            let r = i.run(&code);
-            st.borrow_mut().current_script = prev;
+            let r = match kind {
+                ScriptKind::ImportMap => {
+                    st.borrow().loader.add_map(&code, &origin);
+                    return;
+                }
+                ScriptKind::Module => {
+                    // An inline module is its own module, at the document's URL.
+                    let key = if external { origin.clone() } else { format!("{origin}#inline-module-{id}") };
+                    i.run_module(&code, &key)
+                }
+                ScriptKind::Classic => {
+                    let prev = st.borrow_mut().current_script.replace(id);
+                    let r = i.run(&code).map(|_| ());
+                    st.borrow_mut().current_script = prev;
+                    r
+                }
+            };
             if let Err(e) = r {
-                i.errors.push(format!("{origin}: {e}"));
+                let place = if external { origin } else { format!("inline script in {origin}") };
+                i.errors.push(format!("{place}: {e}"));
             }
             true
         }
@@ -854,6 +888,57 @@ fn execute(i: &mut Interp, st: &S, id: NodeId) {
         }
     };
     fire(i, st, id, if ok { "load" } else { "error" }, false);
+}
+
+/// Loads a page's modules over its network, after its import maps.
+pub struct PageLoader {
+    host: Rc<dyn Host>,
+    /// (specifier or prefix ending in '/', absolute URL), from `<script type="importmap">`.
+    imports: RefCell<Vec<(String, String)>>,
+}
+
+impl PageLoader {
+    fn add_map(&self, json: &str, base: &str) {
+        let Some(map) = volant_core::json::parse(json) else { return };
+        if let Some(volant_core::json::Value::Obj(entries)) = map.get("imports") {
+            let mut imports = self.imports.borrow_mut();
+            for (k, v) in entries {
+                if let Some(v) = v.as_str() {
+                    imports.push((k.clone(), resolve_url(base, v)));
+                }
+            }
+        }
+    }
+}
+
+impl volant_js::module::Loader for PageLoader {
+    fn resolve(&self, spec: &str, base: &str) -> String {
+        let imports = self.imports.borrow();
+        if let Some((_, target)) = imports.iter().find(|(k, _)| k == spec) {
+            return target.clone();
+        }
+        // The longest matching prefix ("lib/" → "https://cdn/lib/").
+        let prefix = imports.iter().filter(|(k, _)| k.ends_with('/') && spec.starts_with(k.as_str())).max_by_key(|(k, _)| k.len());
+        if let Some((k, target)) = prefix {
+            return format!("{target}{}", &spec[k.len()..]);
+        }
+        let relative = spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../");
+        if relative || spec.contains("://") {
+            resolve_url(base, spec)
+        } else {
+            format!("bare:{spec}") // a bare name no import map maps: it fails to load
+        }
+    }
+    fn load(&self, url: &str) -> Result<String, String> {
+        if url.starts_with("bare:") {
+            return Err("bare module names need an import map".into());
+        }
+        match self.host.fetch("GET", url, None) {
+            Some((200..=299, _, body)) => Ok(String::from_utf8_lossy(&body).into_owned()),
+            Some((status, ..)) => Err(format!("HTTP {status}")),
+            None => Err("network error".into()),
+        }
+    }
 }
 
 /// Scripts that just entered the document run soon after (as browsers do for inserted scripts).
@@ -1202,6 +1287,7 @@ fn install(i: &mut Interp, st: &S) {
         ("HTMLOutputElement", &["output"]), ("HTMLTimeElement", &["time"]), ("HTMLDataListElement", &["datalist"]), ("HTMLMapElement", &["map"]),
         ("HTMLAreaElement", &["area"]), ("HTMLBaseElement", &["base"]), ("HTMLTitleElement", &["title"]), ("HTMLQuoteElement", &["blockquote", "q"]),
         ("SVGElement", &["svg", "path", "g", "circle", "rect", "use", "symbol", "line", "polygon", "polyline", "ellipse", "text", "defs"]), ("SVGSVGElement", &["svg"]),
+        ("MathMLElement", &["math", "mi", "mo", "mn", "mrow", "msup", "msub", "mfrac", "msqrt", "mtext", "semantics", "annotation"]),
     ] {
         let tags: Vec<&'static str> = tags.to_vec();
         let st2 = st.clone();
@@ -2020,6 +2106,14 @@ fn install(i: &mut Interp, st: &S) {
         Ok(Value::Undefined)
     });
     method(i, st, &class_list, "toString", |_i, st, id, _a| Ok(str_val(&classes(st, id).join(" "))));
+    for name in ["\0@iterator", "values", "keys", "entries"] {
+        method(i, st, &class_list, name, move |i, st, id, _a| {
+            let list: Vec<Value> = classes(st, id).iter().map(|c| str_val(c)).collect();
+            let arr = i.array(list);
+            let f = i.get(&arr, if name == "\0@iterator" { "values" } else { name })?;
+            i.call(&f, arr, vec![])
+        });
+    }
     getter(i, st, &class_list, "length", |_i, st, id| Ok(Value::Num(classes(st, id).len() as f64)));
     accessor(i, st, &class_list, "value", |_i, st, id| Ok(str_val(&classes(st, id).join(" "))), |i, st, id, v| {
         let t = i.to_str(&v)?;
@@ -2638,6 +2732,7 @@ impl Runtime {
             cookies: Vec::new(),
             current_script: None,
             ran: std::collections::HashSet::new(),
+            loader: Rc::new(PageLoader { host: host.clone(), imports: RefCell::new(Vec::new()) }),
             host,
             protos: None,
             generation: 1,
@@ -2646,6 +2741,8 @@ impl Runtime {
         let mut interp = Interp::new();
         // Real pages nest calls deeply (module loaders, jQuery); run on a big stack (see STACK).
         interp.max_depth = 3000;
+        interp.base_url = url.into();
+        interp.loader = Some(state.borrow().loader.clone());
         install(&mut interp, &state);
         interp.reset_steps(BUDGET);
         if let Err(e) = interp.run(PRELUDE) {
@@ -2662,7 +2759,9 @@ impl Runtime {
             if s.dom.tag(id) != Some("script") || !is_js(&s.dom, id) {
                 continue;
             }
-            if s.dom.attr(id, "defer").is_some() && s.dom.attr(id, "src").is_some() {
+            // Modules and `defer`red scripts wait for the whole document.
+            let module = script_kind(&s.dom, id) == Some(ScriptKind::Module);
+            if module || (s.dom.attr(id, "defer").is_some() && s.dom.attr(id, "src").is_some()) {
                 deferred.push(id);
             } else {
                 normal.push(id);

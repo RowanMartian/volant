@@ -315,3 +315,119 @@ fn nested_templates() {
     "#;
     assert_eq!(out(src), "xin1ner}{y 2 p { color: | } @media (x) { q {} }red");
 }
+
+/// Runs `files[entry]` as a module, with the other files importable by path.
+fn modules(files: &[(&str, &str)], entry: &str) -> String {
+    let files: Vec<(String, String)> = files.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let entry = entry.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || {
+            let mut i = crate::Interp::new();
+            let map: std::collections::HashMap<String, String> = files.into_iter().collect();
+            let src = map[&entry].clone();
+            i.loader = Some(std::rc::Rc::new(crate::module::MapLoader(map)));
+            let r = i.run_module(&src, &entry);
+            i.run_jobs(f64::INFINITY, 1000);
+            let mut out = i.output.join("\n");
+            if let Err(e) = r {
+                out.push_str(&format!("\nERROR {e}"));
+            }
+            for e in &i.errors {
+                out.push_str(&format!("\nERROR {e}"));
+            }
+            out
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn es_modules() {
+    let files = [
+        ("/app/main.js", "import def, { a, inc, count as c } from './lib.js';\nimport * as all from './lib.js';\nimport './side.js';\nexport { a };\nconsole.log(def(), a, c);\ninc(); inc();\nconsole.log(c, all.count, Object.keys(all).sort().join());\nconst m = await import('../app/lazy.js');\nconsole.log(m.lazy, import.meta.url, typeof all.default);\nimport('./missing.js').catch(e => console.log('caught', e.message.includes('missing')));"),
+        ("/app/lib.js", "export const a = 'A';\nexport let count = 0;\nexport function inc() { count++ }\nexport default function () { return 'def' }\nconsole.log('lib runs once');"),
+        ("/app/side.js", "import { a } from './lib.js';\nconsole.log('side sees', a);"),
+        ("/app/lazy.js", "export * from './lib.js';\nexport { inc as plus } from './lib.js';\nexport const lazy = 'L';"),
+    ];
+    assert_eq!(
+        modules(&files, "/app/main.js"),
+        "lib runs once\nside sees A\ndef A 0\n2 2 a,count,default,inc\nL /app/main.js function\ncaught true"
+    );
+    // A cycle: each side can call the other's hoisted functions.
+    let cycle = [
+        ("/a.js", "import { b } from './b.js';\nexport function a() { return 'a' }\nconsole.log(b());"),
+        ("/b.js", "import { a } from './a.js';\nexport function b() { return 'b' + a() }"),
+    ];
+    assert_eq!(modules(&cycle, "/a.js"), "ba");
+    // Errors: a syntax error names the module; imports aren't allowed in scripts.
+    assert!(modules(&[("/x.js", "import { q } from './y.js'")], "/x.js").contains("couldn't load module /y.js"));
+    assert!(out("import x from 'y'").contains("only appear at the top of a module"));
+    assert_eq!(out("const o = { import: 1, export: 2 }; console.log(o.import + o.export)"), "3");
+}
+
+#[test]
+fn templates_hold_any_expression() {
+    // A quote inside a regex inside ${} (Vue's decodeEntities).
+    assert_eq!(out(r#"const e = 'a"b'; console.log(`<div foo="${e.replace(/"/g, "&quot;")}">`)"#), r#"<div foo="a&quot;b">"#);
+    assert_eq!(out("const o = {a: {b: 2}}; console.log(`${ {x: 1}.x }-${`${o.a.b}`}-${'}'}`)"), "1-2-}");
+}
+
+#[test]
+fn with_statements() {
+    // How Vue's runtime-compiled templates read their component's state.
+    let src = "const ctx = {msg: 'hi', n: 1}; let outer = 'o';
+        const render = new Function('_ctx', 'with (_ctx) { n = n + 1; return msg + n + outer }');
+        globalThis.outer = 'g';
+        console.log(render(ctx), ctx.n)";
+    assert_eq!(out(src), "hi2o 2"); // a global `let` shadows the global object
+}
+
+#[test]
+fn proxies_and_reflect() {
+    let src = "const log = [];
+        const target = {a: 1, list: [1, 2]};
+        const p = new Proxy(target, {
+            get(t, k, r) { if (typeof k === 'string') log.push('get ' + k); return Reflect.get(t, k, r) },
+            set(t, k, v) { log.push('set ' + k); t[k] = v * 10; return true },
+            has(t, k) { return k !== 'hidden' },
+            deleteProperty(t, k) { log.push('del ' + k); return delete t[k] },
+            ownKeys(t) { return ['a', 'b'] },
+        });
+        p.b = 2;
+        console.log(p.a, p.b, 'zz' in p, 'hidden' in p, Object.keys(p).join());
+        delete p.a;
+        console.log(target.a, log.join('|'));
+        const arr = new Proxy([1, 2, 3], {});
+        arr.push(4);
+        console.log(Array.isArray(arr), arr.length, Object.prototype.toString.call(arr), typeof new Proxy(function () {}, {}));
+        const f = new Proxy(function (x) { return x + 1 }, { apply(t, self, args) { return t(...args) * 2 } });
+        const C = new Proxy(class { constructor(v) { this.v = v } }, { construct(t, args) { return new t(args[0] + '!') } });
+        console.log(f(1), new C('hi').v, Reflect.has({q: 1}, 'q'), Reflect.ownKeys({x: 1, y: 2}).join());";
+    assert_eq!(out(src), "1 20 true false a,b\nundefined set b|get a|get b|del a\ntrue 4 [object Array] function\n4 hi! true x,y");
+}
+
+#[test]
+fn evaluation_order() {
+    // The target object is evaluated before the value (Vue: `(p = {...}).ctx = {_: p}`).
+    assert_eq!(out("let p; (p = {n: 1}).ctx = {_: p}; console.log(p.ctx._ === p)"), "true");
+    assert_eq!(out("const a = [0, 0, 0]; let i = 0; a[i++]++; a[i++] += 5; console.log(a.join(), i)"), "1,5,0 2");
+    assert_eq!(out("const o = {}; let n = 0; o[n++] ||= 'x'; o.y ??= n; console.log(o[0], o.y, n)"), "x 1 1");
+}
+
+#[test]
+fn define_property() {
+    // jQuery's addProp: a setter on the prototype that defines an own property (no recursion).
+    let src = "function E() {} 
+        Object.defineProperty(E.prototype, 'which', { enumerable: true, configurable: true,
+            get() { return 'proto' },
+            set(v) { Object.defineProperty(this, 'which', { enumerable: true, configurable: true, writable: true, value: v }) } });
+        const e = new E(); e.which = 5;
+        const o = { a: 1 }; Object.defineProperty(o, 'hidden', { value: 2 }); Object.defineProperty(o, 'a', { enumerable: false });
+        class K { m() {} get g() { return 1 } }
+        const keys = []; for (const k in new K()) keys.push(k);
+        console.log(e.which, new E().which, Object.keys(o).length, o.a, o.hidden, Object.getOwnPropertyNames(o).join(), keys.length,
+            Object.getOwnPropertyDescriptor(o, 'hidden').enumerable, o.propertyIsEnumerable('a'))";
+    assert_eq!(out(src), "5 proto 0 1 2 a,hidden 0 false false");
+}

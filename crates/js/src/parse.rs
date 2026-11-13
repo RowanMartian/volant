@@ -8,8 +8,8 @@ use std::rc::Rc;
 pub enum Tok {
     Num(f64),
     Str(String),
-    /// A template literal: its string pieces and the source of each `${...}`.
-    Template(Vec<String>, Vec<String>),
+    /// A template literal: its string pieces and the tokens of each `${...}`.
+    Template(Vec<String>, Vec<Vec<Token>>),
     Ident(String),
     Punct(&'static str),
     /// A regular expression literal: (pattern, flags)
@@ -17,7 +17,7 @@ pub enum Tok {
     Eof,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub tok: Tok,
     /// A line break came before it (for automatic semicolon insertion).
@@ -35,142 +35,154 @@ const PUNCTS: &[&str] = &[
 
 pub fn lex(src: &str) -> Result<Vec<Token>, String> {
     let s: Vec<char> = src.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut line = 1u32;
-    let mut nl = false;
-    while i < s.len() {
-        let c = s[i];
-        if c == '\n' || c == '\u{2028}' || c == '\u{2029}' {
-            nl = true;
-            line += 1;
-            i += 1;
-            continue;
-        }
-        if c.is_whitespace() || c == '\u{feff}' {
-            i += 1;
-            continue;
-        }
-        if c == '/' && s.get(i + 1) == Some(&'/') {
-            while i < s.len() && s[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if c == '/' && s.get(i + 1) == Some(&'*') {
-            i += 2;
-            while i + 1 < s.len() && !(s[i] == '*' && s[i + 1] == '/') {
-                if s[i] == '\n' {
-                    nl = true;
-                    line += 1;
-                }
-                i += 1;
-            }
-            i += 2;
-            continue;
-        }
-        let start_nl = nl;
-        nl = false;
-        let tok_line = line;
-        let tok_at = i as u32;
-        let push = |out: &mut Vec<Token>, tok: Tok| out.push(Token { tok, nl: start_nl, line: tok_line, at: tok_at });
-        if c.is_ascii_digit() || (c == '.' && s.get(i + 1).map(|d| d.is_ascii_digit()).unwrap_or(false)) {
-            let start = i;
-            if c == '0' && matches!(s.get(i + 1), Some('x' | 'X' | 'b' | 'B' | 'o' | 'O')) {
-                let radix = match s[i + 1] {
-                    'x' | 'X' => 16,
-                    'b' | 'B' => 2,
-                    _ => 8,
-                };
-                i += 2;
-                let ds = i;
-                while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == '_') {
-                    i += 1;
-                }
-                let digits: String = s[ds..i].iter().filter(|&&c| c != '_').collect();
-                let n = u64::from_str_radix(&digits, radix).map_err(|_| format!("line {line}: bad number"))?;
-                push(&mut out, Tok::Num(n as f64));
+    let mut lx = Lexer { s: &s, i: 0, line: 1 };
+    lx.tokens(false)
+}
+
+struct Lexer<'a> {
+    s: &'a [char],
+    i: usize,
+    line: u32,
+}
+
+impl Lexer<'_> {
+    fn err<T>(&self, msg: &str) -> Result<T, String> {
+        Err(format!("line {}: {msg}", Where(self.line, self.i as u32)))
+    }
+
+    /// Tokens to the end of the source, or (`nested`: inside a template's
+    /// `${`) to the `}` closing it. They end with an end marker.
+    fn tokens(&mut self, nested: bool) -> Result<Vec<Token>, String> {
+        let s = self.s;
+        let mut out: Vec<Token> = Vec::new();
+        let mut nl = false;
+        let mut braces = 0u32;
+        while self.i < s.len() {
+            let c = s[self.i];
+            if c == '\n' || c == '\u{2028}' || c == '\u{2029}' {
+                nl = true;
+                self.line += 1;
+                self.i += 1;
                 continue;
             }
-            while i < s.len() && (s[i].is_ascii_digit() || s[i] == '.' || s[i] == '_') {
-                i += 1;
+            if c.is_whitespace() || c == '\u{feff}' {
+                self.i += 1;
+                continue;
             }
-            if i < s.len() && (s[i] == 'e' || s[i] == 'E') {
-                i += 1;
-                if i < s.len() && (s[i] == '+' || s[i] == '-') {
-                    i += 1;
+            if c == '/' && s.get(self.i + 1) == Some(&'/') {
+                while self.i < s.len() && s[self.i] != '\n' {
+                    self.i += 1;
                 }
-                while i < s.len() && s[i].is_ascii_digit() {
-                    i += 1;
+                continue;
+            }
+            if c == '/' && s.get(self.i + 1) == Some(&'*') {
+                self.i += 2;
+                while self.i + 1 < s.len() && !(s[self.i] == '*' && s[self.i + 1] == '/') {
+                    if s[self.i] == '\n' {
+                        nl = true;
+                        self.line += 1;
+                    }
+                    self.i += 1;
                 }
+                self.i += 2;
+                continue;
             }
-            let text: String = s[start..i].iter().filter(|&&c| c != '_').collect();
-            if s.get(i) == Some(&'n') {
-                i += 1; // BigInt literals read as plain numbers
+            if nested && c == '}' && braces == 0 {
+                self.i += 1;
+                out.push(Token { tok: Tok::Eof, nl: true, line: self.line, at: self.i as u32 });
+                return Ok(out);
             }
-            push(&mut out, Tok::Num(text.parse().map_err(|_| format!("line {line}: bad number {text}"))?));
-            continue;
+            if nested && c == '{' {
+                braces += 1;
+            } else if nested && c == '}' {
+                braces -= 1;
+            }
+            let (line, at) = (self.line, self.i as u32);
+            let tok = self.token(out.last().map(|t| &t.tok))?;
+            out.push(Token { tok, nl, line, at });
+            nl = false;
+        }
+        if nested {
+            return self.err("unterminated template");
+        }
+        out.push(Token { tok: Tok::Eof, nl: true, line: self.line, at: s.len() as u32 });
+        Ok(out)
+    }
+
+    /// The token at `i` (not whitespace or a comment).
+    fn token(&mut self, prev: Option<&Tok>) -> Result<Tok, String> {
+        let s = self.s;
+        let c = s[self.i];
+        if c.is_ascii_digit() || (c == '.' && s.get(self.i + 1).map(|d| d.is_ascii_digit()).unwrap_or(false)) {
+            return self.number();
         }
         if c == '"' || c == '\'' {
-            i += 1;
+            self.i += 1;
             let mut v = String::new();
-            while i < s.len() && s[i] != c {
-                if s[i] == '\n' {
-                    return Err(format!("line {line}: unterminated string"));
+            while self.i < s.len() && s[self.i] != c {
+                if s[self.i] == '\n' {
+                    return self.err("unterminated string");
                 }
-                if s[i] == '\\' {
-                    i += 1;
-                    escape(&s, &mut i, &mut v, &mut line);
+                if s[self.i] == '\\' {
+                    self.i += 1;
+                    escape(s, &mut self.i, &mut v, &mut self.line);
                 } else {
-                    v.push(s[i]);
-                    i += 1;
+                    v.push(s[self.i]);
+                    self.i += 1;
                 }
             }
-            if i >= s.len() {
-                return Err(format!("line {line}: unterminated string"));
+            if self.i >= s.len() {
+                return self.err("unterminated string");
             }
-            i += 1;
-            push(&mut out, Tok::Str(v));
-            continue;
+            self.i += 1;
+            return Ok(Tok::Str(v));
         }
         if c == '`' {
-            i += 1;
+            self.i += 1;
             let (mut strs, mut exprs) = (vec![String::new()], Vec::new());
-            while i < s.len() && s[i] != '`' {
-                if s[i] == '\\' {
-                    i += 1;
-                    escape(&s, &mut i, strs.last_mut().expect("a piece"), &mut line);
-                } else if s[i] == '$' && s.get(i + 1) == Some(&'{') {
-                    i += 2;
-                    let start = i;
-                    i = skip_braced(&s, i, &mut line);
-                    exprs.push(s[start..i.min(s.len())].iter().collect());
+            while self.i < s.len() && s[self.i] != '`' {
+                if s[self.i] == '\\' {
+                    self.i += 1;
+                    escape(s, &mut self.i, strs.last_mut().expect("a piece"), &mut self.line);
+                } else if s[self.i] == '$' && s.get(self.i + 1) == Some(&'{') {
+                    self.i += 2;
+                    exprs.push(self.tokens(true)?);
                     strs.push(String::new());
-                    i += 1;
                 } else {
-                    if s[i] == '\n' {
-                        line += 1;
+                    if s[self.i] == '\n' {
+                        self.line += 1;
                     }
-                    strs.last_mut().expect("a piece").push(s[i]);
-                    i += 1;
+                    strs.last_mut().expect("a piece").push(s[self.i]);
+                    self.i += 1;
                 }
             }
-            i += 1;
-            push(&mut out, Tok::Template(strs, exprs));
-            continue;
-        }
-        let private = c == '#' && s.get(i + 1).map(|d| d.is_alphabetic() || *d == '_' || *d == '$').unwrap_or(false);
-        if c.is_alphabetic() || c == '_' || c == '$' || private {
-            let start = i;
-            i += 1;
-            while i < s.len() && (s[i].is_alphanumeric() || s[i] == '_' || s[i] == '$') {
-                i += 1;
+            if self.i >= s.len() {
+                return self.err("unterminated template");
             }
-            push(&mut out, Tok::Ident(s[start..i].iter().collect()));
-            continue;
+            self.i += 1;
+            return Ok(Tok::Template(strs, exprs));
         }
-        if c == '/' && regex_allowed(out.last().map(|t: &Token| &t.tok)) {
-            let mut j = i + 1;
+        let private = c == '#' && s.get(self.i + 1).map(|d| d.is_alphabetic() || *d == '_' || *d == '$').unwrap_or(false);
+        if c.is_alphabetic() || c == '_' || c == '$' || private || c == '\\' {
+            let mut name = String::new();
+            if private {
+                name.push('#');
+                self.i += 1;
+            }
+            while self.i < s.len() && (s[self.i].is_alphanumeric() || s[self.i] == '_' || s[self.i] == '$' || s[self.i] == '\\' || s[self.i] == '\u{200c}' || s[self.i] == '\u{200d}') {
+                if s[self.i] == '\\' {
+                    // A \u escape in a name.
+                    self.i += 1;
+                    escape(s, &mut self.i, &mut name, &mut self.line);
+                } else {
+                    name.push(s[self.i]);
+                    self.i += 1;
+                }
+            }
+            return Ok(Tok::Ident(name));
+        }
+        if c == '/' && regex_allowed(prev) {
+            let mut j = self.i + 1;
             let mut class = false;
             while j < s.len() {
                 match s[j] {
@@ -178,100 +190,90 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     '[' => class = true,
                     ']' => class = false,
                     '/' if !class => break,
-                    '\n' => return Err(format!("line {line}: unterminated regular expression")),
+                    '\n' => return self.err("unterminated regular expression"),
                     _ => {}
                 }
                 j += 1;
             }
             if j >= s.len() {
-                return Err(format!("line {line}: unterminated regular expression"));
+                return self.err("unterminated regular expression");
             }
-            let body: String = s[i + 1..j].iter().collect();
+            let body: String = s[self.i + 1..j].iter().collect();
             j += 1;
             let fstart = j;
             while j < s.len() && s[j].is_alphanumeric() {
                 j += 1;
             }
             let flags: String = s[fstart..j].iter().collect();
-            i = j;
-            push(&mut out, Tok::Regex(body, flags));
-            continue;
+            self.i = j;
+            return Ok(Tok::Regex(body, flags));
         }
-        let rest: String = s[i..(i + 4).min(s.len())].iter().collect();
-        match PUNCTS.iter().find(|p| rest.starts_with(**p)) {
+        // A `#!` line at the very start.
+        if c == '#' && self.i == 0 && s.get(1) == Some(&'!') {
+            while self.i < s.len() && s[self.i] != '\n' {
+                self.i += 1;
+            }
+            return Ok(Tok::Punct(";"));
+        }
+        let rest = &s[self.i..(self.i + 4).min(s.len())];
+        let starts = |p: &str| p.chars().count() <= rest.len() && p.chars().zip(rest.iter()).all(|(a, b)| a == *b);
+        match PUNCTS.iter().find(|p| starts(p)) {
             Some(p) => {
                 // `?.5` is a ternary and a number, not optional chaining.
-                if *p == "?." && s.get(i + 2).map(|d| d.is_ascii_digit()).unwrap_or(false) {
-                    push(&mut out, Tok::Punct("?"));
-                    i += 1;
+                if *p == "?." && s.get(self.i + 2).map(|d| d.is_ascii_digit()).unwrap_or(false) {
+                    self.i += 1;
+                    Ok(Tok::Punct("?"))
                 } else {
-                    push(&mut out, Tok::Punct(p));
-                    i += p.len();
+                    self.i += p.len();
+                    Ok(Tok::Punct(p))
                 }
             }
-            None => return Err(format!("line {line}: unexpected character {c:?}")),
+            None => self.err(&format!("unexpected character {c:?}")),
         }
     }
-    out.push(Token { tok: Tok::Eof, nl: true, line, at: s.len() as u32 });
-    Ok(out)
-}
 
-/// From just inside `${`, the index of the matching `}`: strings, nested
-/// templates and comments in between are skipped whole.
-fn skip_braced(s: &[char], mut i: usize, line: &mut u32) -> usize {
-    let mut depth = 1;
-    while i < s.len() {
-        match s[i] {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return i;
-                }
+    fn number(&mut self) -> Result<Tok, String> {
+        let s = self.s;
+        let c = s[self.i];
+        let start = self.i;
+        if c == '0' && matches!(s.get(self.i + 1), Some('x' | 'X' | 'b' | 'B' | 'o' | 'O')) {
+            let radix = match s[self.i + 1] {
+                'x' | 'X' => 16,
+                'b' | 'B' => 2,
+                _ => 8,
+            };
+            self.i += 2;
+            let ds = self.i;
+            while self.i < s.len() && (s[self.i].is_ascii_alphanumeric() || s[self.i] == '_') {
+                self.i += 1;
             }
-            '\n' => *line += 1,
-            q @ ('\'' | '"') => {
-                i += 1;
-                while i < s.len() && s[i] != q && s[i] != '\n' {
-                    if s[i] == '\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            '`' => {
-                i += 1;
-                while i < s.len() && s[i] != '`' {
-                    match s[i] {
-                        '\\' => i += 1,
-                        '$' if s.get(i + 1) == Some(&'{') => i = skip_braced(s, i + 2, line),
-                        '\n' => *line += 1,
-                        _ => {}
-                    }
-                    i += 1;
-                }
-            }
-            '/' if s.get(i + 1) == Some(&'/') => {
-                while i < s.len() && s[i] != '\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            '/' if s.get(i + 1) == Some(&'*') => {
-                i += 2;
-                while i + 1 < s.len() && !(s[i] == '*' && s[i + 1] == '/') {
-                    if s[i] == '\n' {
-                        *line += 1;
-                    }
-                    i += 1;
-                }
-                i += 1;
-            }
-            _ => {}
+            let digits: String = s[ds..self.i].iter().filter(|&&c| c != '_' && c != 'n').collect();
+            return match u128::from_str_radix(&digits, radix) {
+                Ok(n) => Ok(Tok::Num(n as f64)),
+                Err(_) => self.err("bad number"),
+            };
         }
-        i += 1;
+        while self.i < s.len() && (s[self.i].is_ascii_digit() || s[self.i] == '.' || s[self.i] == '_') {
+            self.i += 1;
+        }
+        if self.i < s.len() && (s[self.i] == 'e' || s[self.i] == 'E') {
+            self.i += 1;
+            if self.i < s.len() && (s[self.i] == '+' || s[self.i] == '-') {
+                self.i += 1;
+            }
+            while self.i < s.len() && s[self.i].is_ascii_digit() {
+                self.i += 1;
+            }
+        }
+        let text: String = s[start..self.i].iter().filter(|&&c| c != '_').collect();
+        if s.get(self.i) == Some(&'n') {
+            self.i += 1; // BigInt literals read as plain numbers
+        }
+        match text.parse() {
+            Ok(n) => Ok(Tok::Num(n)),
+            Err(_) => self.err(&format!("bad number {text}")),
+        }
     }
-    i
 }
 
 /// Whether a `/` after this token starts a regular expression (rather than dividing).
@@ -368,6 +370,10 @@ pub enum Expr {
     /// `yield x` (delegate: `yield* x`)
     Yield(Option<P<Expr>>, bool),
     Await(P<Expr>),
+    /// `import(specifier)`
+    Import(P<Expr>),
+    /// `import.meta`
+    ImportMeta,
     /// `target = default` inside a pattern or parameter list.
     Default(P<Expr>, P<Expr>),
     Rest(P<Expr>),
@@ -430,9 +436,30 @@ pub enum Stmt {
     Try(Vec<Stmt>, Option<(Option<Expr>, Vec<Stmt>)>, Option<Vec<Stmt>>),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Labeled(Rc<str>, P<Stmt>),
+    /// `with (object) body`
+    With(Expr, P<Stmt>),
     /// (name, extends, [(key, member, static)])
     Class(Rc<str>, Option<Expr>, Vec<(Expr, Member, bool)>),
+    /// `import ... from "specifier"`: (specifier, [(imported, local)]);
+    /// imported is a name, "default", or "*" for the whole namespace.
+    Import(Rc<str>, Vec<(Rc<str>, Rc<str>)>),
+    Export(P<Export>),
     Empty,
+}
+
+/// An `export` declaration in a module. Pairs are (local, exported).
+#[derive(Debug, Clone)]
+pub enum Export {
+    /// `export const a = 1`, `export function f() {}`, `export default function f() {}`
+    Decl(Stmt, Vec<(Rc<str>, Rc<str>)>),
+    /// `export default expression` (held in the local "default")
+    Default(Expr),
+    /// `export { a, b as c }`
+    Names(Vec<(Rc<str>, Rc<str>)>),
+    /// `export { a as b } from "m"` (an imported "*" re-exports the namespace)
+    From(Rc<str>, Vec<(Rc<str>, Rc<str>)>),
+    /// `export * from "m"`
+    All(Rc<str>),
 }
 
 // ------------------------------------------------------------------ parser
@@ -447,6 +474,8 @@ pub struct Parser {
     next_gen: bool,
     /// Inside a generator body (`yield` is a keyword).
     in_gen: bool,
+    /// Parsing a module (`import` and `export` declarations are allowed).
+    module: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -497,11 +526,28 @@ fn intern(op: &str) -> &'static str {
 const RESERVED: &[&str] = &[
     "var", "let", "const", "function", "return", "if", "else", "for", "while", "do", "break", "continue", "throw", "try", "catch", "finally", "switch",
     "case", "default", "new", "delete", "typeof", "void", "in", "instanceof", "this", "null", "true", "false", "class", "extends",
+    "import", "export", "with",
 ];
 
 impl Parser {
     pub fn new(src: &str) -> R<Self> {
-        Ok(Parser { toks: lex(src)?, i: 0, depth: 0, next_async: false, next_gen: false, in_gen: false })
+        Ok(Self::from_tokens(lex(src)?))
+    }
+
+    fn from_tokens(toks: Vec<Token>) -> Self {
+        Parser { toks, i: 0, depth: 0, next_async: false, next_gen: false, in_gen: false, module: false }
+    }
+
+    /// The expression inside a template's `${...}`.
+    fn sub_expr(&self, toks: Vec<Token>) -> R<Expr> {
+        let mut p = Self::from_tokens(toks);
+        p.in_gen = self.in_gen;
+        p.depth = self.depth;
+        let e = p.expr()?;
+        if !matches!(p.peek(), Tok::Eof) {
+            return Err(format!("line {}: unexpected {} in a template", p.line(), describe(p.peek())));
+        }
+        Ok(e)
     }
 
     fn peek(&self) -> &Tok {
@@ -654,6 +700,20 @@ impl Parser {
                 let (sup, members) = self.class_rest()?;
                 Ok(Stmt::Class(name, sup, members))
             }
+            "import" if !matches!(self.peek_at(1), Tok::Punct("(" | ".")) => {
+                if !self.module || self.depth > 1 {
+                    return Err(format!("line {}: import declarations may only appear at the top of a module", self.line()));
+                }
+                self.next();
+                self.import_decl()
+            }
+            "export" => {
+                if !self.module || self.depth > 1 {
+                    return Err(format!("line {}: export declarations may only appear at the top of a module", self.line()));
+                }
+                self.next();
+                self.export_decl()
+            }
             "return" => {
                 self.next();
                 let v = if self.is(";") || self.is("}") || self.nl_before() || matches!(self.peek(), Tok::Eof) { None } else { Some(self.expr()?) };
@@ -668,6 +728,13 @@ impl Parser {
                 let t = self.stmt()?;
                 let e = if self.eat_word("else") { Some(Box::new(self.stmt()?)) } else { None };
                 Ok(Stmt::If(c, Box::new(t), e))
+            }
+            "with" => {
+                self.next();
+                self.expect("(")?;
+                let o = self.expr()?;
+                self.expect(")")?;
+                Ok(Stmt::With(o, Box::new(self.stmt()?)))
             }
             "while" => {
                 self.next();
@@ -760,6 +827,149 @@ impl Parser {
                 Ok(Stmt::Expr(e))
             }
         }
+    }
+
+    fn specifier(&mut self) -> R<Rc<str>> {
+        match self.next() {
+            Tok::Str(s) => Ok(s.into()),
+            t => Err(format!("line {}: expected a module specifier, found {}", self.line(), describe(&t))),
+        }
+    }
+
+    /// A name in an import or export list (strings are allowed: `"a-b" as c`).
+    fn module_name(&mut self) -> R<Rc<str>> {
+        match self.next() {
+            Tok::Ident(n) => Ok(n.into()),
+            Tok::Str(s) => Ok(s.into()),
+            t => Err(format!("line {}: expected a name, found {}", self.line(), describe(&t))),
+        }
+    }
+
+    /// `{ a, b as c }` in an import or export: (name, alias) pairs.
+    fn name_list(&mut self) -> R<Vec<(Rc<str>, Rc<str>)>> {
+        self.expect("{")?;
+        let mut out = Vec::new();
+        while !self.eat("}") {
+            let n = self.module_name()?;
+            let alias = if self.eat_word("as") { self.module_name()? } else { n.clone() };
+            out.push((n, alias));
+            if !self.is("}") {
+                self.expect(",")?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// After `import`: the bindings and the specifier.
+    fn import_decl(&mut self) -> R<Stmt> {
+        if let Tok::Str(_) = self.peek() {
+            let spec = self.specifier()?;
+            self.semi()?;
+            return Ok(Stmt::Import(spec, Vec::new()));
+        }
+        let mut names = Vec::new();
+        if let Tok::Ident(n) = self.peek().clone() {
+            if n != "from" || matches!(self.peek_at(1), Tok::Ident(w) if w == "from") {
+                self.next();
+                names.push(("default".into(), n.into()));
+                self.eat(",");
+            }
+        }
+        if self.eat("*") {
+            if !self.eat_word("as") {
+                return Err(format!("line {}: expected 'as'", self.line()));
+            }
+            names.push(("*".into(), self.ident()?));
+        } else if self.is("{") {
+            names.extend(self.name_list()?);
+        }
+        if !self.eat_word("from") {
+            return Err(format!("line {}: expected 'from'", self.line()));
+        }
+        let spec = self.specifier()?;
+        // Import attributes (`with { type: "json" }`) are read and ignored.
+        if (self.is_word("with") || self.is_word("assert")) && !self.nl_before() {
+            self.next();
+            self.object()?;
+        }
+        self.semi()?;
+        Ok(Stmt::Import(spec, names))
+    }
+
+    /// After `export`.
+    fn export_decl(&mut self) -> R<Stmt> {
+        let e = if self.eat_word("default") {
+            let is_fn = self.is_word("function") || (self.is_word("async") && matches!(self.peek_at(1), Tok::Ident(w) if w == "function"));
+            if is_fn {
+                if self.eat_word("async") {
+                    self.next_async = true;
+                }
+                self.next();
+                self.next_gen = self.eat("*");
+                let name: Rc<str> = match self.peek().clone() {
+                    Tok::Ident(n) if !self.is("(") => {
+                        self.next();
+                        n.into()
+                    }
+                    _ => "default".into(),
+                };
+                let f = self.func_rest(Some(name.clone()))?;
+                Export::Decl(Stmt::Func(f), vec![(name, "default".into())])
+            } else if self.is_word("class") {
+                self.next();
+                let name: Rc<str> = match self.peek().clone() {
+                    Tok::Ident(n) if n != "extends" => {
+                        self.next();
+                        n.into()
+                    }
+                    _ => "default".into(),
+                };
+                let (sup, members) = self.class_rest()?;
+                Export::Decl(Stmt::Class(name.clone(), sup, members), vec![(name, "default".into())])
+            } else {
+                let v = self.assign()?;
+                self.semi()?;
+                Export::Default(v)
+            }
+        } else if self.eat("*") {
+            let alias = if self.eat_word("as") { Some(self.module_name()?) } else { None };
+            if !self.eat_word("from") {
+                return Err(format!("line {}: expected 'from'", self.line()));
+            }
+            let spec = self.specifier()?;
+            self.semi()?;
+            match alias {
+                Some(a) => Export::From(spec, vec![("*".into(), a)]),
+                None => Export::All(spec),
+            }
+        } else if self.is("{") {
+            let names = self.name_list()?;
+            if self.eat_word("from") {
+                let spec = self.specifier()?;
+                self.semi()?;
+                Export::From(spec, names)
+            } else {
+                self.semi()?;
+                Export::Names(names)
+            }
+        } else {
+            let s = self.stmt()?;
+            let mut names = Vec::new();
+            match &s {
+                Stmt::Var(_, decls) => {
+                    for (p, _) in decls {
+                        let mut ns = Vec::new();
+                        pattern_names(p, &mut ns);
+                        names.extend(ns.into_iter().map(|n| (n.clone(), n)));
+                    }
+                }
+                Stmt::Func(f) => names.extend(f.name.clone().map(|n| (n.clone(), n))),
+                Stmt::Class(n, ..) => names.push((n.clone(), n.clone())),
+                _ => return Err(format!("line {}: unexpected export", self.line())),
+            }
+            Export::Decl(s, names)
+        };
+        Ok(Stmt::Export(Box::new(e)))
     }
 
     fn var_decl(&mut self) -> R<Stmt> {
@@ -1207,7 +1417,7 @@ impl Parser {
                 let parts = Expr::Call(Box::new(assign), vec![pieces, raw], false);
                 let mut args = vec![parts];
                 for src in exprs {
-                    args.push(Parser::new(&src)?.expr()?);
+                    args.push(self.sub_expr(src)?);
                 }
                 e = Expr::Call(Box::new(e), args, false);
             } else {
@@ -1247,7 +1457,7 @@ impl Parser {
             Tok::Template(strs, exprs) => {
                 let mut es = Vec::new();
                 for src in exprs {
-                    es.push(Parser::new(&src)?.expr()?);
+                    es.push(self.sub_expr(src)?);
                 }
                 Ok(Expr::Template(strs, es))
             }
@@ -1283,6 +1493,24 @@ impl Parser {
                 "null" => Ok(Expr::Null),
                 "undefined" => Ok(Expr::Undefined),
                 "this" => Ok(Expr::This),
+                "import" => {
+                    if self.eat(".") {
+                        let w = self.prop_name()?;
+                        if &*w != "meta" {
+                            return Err(format!("line {line}: unexpected import.{w}"));
+                        }
+                        return Ok(Expr::ImportMeta);
+                    }
+                    self.expect("(")?;
+                    let spec = self.assign()?;
+                    // A second argument (import options) is read and ignored.
+                    if self.eat(",") && !self.is(")") {
+                        self.assign()?;
+                        self.eat(",");
+                    }
+                    self.expect(")")?;
+                    Ok(Expr::Import(Box::new(spec)))
+                }
                 "function" => {
                     self.next_gen = self.eat("*");
                     let name = if let Tok::Ident(n) = self.peek() {
@@ -1453,4 +1681,22 @@ fn describe(t: &Tok) -> String {
 
 pub fn parse(src: &str) -> R<Vec<Stmt>> {
     Parser::new(src)?.program()
+}
+
+/// Parses a module: `import` and `export` declarations are allowed at its top.
+pub fn parse_module(src: &str) -> R<Vec<Stmt>> {
+    let mut p = Parser::new(src)?;
+    p.module = true;
+    p.program()
+}
+
+/// The names a pattern binds.
+pub fn pattern_names(p: &Expr, out: &mut Vec<Rc<str>>) {
+    match p {
+        Expr::Ident(n) => out.push(n.clone()),
+        Expr::Default(t, _) | Expr::Rest(t) => pattern_names(t, out),
+        Expr::ArrayPat(items) => items.iter().flatten().for_each(|i| pattern_names(i, out)),
+        Expr::ObjectPat(props) => props.iter().for_each(|(_, v)| pattern_names(v, out)),
+        _ => {}
+    }
 }

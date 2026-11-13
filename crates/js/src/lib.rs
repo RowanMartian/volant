@@ -16,8 +16,10 @@
 
 pub mod builtins;
 pub mod interp;
+pub mod module;
 pub mod parse;
 pub mod promise;
+pub mod proxy;
 pub mod regex;
 pub mod regexp;
 

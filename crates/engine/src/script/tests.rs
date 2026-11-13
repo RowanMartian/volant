@@ -8,6 +8,8 @@ impl Host for FakeHost {
         match url {
             "https://example.com/data.json" => Some((200, "application/json".into(), br#"{"items":["alpha","beta"]}"#.to_vec())),
             "https://example.com/dir/app.js" => Some((200, "text/javascript".into(), b"document.getElementById('ext').textContent = 'external ran'".to_vec())),
+            "https://example.com/dir/mod/util.js" => Some((200, "text/javascript".into(), b"export const twice = n => n * 2; export default 'util';".to_vec())),
+            "https://cdn.example.com/lib/fmt.js" => Some((200, "text/javascript".into(), b"import u from 'https://example.com/dir/mod/util.js'; export const fmt = s => `[${s}|${u}]`;".to_vec())),
             "https://example.com/echo" => Some((200, "text/plain".into(), format!("{method} {}", body.unwrap_or("")).into_bytes())),
             _ => None,
         }
@@ -235,4 +237,23 @@ fn inserted_scripts_run_and_fire_load() {
     );
     assert_eq!(text_of(&rt, "note"), "loaded external ran");
     assert_eq!(console(&mut rt), "inline 7");
+}
+
+#[test]
+fn module_scripts_and_import_maps() {
+    let mut rt = page(
+        r#"<body><p id="out"></p>
+        <script type="importmap">{"imports": {"fmt": "https://cdn.example.com/lib/fmt.js", "m/": "./mod/"}}</script>
+        <script type="module">
+          import { twice } from 'm/util.js'
+          import { fmt } from 'fmt'
+          document.getElementById('out').textContent = fmt(twice(21))
+          const lazy = await import('./mod/util.js')
+          console.log('lazy', lazy.default, import.meta.url.startsWith('https://example.com/dir/page.html'))
+        </script>
+        <script>console.log('classic first')</script>
+        <script nomodule>console.log('never')</script></body>"#,
+    );
+    assert_eq!(text_of(&rt, "out"), "[42|util]");
+    assert_eq!(console(&mut rt), "classic first\nlazy util true");
 }

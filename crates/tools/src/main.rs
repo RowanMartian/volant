@@ -12,7 +12,9 @@
 //!                                              draw a page with Volant's own engine
 //!                                              (--reader: as Reader view of URL; images
 //!                                              without a known size are drawn 3:2)
-//!     [--scripts URL] [--eval JS]              …after running the page's JavaScript as at URL
+//!     [--scripts URL] [--eval JS] [--type TEXT] [--then JS]
+//!                                              …after running the page's JavaScript as at URL
+//!                                              (then JS, typing into the focused field, more JS)
 //!                                              (other files fetched with curl; console printed)
 //! volant-tools js FILE.js                      run a script with Volant's own JavaScript engine
 //! ```
@@ -27,6 +29,11 @@ struct CurlHost;
 
 impl volant_engine::script::Host for CurlHost {
     fn fetch(&self, method: &str, url: &str, body: Option<&str>) -> Option<(u16, String, Vec<u8>)> {
+        if let Some(path) = url.strip_prefix("file://") {
+            // Local files, for testing pages offline.
+            let path = path.split(['?', '#']).next().unwrap_or(path);
+            return std::fs::read(path).ok().map(|b| (200, String::new(), b));
+        }
         if !url.starts_with("http") {
             return None;
         }
@@ -160,6 +167,16 @@ fn run(args: &[String]) -> Result<(), String> {
                                 println!("eval: {shown}");
                             }
                             Err(e) => println!("eval error: {e}"),
+                        }
+                    }
+                    if let Some(text) = value("--type") {
+                        rt.type_text(&text);
+                        rt.tick();
+                    }
+                    if let Some(code) = value("--then") {
+                        match rt.interp.run(&code) {
+                            Ok(v) => println!("then: {}", rt.interp.to_str(&v).map(|s| s.to_string()).unwrap_or_default()),
+                            Err(e) => println!("then error: {e}"),
                         }
                     }
                     for line in rt.take_console() {
