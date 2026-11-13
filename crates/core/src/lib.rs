@@ -18,6 +18,7 @@
 //! * [`json`]: the JSON writer and parser the app needs.
 //! * [`http`]: an HTTP/1.1 client (GET and POST, redirects, chunked, gzip, limits) over any transport.
 //! * [`sites`]: which engine draws each site (Simple Page by default, WebKit for applications and fallbacks).
+//! * [`httpcache`]: an in-memory HTTP cache (freshness, revalidation, Vary, LRU).
 //! * [`cookies`]: the cookie jar (domains, paths, expiry, Secure, HttpOnly), saved as plain lines.
 //! * [`deflate`], [`hash`], [`zip`]: DEFLATE both ways, gzip, SHA-256, CRC-32 and
 //!   zip archives, for updates, downloads and packaging.
@@ -34,6 +35,7 @@ pub mod json;
 pub mod macho;
 pub mod html;
 pub mod http;
+pub mod httpcache;
 pub mod omnibox;
 pub mod reader;
 pub mod scriptlets;

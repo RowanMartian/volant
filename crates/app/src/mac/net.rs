@@ -5,7 +5,9 @@
 //! TLS stay the system's. Call these from background threads: they block.
 //!
 //! Pages Volant runs itself share one cookie jar (volant-core's `cookies`),
-//! kept in `cookies.txt` in Volant's data folder.
+//! kept in `cookies.txt` in Volant's data folder. Connections are kept alive
+//! and reused (`http::Pool`), and answers are cached in memory
+//! (`httpcache`): one cache for requests with cookies, one without.
 
 use block2::RcBlock;
 use std::ffi::{c_char, c_void, CString};
@@ -89,8 +91,27 @@ pub struct NwConn {
 // Network framework itself is thread-safe.
 unsafe impl Send for NwConn {}
 
+/// Idle connections, kept for the next request to the same server.
+static POOL: http::Pool<NwConn> = http::Pool::new();
+
 impl Transport for NwTransport {
     type Conn = NwConn;
+
+    fn reuse(&self, host: &str, port: u16, tls: bool) -> Option<NwConn> {
+        POOL.take(host, port, tls).filter(|c| !c.eof)
+    }
+
+    fn keep(&self, host: &str, port: u16, tls: bool, conn: NwConn) -> bool {
+        if conn.eof {
+            return false;
+        }
+        POOL.put(host, port, tls, conn);
+        true
+    }
+
+    fn pools(&self) -> bool {
+        true
+    }
 
     fn connect(&self, host: &str, port: u16, tls: bool, timeout: Duration) -> Result<NwConn, String> {
         let c_host = CString::new(host).map_err(|_| "bad host name".to_string())?;
@@ -240,12 +261,48 @@ pub fn save_cookies() {
 
 /// A page's request (any method), with the shared cookie jar.
 pub fn send(url: &str, opts: &Options) -> Result<Response, String> {
-    http::send(&NwTransport, url, opts, cookie_jar().map(|j| j as &dyn http::CookieStore))
+    cached(&CACHE, url, opts, cookie_jar().map(|j| j as &dyn http::CookieStore))
 }
 
 /// [`send`] without cookies: none go, none are kept (a cross-origin `fetch` without credentials).
 pub fn send_anonymous(url: &str, opts: &Options) -> Result<Response, String> {
-    http::send(&NwTransport, url, opts, None)
+    cached(&ANON_CACHE, url, opts, None)
+}
+
+type SharedCache = std::sync::OnceLock<std::sync::Mutex<volant_core::httpcache::Cache>>;
+/// Answers to requests with cookies, and without (kept apart, so a page's
+/// anonymous request never gets an answer meant for the person).
+static CACHE: SharedCache = std::sync::OnceLock::new();
+static ANON_CACHE: SharedCache = std::sync::OnceLock::new();
+
+/// A GET through the cache: fresh copies come straight back, stale ones are revalidated.
+fn cached(cache: &SharedCache, url: &str, opts: &Options, jar: Option<&dyn http::CookieStore>) -> Result<Response, String> {
+    use volant_core::httpcache::{Cache, Lookup};
+    if opts.method != "GET" {
+        return http::send(&NwTransport, url, opts, jar);
+    }
+    let cache = cache.get_or_init(|| std::sync::Mutex::new(Cache::new(48 << 20)));
+    let now = cookies::now();
+    let look = cache.lock().map(|mut c| c.lookup(url, &opts.headers, now)).unwrap_or(Lookup::Miss);
+    let r = match look {
+        Lookup::Fresh(r) => return Ok(r),
+        Lookup::Revalidate(cond) => {
+            let mut o = opts.clone();
+            o.headers.extend(cond);
+            let r = http::send(&NwTransport, url, &o, jar)?;
+            if r.status == 304 {
+                if let Some(kept) = cache.lock().ok().and_then(|mut c| c.revalidated(url, &r, now)) {
+                    return Ok(kept);
+                }
+            }
+            r
+        }
+        Lookup::Miss => http::send(&NwTransport, url, opts, jar)?,
+    };
+    if let Ok(mut c) = cache.lock() {
+        c.store(url, &opts.headers, &r, now);
+    }
+    Ok(r)
 }
 
 /// Options with Volant's User-Agent (GitHub's API requires one).

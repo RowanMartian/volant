@@ -1,6 +1,7 @@
 //! An HTTP/1.1 client, written from scratch: URLs, requests, response framing
-//! (Content-Length, chunked, read-until-close), gzip, redirects, size limits
-//! and an overall deadline; GET and POST (or any method), with cookies from a
+//! (Content-Length, chunked, read-until-close), gzip, redirects, size limits,
+//! an overall deadline and keep-alive (a transport may keep idle connections
+//! in a [`Pool`] and the next request to the server reuses one); GET and POST (or any method), with cookies from a
 //! [`cookies::Jar`](crate::cookies::Jar). The bytes travel over a [`Transport`]: the app's
 //! is TLS from macOS's Network framework (encryption stays the system's); the
 //! tests here use plain TCP.
@@ -107,6 +108,71 @@ impl Url {
 pub trait Transport {
     type Conn: Connection;
     fn connect(&self, host: &str, port: u16, tls: bool, timeout: Duration) -> Result<Self::Conn, String>;
+    /// An idle connection to this server, kept from an earlier request (keep-alive).
+    fn reuse(&self, _host: &str, _port: u16, _tls: bool) -> Option<Self::Conn> {
+        None
+    }
+    /// Keeps a connection whose answer was read to its end, for the next request.
+    /// Transports that don't keep connections ask servers to close them.
+    fn keep(&self, _host: &str, _port: u16, _tls: bool, _conn: Self::Conn) -> bool {
+        false
+    }
+    /// Does this transport keep connections (so requests don't say `Connection: close`)?
+    fn pools(&self) -> bool {
+        false
+    }
+}
+
+/// Idle keep-alive connections, by server, for a [`Transport`] to reuse.
+pub struct Pool<C> {
+    idle: std::sync::Mutex<Vec<(String, u16, bool, Instant, C)>>,
+}
+
+impl<C> Default for Pool<C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<C> Pool<C> {
+    /// How long an idle connection is worth keeping (many servers close theirs after 5–60 s).
+    pub const IDLE: Duration = Duration::from_secs(30);
+    const PER_SERVER: usize = 6;
+    const TOTAL: usize = 32;
+
+    pub const fn new() -> Self {
+        Pool { idle: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    /// The most recently used idle connection to the server, if one is still fresh.
+    pub fn take(&self, host: &str, port: u16, tls: bool) -> Option<C> {
+        let mut idle = self.idle.lock().ok()?;
+        idle.retain(|e| e.3.elapsed() < Self::IDLE);
+        let at = idle.iter().rposition(|e| e.0 == host && e.1 == port && e.2 == tls)?;
+        Some(idle.remove(at).4)
+    }
+
+    pub fn put(&self, host: &str, port: u16, tls: bool, conn: C) {
+        let Ok(mut idle) = self.idle.lock() else { return };
+        idle.retain(|e| e.3.elapsed() < Self::IDLE);
+        if idle.iter().filter(|e| e.0 == host && e.1 == port && e.2 == tls).count() >= Self::PER_SERVER {
+            if let Some(at) = idle.iter().position(|e| e.0 == host && e.1 == port && e.2 == tls) {
+                idle.remove(at);
+            }
+        }
+        if idle.len() >= Self::TOTAL {
+            idle.remove(0);
+        }
+        idle.push((host.to_string(), port, tls, Instant::now(), conn));
+    }
+
+    pub fn len(&self) -> usize {
+        self.idle.lock().map(|i| i.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 pub trait Connection {
@@ -189,7 +255,7 @@ impl Response {
 }
 
 /// The request bytes for `url` (head and body).
-pub fn request(url: &Url, opts: &Options) -> Result<Vec<u8>, String> {
+pub fn request(url: &Url, opts: &Options, keep_alive: bool) -> Result<Vec<u8>, String> {
     let host = if url.default_port() { url.host.clone() } else { format!("{}:{}", url.host, url.port) };
     let method = if opts.method.is_empty() { "GET" } else { opts.method.as_str() };
     if !method.bytes().all(|c| c.is_ascii_alphabetic()) {
@@ -200,7 +266,7 @@ pub fn request(url: &Url, opts: &Options) -> Result<Vec<u8>, String> {
     if !has("accept") {
         r.push_str("Accept: */*\r\n");
     }
-    r.push_str("Accept-Encoding: gzip\r\nConnection: close\r\n");
+    r.push_str(if keep_alive { "Accept-Encoding: gzip\r\n" } else { "Accept-Encoding: gzip\r\nConnection: close\r\n" });
     for (k, v) in &opts.headers {
         if k.is_empty() || k.contains([':', '\r', '\n', ' ']) || v.contains(['\r', '\n']) {
             return Err(format!("bad request header {k:?}"));
@@ -240,6 +306,8 @@ struct Chunks {
     done: bool,
     line: Vec<u8>,
     trailers: bool,
+    /// Bytes came after the end (the connection can't be reused).
+    extra: bool,
 }
 
 impl Chunks {
@@ -278,6 +346,7 @@ impl Chunks {
             if self.trailers {
                 if line.is_empty() {
                     self.done = true;
+                    self.extra = !data.is_empty();
                 }
                 continue;
             }
@@ -313,10 +382,60 @@ fn parse_head(head: &str) -> Result<(u16, Vec<(String, String)>), String> {
 }
 
 /// One request/response exchange on a fresh connection.
+/// How an exchange over a connection went wrong.
+enum Failure {
+    /// A kept connection the server had already closed: nothing came back, so try a new one.
+    Stale,
+    Error(String),
+}
+
+impl From<String> for Failure {
+    fn from(e: String) -> Self {
+        Failure::Error(e)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(e: &str) -> Self {
+        Failure::Error(e.to_string())
+    }
+}
+
 fn exchange<T: Transport>(t: &T, url: &Url, opts: &Options, until: Instant) -> Result<Response, String> {
     let left = |until: Instant| until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or("timed out".to_string());
-    let mut conn = t.connect(url.connect_host(), url.port, url.https, left(until)?.min(Duration::from_secs(20)))?;
-    conn.send(&request(url, opts)?)?;
+    let req = request(url, opts, t.pools())?;
+    let (host, port, tls) = (url.connect_host(), url.port, url.https);
+    if let Some(mut conn) = t.reuse(host, port, tls) {
+        match over(&mut conn, url, &req, opts, until, true) {
+            Ok((r, reusable)) => {
+                if reusable {
+                    t.keep(host, port, tls, conn);
+                }
+                return Ok(r);
+            }
+            Err(Failure::Error(e)) => return Err(e),
+            Err(Failure::Stale) => {} // a fresh connection below
+        }
+    }
+    let mut conn = t.connect(host, port, tls, left(until)?.min(Duration::from_secs(20)))?;
+    match over(&mut conn, url, &req, opts, until, false) {
+        Ok((r, reusable)) => {
+            if reusable && t.pools() {
+                t.keep(host, port, tls, conn);
+            }
+            Ok(r)
+        }
+        Err(Failure::Error(e)) => Err(e),
+        Err(Failure::Stale) => Err("the server closed the connection without answering".into()),
+    }
+}
+
+/// One request and its answer over `conn`; also whether the connection can carry another.
+fn over<C: Connection>(conn: &mut C, url: &Url, req: &[u8], opts: &Options, until: Instant, kept: bool) -> Result<(Response, bool), Failure> {
+    let left = |until: Instant| until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or("timed out".to_string());
+    if let Err(e) = conn.send(req) {
+        return Err(if kept { Failure::Stale } else { Failure::Error(e) });
+    }
     let mut buf: Vec<u8> = Vec::new();
     // Read the head (skipping any 1xx interim answers).
     let (status, headers, body_start) = loop {
@@ -333,9 +452,12 @@ fn exchange<T: Transport>(t: &T, url: &Url, opts: &Options, until: Instant) -> R
         if buf.len() > 64 * 1024 {
             return Err("the response headers are too long".into());
         }
-        match conn.recv(left(until)?)? {
-            Some(more) => buf.extend_from_slice(&more),
-            None => return Err("the server closed the connection without answering".into()),
+        match conn.recv(left(until)?) {
+            Ok(Some(more)) => buf.extend_from_slice(&more),
+            Ok(None) if kept && buf.is_empty() => return Err(Failure::Stale),
+            Ok(None) => return Err("the server closed the connection without answering".into()),
+            Err(_) if kept && buf.is_empty() => return Err(Failure::Stale),
+            Err(e) => return Err(e.into()),
         }
     };
     let get = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
@@ -356,12 +478,18 @@ fn exchange<T: Transport>(t: &T, url: &Url, opts: &Options, until: Instant) -> R
     let raw_limit = opts.limit;
     let mut body: Vec<u8> = Vec::new();
     let mut pending: Vec<u8> = buf.split_off(body_start);
+    // Bytes past the end of the answer mean the connection is out of step: don't reuse it.
+    let mut overrun = false;
     loop {
         match &mut framing {
-            Framing::Empty => break,
+            Framing::Empty => {
+                overrun = !pending.is_empty();
+                break;
+            }
             Framing::Length(n) => {
                 body.extend_from_slice(&pending);
                 if body.len() >= *n {
+                    overrun = body.len() > *n;
                     body.truncate(*n);
                     break;
                 }
@@ -388,6 +516,8 @@ fn exchange<T: Transport>(t: &T, url: &Url, opts: &Options, until: Instant) -> R
             },
         }
     }
+    let close = get("connection").map(|v| v.to_ascii_lowercase().contains("close")).unwrap_or(false);
+    let reusable = !close && !overrun && !matches!(framing, Framing::UntilClose) && !matches!(&framing, Framing::Chunked(c) if c.extra);
     if let Framing::Chunked(c) = framing {
         body = c.out;
     }
@@ -395,9 +525,9 @@ fn exchange<T: Transport>(t: &T, url: &Url, opts: &Options, until: Instant) -> R
         None => {}
         Some(e) if e.is_empty() || e == "identity" => {}
         Some(e) if e == "gzip" || e == "x-gzip" => body = deflate::gunzip(&body, opts.limit).map_err(|e| format!("gzip: {e}"))?,
-        Some(e) => return Err(format!("the server used an encoding Volant didn't ask for ({e})")),
+        Some(e) => return Err(format!("the server used an encoding Volant didn't ask for ({e})").into()),
     }
-    Ok(Response { status, headers, body, url: url.as_string() })
+    Ok((Response { status, headers, body, url: url.as_string() }, reusable))
 }
 
 /// GETs `url` (or uses `opts.method`), following redirects.
@@ -514,6 +644,71 @@ mod tests {
         (port, rx)
     }
 
+    /// Tcp that keeps connections.
+    struct Kept(Pool<TcpConn>);
+
+    impl Transport for Kept {
+        type Conn = TcpConn;
+        fn connect(&self, host: &str, port: u16, tls: bool, timeout: Duration) -> Result<TcpConn, String> {
+            Tcp.connect(host, port, tls, timeout)
+        }
+        fn reuse(&self, host: &str, port: u16, tls: bool) -> Option<TcpConn> {
+            self.0.take(host, port, tls)
+        }
+        fn keep(&self, host: &str, port: u16, tls: bool, conn: TcpConn) -> bool {
+            self.0.put(host, port, tls, conn);
+            true
+        }
+        fn pools(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn keep_alive() {
+        // Each connection answers `per` requests, then the server closes it.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let (tx, conns) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (c, per) in [(0, 3), (1, 1), (2, 1)] {
+                let (mut s, _) = l.accept().unwrap();
+                tx.send(c).unwrap();
+                for k in 0..per {
+                    let mut req = Vec::new();
+                    let mut b = [0u8; 512];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = s.read(&mut b).unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        req.extend_from_slice(&b[..n]);
+                    }
+                    let keep = !String::from_utf8_lossy(&req).contains("Connection: close");
+                    let body = format!("c{c}r{k}{}", if keep { "" } else { "!" });
+                    let chunked = k == 1;
+                    let head = if chunked { "Transfer-Encoding: chunked\r\n".to_string() } else { format!("Content-Length: {}\r\n", body.len()) };
+                    let payload = if chunked { format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len()) } else { body };
+                    s.write_all(format!("HTTP/1.1 200 OK\r\n{head}\r\n{payload}").as_bytes()).unwrap();
+                }
+            }
+        });
+        let t = Kept(Pool::new());
+        let url = format!("http://127.0.0.1:{port}/x");
+        let o = Options::default();
+        // Three requests share the first connection (one answer chunked)...
+        assert_eq!(get(&t, &url, &o).unwrap().body, b"c0r0");
+        assert_eq!(t.0.len(), 1);
+        assert_eq!(get(&t, &url, &o).unwrap().body, b"c0r1");
+        assert_eq!(get(&t, &url, &o).unwrap().body, b"c0r2");
+        // ...then the server closed it: the next request notices and opens a new one.
+        assert_eq!(get(&t, &url, &o).unwrap().body, b"c1r0");
+        assert_eq!(conns.recv().unwrap(), 0);
+        assert_eq!(conns.recv().unwrap(), 1);
+        // A transport that doesn't keep connections asks the server to close them.
+        assert_eq!(get(&Tcp, &url, &o).unwrap().body, b"c2r0!");
+    }
+
     fn gz(data: &[u8]) -> Vec<u8> {
         // A stored-block gzip: header, raw deflate, CRC and size.
         let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3];
@@ -610,7 +805,7 @@ mod tests {
     fn refuses_bad_headers() {
         let u = Url::parse("https://example.com/").unwrap();
         let o = Options { headers: vec![("X".into(), "a\r\nEvil: 1".into())], ..Default::default() };
-        assert!(request(&u, &o).is_err());
+        assert!(request(&u, &o, false).is_err());
         assert!(parse_head("SSH-2.0-OpenSSH\r\n").is_err());
     }
 }

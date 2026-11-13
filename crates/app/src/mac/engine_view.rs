@@ -1125,7 +1125,8 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
     use std::sync::mpsc::RecvTimeoutError;
     let started = std::time::Instant::now();
     let host = NetHost;
-    let mut headers = vec![("Accept".to_string(), "text/html,application/xhtml+xml,*/*;q=0.8".to_string())];
+    // The page itself is always checked with the server (a 304 is cheap); its files may come from the cache.
+    let mut headers = vec![("Accept".to_string(), "text/html,application/xhtml+xml,*/*;q=0.8".to_string()), ("Cache-Control".to_string(), "max-age=0".to_string())];
     if let Some(t) = &nav.content_type {
         headers.push(("Content-Type".into(), t.clone()));
     }
