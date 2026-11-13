@@ -409,3 +409,18 @@ fn canvas_drawing_is_recorded() {
     assert!(snap.canvases.contains_key(&boxes[0].2));
     assert_eq!((boxes[1].0, boxes[1].1), (300.0, 150.0));
 }
+
+#[test]
+fn assess_finds_pages_simple_page_cannot_show() {
+    let check = |html: &str, errors: usize| {
+        let mut rt = Runtime::new(html, "https://example.com/", Env { width: 800.0, dark: false }, Rc::new(FakeHost));
+        assess(&rt.snapshot(), errors)
+    };
+    let article = format!("<p>{}</p>", "Jet engines push air backwards. ".repeat(30));
+    assert_eq!(check(&article, 0), None);
+    assert!(check("<div id=root></div><script src=app.js></script>", 0).is_some());
+    assert!(check("<frameset><frame src=a.html></frameset>", 0).is_some());
+    assert!(check("<video src=a.mp4></video>", 0).is_some());
+    assert!(check("<p>Loading</p><script></script>", 4).is_some());
+    assert_eq!(check(&article, 4), None);
+}

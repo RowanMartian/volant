@@ -3059,6 +3059,43 @@ pub struct Snapshot {
     pub generation: u64,
 }
 
+/// Does this page look like it came out right in Simple Page? `None` if so,
+/// otherwise why not: the reasons a browser should hand the page to WebKit.
+/// `errors` is how many uncaught script errors the page had.
+pub fn assess(snap: &Snapshot, errors: usize) -> Option<&'static str> {
+    fn walk(dom: &Dom, id: NodeId, text: &mut usize, scripts: &mut usize, media: &mut usize, frameset: &mut bool) {
+        match dom.tag(id) {
+            Some("script") => {
+                *scripts += 1;
+                return;
+            }
+            Some("style" | "noscript" | "template" | "head" | "title") => return,
+            Some("frameset") => *frameset = true,
+            Some("video" | "audio" | "embed" | "object") => *media += 1,
+            _ => {}
+        }
+        if let Data::Text(t) = &dom.nodes[id as usize].data {
+            *text += t.chars().filter(|c| !c.is_whitespace()).count();
+        }
+        for &c in dom.children(id) {
+            walk(dom, c, text, scripts, media, frameset);
+        }
+    }
+    let (mut text, mut scripts, mut media, mut frameset) = (0, 0, 0, false);
+    walk(&snap.dom, ROOT, &mut text, &mut scripts, &mut media, &mut frameset);
+    if frameset {
+        Some("the page is made of frames")
+    } else if text < 80 && scripts > 0 {
+        Some("the page is built by scripts and came out empty")
+    } else if text < 80 && media > 0 {
+        Some("the page is a video or plug-in")
+    } else if errors >= 3 && text < 600 {
+        Some("the page's scripts failed")
+    } else {
+        None
+    }
+}
+
 pub struct Runtime {
     pub interp: Interp,
     pub state: S,

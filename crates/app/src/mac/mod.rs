@@ -45,6 +45,8 @@ pub struct Paths {
     pub session: PathBuf,
     pub history: PathBuf,
     pub favorites: PathBuf,
+    /// Which engine draws each site (`volant_core::sites`).
+    pub sites: PathBuf,
     pub downloads: PathBuf,
 }
 
@@ -58,6 +60,7 @@ impl Paths {
             session: data.join("session.txt"),
             history: data.join("history.log"),
             favorites: data.join("favorites.txt"),
+            sites: data.join("sites.txt"),
             downloads: home.join("Downloads"),
             data,
         }
@@ -83,6 +86,7 @@ pub struct Browser {
     pub history: History,
     pub settings: Settings,
     pub favorites: volant_core::store::Favorites,
+    pub sites: volant_core::sites::Sites,
     pub weather: weather::Cache,
     pub ubo: ubo::State,
     pub engine: engine_view::State,
@@ -201,6 +205,7 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
     let settings = Settings::load(&paths.settings);
     let history = History::open(&paths.history);
     let favorites = volant_core::store::Favorites::load(&paths.favorites);
+    let sites = volant_core::sites::Sites::load(&paths.sites);
     theme::apply_appearance(settings.appearance, mtm);
 
     let web_delegate = web::WebDelegate::new(mtm);
@@ -216,6 +221,7 @@ pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
         history,
         settings,
         favorites,
+        sites,
         weather: Default::default(),
         ubo: Default::default(),
         engine: Default::default(),

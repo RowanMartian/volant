@@ -1,7 +1,7 @@
 # Volant
 
-A native macOS browser in Rust. AppKit for the interface, the system WebKit for pages, and everything in
-between written from scratch. Ad and tracker blocking is built in, powered by uBlock Origin's filter lists.
+A native macOS browser in Rust. AppKit for the interface, its own engine for the pages it handles well
+(Simple Page), the system WebKit for web apps and as the fallback, and everything in between written from scratch. Ad and tracker blocking is built in, powered by uBlock Origin's filter lists.
 
 [![Build](https://github.com/RowanMartian/volant/actions/workflows/build-macos.yml/badge.svg)](https://github.com/RowanMartian/volant/actions/workflows/build-macos.yml)
 &nbsp;[Website](https://rowanmartian.github.io/volant/) · [Download](https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg) · macOS 12+, universal (arm64 + x86_64) · MIT
@@ -51,7 +51,8 @@ assets/       Volant's own pages (volant://) and the scripts the blocker injects
 
 ## Volant's own engine
 
-`crates/engine` is a web engine written from scratch, growing in chunks; WebKit still renders web pages.
+`crates/engine` is a web engine written from scratch, growing in chunks. It draws ordinary web pages by default;
+WebKit draws web apps and anything it can't show yet.
 Today: CSS parsing (selectors with descendant/child/sibling combinators, attribute operators, `:nth-*`, `:not()`,
 `:is()`, `::before`/`::after` with `content`, `!important`, `@media` width/colour-scheme queries, `@supports`), custom
 properties and `var()`, `calc()`/`min()`/`max()`/`clamp()`, the cascade with a user-agent sheet and a rule index
@@ -76,13 +77,21 @@ old presentational attributes (`bgcolor`, `width="85%"`, `cellpadding`) and hit 
 **Page scripts** (`script.rs`) connect the engine to Volant's JavaScript engine: a live DOM with wrapper objects
 (traversal and mutation, attributes, `innerHTML`/`outerHTML`, `querySelector` with the engine's own selector matching,
 `classList`, `style`, `dataset`), events with capture, bubbling, `once` and inline handlers, focus, typing, checkboxes,
-selects, GET form submission and link activation, scripts inserted by scripts, `document.write`, and a `getComputedStyle`
+native `<select>` menus, a text caret with arrow keys, `:hover`/`:focus`/`:focus-within`/`:target`, same-page
+`#anchor` scrolling, GET and POST forms (URL-encoded, multipart, text) and link activation, `<canvas>` 2D drawing
+(paths, arcs, curves, text, images, transforms) recorded as a display list the app draws natively, scripts inserted by scripts, `document.write`, and a `getComputedStyle`
 backed by the real cascade. `prelude.js` builds the rest of the platform in JavaScript on a few native hooks: `URL`,
 `URLSearchParams`, `fetch`, `XMLHttpRequest`, `Headers`/`Response`, storage, observers, `FormData`, `atob`/`btoa`,
 `TextEncoder` and more. jQuery and MediaWiki's module loader run on it.
 
-It's used for an opt-in Reader (Settings → Experimental), and for **View → Simple Page (⌥⌘E)**, which shows any
-page with nothing but Volant: a session thread fetches the HTML, scripts and style sheets over Volant's own HTTP,
+**Simple Page is the default** for web pages (Settings → Experimental → Open pages in Simple Page). `sites.rs` in
+volant-core picks the engine per site: WebKit for web apps (video, maps, office suites, chat, social apps), for
+sites the person switched with **View → Simple Page (⌥⌘E)** (remembered in `sites.txt`), and for two weeks after
+Simple Page couldn't show a site. A page falls back to WebKit when the fetch fails, when it isn't HTML, when it
+redirects to a web app, or when `script::assess` finds it came out empty, framed, plug-in only or broken by script
+errors. Only one Simple Page runs at a time; other Simple Page tabs keep their history and reload when brought to
+the front. Cookies (`cookies.rs`) and history are Volant's own, and WebKit doesn't load the page as well.
+It's also used for an opt-in Reader. Simple Page shows a page with nothing but Volant: a session thread fetches the HTML, scripts and style sheets over Volant's own HTTP,
 runs the page's JavaScript, and sends snapshots to be laid out and drawn natively (a first paint before the scripts,
 then after them and after every change). Clicks are hit-tested and sent to the page's scripts, typing goes to its
 focused field, and links and forms navigate the tab, so history works and the next page opens in the engine too.
@@ -92,7 +101,7 @@ focused field, and links and forms navigate the tab, so history works and the ne
 
 `crates/js` (volant-js) is Volant's own JavaScript engine, from scratch with no dependencies beyond volant-core. A
 lexer with automatic semicolon insertion, template and regex literals feeds a recursive-descent parser, and a
-tree-walking interpreter runs the result: closures and hoisting, prototypes, `this`, `new`, classes (`extends`,
+compiler to bytecode (variables resolved to slots ahead of time, property lookups cached) feeds a stack VM: closures and hoisting, prototypes, `this`, `new`, classes (`extends`,
 `super`, getters and setters, instance and static fields), destructuring, spread and rest, optional chaining,
 labelled loops, `switch`, exceptions, generators, `async`/`await` and `new Function`/`eval`. Its own **regular
 expression engine** (`regex.rs`: a backtracking matcher with groups, named groups, lookaround, back-references,
@@ -100,8 +109,8 @@ classes, `\p{…}` and the `gimsuy` flags) backs `RegExp` and the string methods
 queue, and timers on a virtual clock; `await` runs the event loop in place until its promise settles. The standard
 library covers Object, Function, Array, String, Number, Boolean, Math, JSON, the Error types, Map, Set, Date,
 Symbol and iterators. Scripts run under a step budget and a recursion limit, so a page can't hang the browser.
-`volant-tools js file.js` runs a script. Not yet: ES modules (`import`), Proxy, typed arrays (plain arrays stand
-in), and binary data.
+ES modules (static `import`/`export` and dynamic `import()`) load through the page's host. `volant-tools js
+file.js` runs a script. Not yet: Proxy, typed arrays (plain arrays stand in), and binary data.
 
 ## Blocking engine
 

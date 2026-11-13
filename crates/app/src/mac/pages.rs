@@ -34,6 +34,7 @@ fn settings_json(b: &Browser) -> String {
         .bool("restore_session", s.restore_session)
         .num("suspend_minutes", s.suspend_minutes)
         .bool("engine_reader", s.engine_reader)
+        .bool("simple_default", s.simple_default)
         .done()
 }
 

@@ -68,7 +68,7 @@ args_for() {
   local b="$1"; shift
   case "$b" in
     Volant)
-      mkdir -p "$TMP/volant"; printf 'onboarded=1\nrestore_session=0\n' > "$TMP/volant/settings.txt"
+      mkdir -p "$TMP/volant"; printf 'onboarded=1\nrestore_session=0\nsimple_default=0\n' > "$TMP/volant/settings.txt"
       echo "$@" ;;
     Safari) echo "$*" ;;
     Chrome) echo "--user-data-dir=$TMP/chrome --no-first-run --no-default-browser-check --disable-search-engine-choice-screen $*" ;;

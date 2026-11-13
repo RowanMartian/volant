@@ -199,6 +199,7 @@ pub fn ublock_selftest(b: &mut Browser) {
     let dir = std::env::var("VOLANT_SMOKE_DIR").unwrap_or_else(|_| "/tmp/volant-smoke".into());
     let _ = std::fs::create_dir_all(&dir);
     b.settings.onboarded = true;
+    b.settings.simple_default = false;
     b.settings.ublock = true;
     b.settings.ublock_lists = volant_core::ublock::default_lists();
     let started = std::time::Instant::now();
@@ -329,7 +330,9 @@ fn finish_selftest(dir: &str, report: &str) {
 
 /// `--smoke-test`: drives the real app through its main screens, saves
 /// screenshots and a short report to $VOLANT_SMOKE_DIR, then quits. CI runs this.
-pub fn smoke_test(b: &Browser) {
+pub fn smoke_test(b: &mut Browser) {
+    // WebKit draws the pages until the Simple Page steps (which switch the default on).
+    b.settings.simple_default = false;
     let dir = std::env::var("VOLANT_SMOKE_DIR").unwrap_or_else(|_| "/tmp/volant-smoke".into());
     let _ = std::fs::create_dir_all(&dir);
     let window_id = b.window.windowNumber();
@@ -458,12 +461,16 @@ pub fn smoke_test(b: &Browser) {
     }));
     step(51.0, Box::new(move |_b| s13("13-engine-select")));
     // Simple Page: the whole Wikipedia page, drawn by Volant's own engine.
-    step(51.5, Box::new(|b| {
+    // Simple Page by default: typing a Wikipedia address opens it in Volant's own engine.
+    let rep6 = report.clone();
+    step(51.5, Box::new(move |b| {
         b.settings.engine_reader = false;
+        b.settings.simple_default = true;
         actions::navigate(b, "https://en.wikipedia.org/wiki/Jet_aircraft");
+        let simple = b.tabs.active.map(|id| super::engine_view::handles(b, id)).unwrap_or(false);
+        let youtube = super::engine_view::wants(b, "https://www.youtube.com/");
+        rep6.lock().unwrap().push_str(&format!("simple page by default: wikipedia {simple}, youtube {youtube}\n"));
     }));
-    // Simple Page: Wikipedia loaded, scripted, laid out and drawn by Volant's own engine.
-    step(56.0, Box::new(|b| super::engine_view::toggle_page(b)));
     step(63.0, Box::new(move |_b| s14("14-simple-page")));
     // Search Wikipedia from its own search box: typing, Enter, the form and the next page, all in the engine.
     step(63.5, Box::new(|b| {

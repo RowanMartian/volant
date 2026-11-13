@@ -447,6 +447,20 @@ fn decide_navigation(web: &WKWebView, action: &WKNavigationAction) -> WKNavigati
             return WKNavigationActionPolicy::Cancel;
         }
     }
+    // A link to a site Simple Page draws: Volant's own engine takes the tab from WebKit.
+    if kind == WKNavigationType::LinkActivated && main_frame && (scheme == "http" || scheme == "https") {
+        let base = |u: &str| u.split('#').next().unwrap_or(u).to_string();
+        let here = unsafe { web.URL() }.and_then(|u| u.absoluteString()).map(|s| s.to_string()).unwrap_or_default();
+        if base(&here) != base(&url) {
+            let ptr = ptr_of(web);
+            let take = super::try_with(|b| tab_of(b, ptr).filter(|&id| !super::engine_view::handles(b, id) && super::engine_view::wants(b, &url))).flatten();
+            if let Some(id) = take {
+                let url = url.clone();
+                super::later(move || with(move |b| super::engine_view::claim(b, id, &url)));
+                return WKNavigationActionPolicy::Cancel;
+            }
+        }
+    }
     // mailto:, tel:, zoommtg:, and other app links go to the app that handles them.
     if !matches!(scheme.as_str(), "http" | "https" | "about" | "data" | "blob" | "file" | "volant" | "javascript" | "") {
         if let Some(u) = req.URL() {

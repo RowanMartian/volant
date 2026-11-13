@@ -168,6 +168,10 @@ pub fn open_tab(b: &mut Browser, url: &str, front: bool) -> TabId {
     let id = b.tabs.open(url, "", false, true, super::now());
     if front || b.tabs.active.is_none() {
         select(b, id);
+    } else if super::engine_view::wants(b, url) {
+        // Simple Page loads it when the tab comes to the front.
+        web::create(b, id, None);
+        super::engine_view::claim(b, id, url);
     } else {
         let web = web::create(b, id, None);
         web::load(&web, url);
@@ -220,7 +224,11 @@ pub fn select(b: &mut Browser, id: TabId) {
         Some(w) => w.web.clone(),
         None => {
             let w = web::create(b, id, None);
-            web::load(&w, &url);
+            if super::engine_view::wants(b, &url) && !super::engine_view::handles(b, id) {
+                super::engine_view::claim(b, id, &url); // runs once the tab is in front
+            } else if !super::engine_view::handles(b, id) {
+                web::load(&w, &url);
+            }
             w
         }
     };
@@ -237,6 +245,7 @@ pub fn select(b: &mut Browser, id: TabId) {
     ui::sync_tabs(b);
     ui::update_progress(b);
     ui::scroll_to_active(b);
+    super::engine_view::sync(b);
 }
 
 pub fn close_tab(b: &mut Browser, id: TabId) {
@@ -244,6 +253,7 @@ pub fn close_tab(b: &mut Browser, id: TabId) {
         return;
     }
     let was_front = b.tabs.active == Some(id);
+    super::engine_view::forget(b, id);
     web::release(b, id);
     let next = b.tabs.close(id);
     match next {
@@ -291,9 +301,20 @@ pub fn navigate(b: &mut Browser, url: &str) {
         open_tab(b, url, true);
         return;
     };
-    // Simple Page runs this tab: the engine loads it (WebKit stays empty).
-    if super::engine_view::handles(b, id) && url.starts_with("http") {
-        super::engine_view::open(b, volant_engine::script::Navigation::get(url.to_string()));
+    // Simple Page runs this tab, or should draw this site: the engine loads it (WebKit stays empty).
+    if url.starts_with("http") && (super::engine_view::handles(b, id) || super::engine_view::wants(b, url)) {
+        if !b.webs.contains_key(&id) {
+            // Asleep: waking it takes it to the new address.
+            let was = super::engine_view::handles(b, id);
+            if let Some(t) = b.tabs.get_mut(id) {
+                t.url = url.to_string();
+            }
+            select(b, id);
+            if !was {
+                return;
+            }
+        }
+        super::engine_view::claim(b, id, url);
         return;
     }
     if let Some(t) = b.tabs.get_mut(id) {
