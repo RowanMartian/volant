@@ -327,7 +327,10 @@ pub struct Interp {
     pub promise_proto: Obj,
     pub generator_proto: Obj,
     pub iterator_proto: Obj,
+    /// What the built-in collections' iterators share (`next`), under %IteratorPrototype%.
+    pub list_iter_proto: Obj,
     pub buffer_proto: Obj,
+    pub symbol_proto: Obj,
     /// %TypedArray%.prototype, and each typed array's own prototype (in `typed::ELEMS` order).
     pub typed_proto: Obj,
     pub typed_protos: Vec<Obj>,
@@ -393,7 +396,9 @@ impl Interp {
             promise_proto: mk(Kind::Plain),
             generator_proto: mk(Kind::Plain),
             iterator_proto: mk(Kind::Plain),
+            list_iter_proto: mk(Kind::Plain),
             buffer_proto: mk(Kind::Plain),
+            symbol_proto: mk(Kind::Plain),
             typed_proto: mk(Kind::Plain),
             typed_protos: (0..crate::typed::ELEMS.len()).map(|_| mk(Kind::Plain)).collect(),
             data_view_proto: mk(Kind::Plain),
@@ -572,6 +577,7 @@ impl Interp {
             Value::Null => "null".into(),
             Value::Bool(b) => if *b { "true" } else { "false" }.into(),
             Value::Num(n) => num_to_string(*n).into(),
+            Value::Str(s) if s.starts_with("\0@") => format!("Symbol({})", crate::promise::symbol_description(s).unwrap_or_default()).into(),
             Value::Str(s) => s.clone(),
             Value::Obj(_) => {
                 let p = self.to_primitive(v, false)?;
@@ -584,6 +590,8 @@ impl Interp {
     pub fn key(&mut self, v: &Value) -> Res<Rc<str>> {
         match v {
             Value::Num(n) if n.fract() == 0.0 && *n >= 0.0 && *n < 4294967295.0 => Ok((*n as u64).to_string().into()),
+            // Strings, symbols included, are keys as they are.
+            Value::Str(s) => Ok(s.clone()),
             _ => self.to_str(v),
         }
     }
@@ -635,6 +643,7 @@ impl Interp {
 
     fn proto_of(&self, v: &Value) -> Option<Obj> {
         match v {
+            Value::Str(s) if s.starts_with("\0@") => Some(self.symbol_proto.clone()),
             Value::Str(_) => Some(self.string_proto.clone()),
             Value::Num(_) => Some(self.number_proto.clone()),
             Value::Bool(_) => Some(self.boolean_proto.clone()),

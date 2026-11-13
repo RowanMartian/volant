@@ -209,6 +209,8 @@ pub fn install(i: &mut Interp) {
                     keys.push(Value::Str(k));
                 }
             }
+            let symbols: Vec<Rc<str>> = o.borrow().entries().filter(|(k, _, _)| k.starts_with("\0@")).map(|(k, _, _)| k.clone()).collect();
+            keys.extend(symbols.into_iter().map(Value::Str));
         }
         Ok(i.array(keys))
     });

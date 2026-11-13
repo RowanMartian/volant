@@ -400,7 +400,19 @@ pub fn install(i: &mut Interp) {
     let object = ctor(i, "Object", &op, |i, _t, a| Ok(match arg(&a, 0) {
         v @ Value::Obj(_) => v,
         Value::Undefined | Value::Null => i.obj(Kind::Plain),
-        p => i.obj(Kind::Boxed(p)),
+        p => {
+            let proto = match &p {
+                Value::Str(s) if s.starts_with("\0@") => i.symbol_proto.clone(),
+                Value::Str(_) => i.string_proto.clone(),
+                Value::Num(_) => i.number_proto.clone(),
+                _ => i.boolean_proto.clone(),
+            };
+            let o = i.obj(Kind::Boxed(p));
+            if let Value::Obj(ob) = &o {
+                ob.borrow_mut().proto = Some(proto);
+            }
+            o
+        }
     }));
     def(i, &op, "hasOwnProperty", |i, t, a| {
         let k = i.key(&arg(&a, 0))?;
@@ -429,6 +441,7 @@ pub fn install(i: &mut Interp) {
                         Kind::Promise(_) => "Promise".into(),
                         Kind::Proxy(t, _) if matches!(t, Value::Obj(x) if matches!(x.borrow().kind, Kind::Array(_))) => "Array".into(),
                         Kind::Boxed(Value::Num(_)) => "Number".into(),
+                        Kind::Boxed(Value::Str(s)) if s.starts_with("\0@") => "Symbol".into(),
                         Kind::Boxed(Value::Str(_)) => "String".into(),
                         Kind::Boxed(Value::Bool(_)) => "Boolean".into(),
                         _ => "Object".into(),
@@ -494,14 +507,40 @@ pub fn install(i: &mut Interp) {
         }
         Ok(o)
     });
+    /// `Object.defineProperties(o, props)`: each own enumerable key of `props` is a descriptor.
+    fn define_all(i: &mut Interp, o: &Obj, props: &Value) -> Res<()> {
+        if matches!(props, Value::Undefined) {
+            return Ok(());
+        }
+        let Value::Obj(po) = props else { return i.throw("TypeError", "Property description must be an object") };
+        let mut keys = i.keys_of(props)?;
+        keys.extend(po.borrow().entries().filter(|(k, _, shown)| *shown && k.starts_with("\0@")).map(|(k, _, _)| k.clone()));
+        for k in keys {
+            let d = i.get(props, &k)?;
+            if !matches!(d, Value::Obj(_)) {
+                return i.throw("TypeError", "Property description must be an object");
+            }
+            define_property(i, o, &k, &d)?;
+        }
+        Ok(())
+    }
     def(i, &object, "create", |i, _t, a| {
+        let proto = match arg(&a, 0) {
+            Value::Obj(p) => Some(p),
+            Value::Null => None,
+            _ => return i.throw("TypeError", "Object prototype may only be an Object or null"),
+        };
         let o = i.obj(Kind::Plain);
         if let Value::Obj(oo) = &o {
-            oo.borrow_mut().proto = match arg(&a, 0) {
-                Value::Obj(p) => Some(p),
-                _ => None,
-            };
+            oo.borrow_mut().proto = proto;
+            define_all(i, oo, &arg(&a, 1))?;
         }
+        Ok(o)
+    });
+    def(i, &object, "defineProperties", |i, _t, a| {
+        let o = arg(&a, 0);
+        let Value::Obj(oo) = &o else { return i.throw("TypeError", "Object.defineProperties called on non-object") };
+        define_all(i, oo, &arg(&a, 1))?;
         Ok(o)
     });
     def(i, &object, "hasOwn", |i, _t, a| {
@@ -532,6 +571,13 @@ pub fn install(i: &mut Interp) {
             _ => i.keys_of(&o)?,
         };
         Ok(i.array(keys.into_iter().map(Value::Str).collect()))
+    });
+    def(i, &object, "getOwnPropertySymbols", |i, _t, a| {
+        let keys: Vec<Value> = match &arg(&a, 0) {
+            Value::Obj(o) => o.borrow().entries().filter(|(k, _, _)| k.starts_with("\0@")).map(|(k, _, _)| Value::Str(k.clone())).collect(),
+            _ => Vec::new(),
+        };
+        Ok(i.array(keys))
     });
     def(i, &object, "getOwnPropertyDescriptor", |i, _t, a| {
         let o = arg(&a, 0);

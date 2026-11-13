@@ -514,3 +514,18 @@ fn typed_arrays() {
         "4 1 8 2 8 true\n4 2 255 255,1,0,0\n255 0 2 2 -56 127 0.5\n12 34 4660 52\ntrue 6,2,4 -2,1,10 7,8\n[object Uint8Array] true false false undefined 1\n0,9,9,0 9,9 1 true 4"
     );
 }
+
+/// What polyfills (core-js and others) test before deciding to replace built-ins.
+#[test]
+fn feature_detection() {
+    let src = "
+        var P = Object.create({}, { next: { value: function () { return 1 }, writable: true, configurable: true } });
+        var o = Object.defineProperties({}, { a: { value: 1, enumerable: true }, b: { get: function () { return 2 } } });
+        console.log(P.next(), Object.getOwnPropertyNames(P).join(), o.a, o.b, Object.keys(o).join());
+        var s = Symbol('x'), q = {}; q[s] = 1;
+        console.log(String(s), s.description, Object(s) instanceof Symbol, Object.getOwnPropertySymbols(q).length, Symbol.keyFor(Symbol.for('k')));
+        var ai = [][Symbol.iterator](), IP = Object.getPrototypeOf(Object.getPrototypeOf(ai));
+        console.log(IP !== Object.prototype, typeof IP[Symbol.iterator], Object.getPrototypeOf(new Set()[Symbol.iterator]()).hasOwnProperty('next'));
+    ";
+    assert_eq!(out(src), "1 next 1 2 a\nSymbol(x) x true 1 k\ntrue function true");
+}

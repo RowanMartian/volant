@@ -69,7 +69,7 @@ pub fn make_iter(i: &Interp, items: Vec<Value>) -> Value {
     let it = i.obj(Kind::Plain);
     if let Value::Obj(o) = &it {
         let mut b = o.borrow_mut();
-        b.proto = Some(i.iterator_proto.clone());
+        b.proto = Some(i.list_iter_proto.clone());
         b.set_own("\0items", i.array(items));
         b.set_own("\0i", Value::Num(0.0));
     }
@@ -353,6 +353,18 @@ fn is_async_gen(g: &Value) -> bool {
     }
 }
 
+/// What `Symbol(desc)` was described with ("Symbol.iterator" for the well-known ones).
+pub fn symbol_description(key: &str) -> Option<String> {
+    let rest = key.strip_prefix("\0@")?;
+    if let Some(k) = rest.strip_prefix("for:") {
+        return Some(k.to_string());
+    }
+    Some(match rest.split_once(':') {
+        Some((n, d)) if n.bytes().all(|b| b.is_ascii_digit()) => d.to_string(),
+        _ => format!("Symbol.{rest}"),
+    })
+}
+
 pub fn install(i: &mut Interp) {
     // ---------------------------------------------------------- Symbol
     let counter = Rc::new(Cell::new(0u32));
@@ -366,7 +378,7 @@ pub fn install(i: &mut Interp) {
     });
     if let Value::Obj(so) = &symbol {
         let mut b = so.borrow_mut();
-        for name in ["iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "match", "replace", "search", "split", "unscopables"] {
+        for name in ["iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "match", "matchAll", "replace", "search", "split", "unscopables", "isConcatSpreadable"] {
             b.set_own(name, Value::Str(format!("\0@{name}").into()));
         }
     }
@@ -375,15 +387,71 @@ pub fn install(i: &mut Interp) {
             let k = i.to_str(&arg(&a, 0))?;
             Ok(Value::Str(format!("\0@for:{k}").into()))
         });
+        def(i, so, "keyFor", |_i, _t, a| {
+            Ok(match arg(&a, 0) {
+                Value::Str(s) if s.starts_with("\0@for:") => Value::Str(s["\0@for:".len()..].into()),
+                _ => Value::Undefined,
+            })
+        });
+        so.borrow_mut().set_hidden("prototype", Value::Obj(i.symbol_proto.clone()));
+    }
+    // Symbol.prototype: what a symbol's own methods come from (and `Object(sym) instanceof Symbol`).
+    let syp = i.symbol_proto.clone();
+    syp.borrow_mut().set_hidden("constructor", symbol.clone());
+    syp.borrow_mut().set_hidden("\0@toStringTag", Value::Str("Symbol".into()));
+    fn this_symbol(i: &Interp, t: &Value) -> Res<Rc<str>> {
+        match t {
+            Value::Str(s) if s.starts_with("\0@") => Ok(s.clone()),
+            Value::Obj(o) => match &o.borrow().kind {
+                Kind::Boxed(Value::Str(s)) if s.starts_with("\0@") => Ok(s.clone()),
+                _ => i.throw("TypeError", "not a symbol"),
+            },
+            _ => i.throw("TypeError", "not a symbol"),
+        }
+    }
+    def(i, &syp, "toString", |i, t, _a| {
+        let s = this_symbol(i, &t)?;
+        Ok(Value::Str(format!("Symbol({})", symbol_description(&s).unwrap_or_default()).into()))
+    });
+    def(i, &syp, "valueOf", |i, t, _a| Ok(Value::Str(this_symbol(i, &t)?)));
+    def(i, &syp, "\0@toPrimitive", |i, t, _a| Ok(Value::Str(this_symbol(i, &t)?)));
+    let desc = i.native(|i, t, _a| {
+        let s = this_symbol(i, &t)?;
+        Ok(match symbol_description(&s) {
+            Some(d) if !d.is_empty() || s.starts_with("\0@for:") => Value::Str(d.into()),
+            _ => Value::Undefined,
+        })
+    });
+    syp.borrow_mut().set_slot("description", Slot::Accessor(Some(desc), None));
+    for k in ["toString", "valueOf", "\0@toPrimitive", "description"] {
+        syp.borrow_mut().set_enumerable(k, false);
     }
     global(i, "Symbol", symbol);
 
     // ---------------------------------------------------------- iterators
     let ip = i.iterator_proto.clone();
-    def(i, &ip, "next", |i, t, _a| {
+    let lp = i.list_iter_proto.clone();
+    lp.borrow_mut().proto = Some(ip.clone());
+    def(i, &lp, "next", |i, t, _a| {
         let o = this_obj(i, &t)?;
         next_item(i, &o)
     });
+    lp.borrow_mut().set_hidden("\0@toStringTag", Value::Str("Array Iterator".into()));
+    // The global Iterator: its prototype is %IteratorPrototype% (where iterator helpers go).
+    let iterator = i.native(|i, _t, _a| i.throw("TypeError", "Iterator is an abstract class"));
+    if let Value::Obj(io) = &iterator {
+        io.borrow_mut().set_hidden("prototype", Value::Obj(ip.clone()));
+        io.borrow_mut().set_hidden("name", Value::Str("Iterator".into()));
+        def(i, io, "from", |i, _t, a| {
+            let v = arg(&a, 0);
+            let items = i.iterate(&v)?;
+            Ok(make_iter(i, items))
+        });
+        io.borrow_mut().set_enumerable("from", false);
+    }
+    ip.borrow_mut().set_hidden("constructor", iterator.clone());
+    i.global_obj.borrow_mut().set_hidden("Iterator", iterator);
+    lp.borrow_mut().set_enumerable("next", false);
     def(i, &ip, SYM_ITERATOR, |_i, t, _a| Ok(t));
     def(i, &ip, "toArray", |i, t, _a| {
         let o = this_obj(i, &t)?;
