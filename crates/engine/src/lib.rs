@@ -36,14 +36,15 @@ pub use style::{Color, Family};
 
 /// The `<style>` sheets in a document, in order.
 pub fn style_sheets(dom: &volant_core::html::Dom) -> Vec<String> {
-    (0..dom.nodes.len() as u32).filter(|&id| dom.tag(id) == Some("style")).map(|id| dom.text(id)).collect()
+    // (A sheet a script turned off, `style.disabled = true`, doesn't apply.)
+    (0..dom.nodes.len() as u32).filter(|&id| dom.tag(id) == Some("style") && dom.attr(id, "disabled").is_none()).map(|id| dom.text(id)).collect()
 }
 
 /// Parses `html`, styles it with its own `<style>` sheets plus `extra_css`
 /// (applied last, like a user stylesheet), and lays it out `width` px wide,
 /// sizing images from `images` where they're known.
 pub fn render(html: &str, extra_css: &str, width: f32, fonts: &dyn Fonts, images: &dyn Images) -> Page {
-    render_in(html, &[extra_css.to_string()], css::Env { width, dark: false }, fonts, images)
+    render_in(html, &[extra_css.to_string()], css::Env { width, height: 768.0, dark: false }, fonts, images)
 }
 
 /// Like [`render`], with any number of extra style sheets (a page's linked
@@ -54,7 +55,7 @@ pub fn render_in(html: &str, sheets: &[String], env: css::Env, fonts: &dyn Fonts
     let mut all = style_sheets(&dom);
     all.extend(sheets.iter().filter(|s| !s.is_empty()).cloned());
     let styled = style::compute(&dom, &all, &env);
-    layout::layout(&dom, &styled, env.width, fonts, images)
+    layout::layout(&dom, &styled, env.width, env.height, fonts, images)
 }
 
 #[cfg(test)]

@@ -208,7 +208,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     sheets.push(String::from_utf8_lossy(&read(f)?).into_owned());
                 }
             }
-            let env = volant_engine::Env { width, dark: flag("--dark").is_some() };
+            let env = volant_engine::Env { width, height: 768.0, dark: flag("--dark").is_some() };
             let started = std::time::Instant::now();
             let page = match value("--scripts") {
                 Some(url) => {

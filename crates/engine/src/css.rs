@@ -18,14 +18,15 @@ pub struct Rule {
 /// What `@media` queries are asked about.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Env {
-    /// Viewport width in px.
+    /// Viewport width and height in px.
     pub width: f32,
+    pub height: f32,
     pub dark: bool,
 }
 
 impl Default for Env {
     fn default() -> Self {
-        Env { width: 1024.0, dark: false }
+        Env { width: 1024.0, height: 768.0, dark: false }
     }
 }
 
@@ -260,6 +261,35 @@ fn feature_applies(f: &str, env: &Env) -> bool {
     }
 }
 
+/// Makes the relative `url(...)`s in a style sheet absolute, against the sheet's own address,
+/// so they mean the same thing once the sheet is applied to a page somewhere else.
+pub fn absolute_urls(css: &str, base: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(i) = rest.find("url(") {
+        out.push_str(&rest[..i + 4]);
+        rest = &rest[i + 4..];
+        let Some(end) = rest.find(')') else { break };
+        let inner = rest[..end].trim();
+        let q = inner.chars().next().filter(|c| *c == '"' || *c == '\'');
+        let bare = match q {
+            Some(c) => inner.trim_matches(c),
+            None => inner,
+        };
+        if bare.is_empty() || bare.starts_with("data:") || bare.starts_with('#') {
+            out.push_str(&rest[..end]);
+        } else {
+            let abs = volant_core::url::resolve(base, bare).unwrap_or_else(|| bare.to_string());
+            out.push('"');
+            out.push_str(&abs.replace('"', "%22"));
+            out.push('"');
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn parse_stylesheet(css: &str) -> Vec<Rule> {
     let css = strip_comments(css);
     let mut rules = Vec::new();
@@ -393,8 +423,10 @@ pub fn parse_declarations(text: &str) -> Vec<Decl> {
             let name = name.trim().to_ascii_lowercase();
             let mut value = value.trim();
             let mut important = false;
-            if let Some(i) = value.to_ascii_lowercase().rfind("!important") {
-                if value[i + 10..].trim().is_empty() {
+            // `!important`, with or without space after the `!`.
+            let lower = value.to_ascii_lowercase();
+            if let Some(head) = lower.strip_suffix("important") {
+                if let Some(i) = head.trim_end().strip_suffix('!').map(str::len) {
                     important = true;
                     value = value[..i].trim();
                 }
@@ -731,7 +763,7 @@ mod tests {
         assert_eq!(s.specificity, (1, 1, 2), "li + ::before, :nth-child, :not counts its #y");
         assert_eq!(parse_nth("-n+3"), Some((-1, 3)));
         assert!(nth_matches(2, 1, 5) && !nth_matches(2, 1, 4) && nth_matches(-1, 3, 2) && !nth_matches(-1, 3, 4) && nth_matches(0, 3, 3));
-        let env = Env { width: 800.0, dark: true };
+        let env = Env { width: 800.0, height: 600.0, dark: true };
         for (q, want) in [("screen and (min-width: 600px)", true), ("(max-width: 40em)", false), ("print", false), ("(prefers-color-scheme: dark)", true), ("not print", true), ("screen, print", true), ("(min-width: 900px)", false)] {
             assert_eq!(media_applies(q, &env), want, "{q}");
         }

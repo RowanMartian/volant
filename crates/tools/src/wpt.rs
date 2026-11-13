@@ -117,7 +117,7 @@ pub fn one(root: &str, path: &str) {
     };
     let (html, charset) = volant_core::encoding::decode_html(&reply.body, &reply.content_type);
     let host: std::rc::Rc<dyn script::Host> = host;
-    let mut rt = script::Runtime::new(&html, &url, volant_engine::Env { width: 800.0, dark: false }, host);
+    let mut rt = script::Runtime::new(&html, &url, volant_engine::Env { width: 800.0, height: 600.0, dark: false }, host);
     rt.state.borrow_mut().charset = charset;
     // Test files run thousands of tests in one script; the wall-clock limits apply instead.
     rt.budget = 2_000_000_000;

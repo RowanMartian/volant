@@ -1167,6 +1167,9 @@ fn kebab(camel: &str) -> String {
     if camel.starts_with("--") {
         return camel.to_string();
     }
+    if camel == "cssFloat" {
+        return "float".to_string();
+    }
     let mut out = String::new();
     for c in camel.chars() {
         if c.is_ascii_uppercase() {
@@ -1419,10 +1422,21 @@ fn inline_handler(i: &mut Interp, st: &S, node: NodeId, ty: &str) -> Option<Valu
             }
         }
     }
-    if node == WINDOW {
+    // Window's own events can be handled from attributes on <body> (`<body onload>`).
+    let window_event = matches!(ty, "load" | "unload" | "beforeunload" | "pageshow" | "pagehide" | "resize" | "hashchange" | "popstate" | "message" | "online" | "offline" | "storage");
+    if node == WINDOW && !window_event {
         return None;
     }
-    let code = st.borrow().dom.attr(node, &key).map(str::to_string)?;
+    let code = if node == WINDOW {
+        let s = st.borrow();
+        let body = s.dom.find("body")?;
+        s.dom.attr(body, &key).map(str::to_string)?
+    } else {
+        if window_event && st.borrow().dom.tag(node) == Some("body") {
+            return None;
+        }
+        st.borrow().dom.attr(node, &key).map(str::to_string)?
+    };
     if let Some(f) = st.borrow().handlers.get(&(node, code.clone())) {
         return Some(f.clone());
     }
@@ -5247,7 +5261,7 @@ pub fn render_snapshot(snap: &Snapshot, sheets: &[String], env: Env, fonts: &dyn
     let mut all = crate::style_sheets(&snap.dom);
     all.extend(sheets.iter().filter(|s| !s.is_empty()).cloned());
     let styled = style::compute(&snap.dom, &all, &env);
-    crate::layout::layout(&snap.dom, &styled, env.width, fonts, images)
+    crate::layout::layout(&snap.dom, &styled, env.width, env.height, fonts, images)
 }
 
 /// The `<link rel=stylesheet>` URLs of a document, absolute, in order, with their media.

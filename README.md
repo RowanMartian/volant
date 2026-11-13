@@ -194,14 +194,14 @@ cargo run --release -p volant-core --example compile_lists -- easylist.txt easyp
 HTML's DOM interfaces, at the commit in `scripts/wpt/WPT_COMMIT`) through the engine with no browser: each file
 in its own process, the tests served from the checkout, and testharness.js reporting back. It writes a table by
 folder and the most common failures; `--baseline scripts/wpt/baseline.tsv` fails when a file passes fewer subtests
-than before. In the latest run 85,630 of 96,171 subtests pass (89.0%), and 228 of
+than before. In the latest run 85,638 of 96,229 subtests pass (89.0%), and 229 of
 the 962 files pass completely (the first run passed 53.2%).
 
 `volant-tools reftest WPT_DIR scripts/wpt/reftests.txt OUT` runs the CSS reftests (CSS 2, backgrounds, box,
 colour, display, flexbox, position, sizing, text): each test page and its reference go through the whole engine,
 scripts included, then `raster.rs`, a software rasterizer, draws both 800 × 600 px and the pixels are compared,
 allowing what the test's `<meta name=fuzzy>` allows. Text is drawn as a mark per character (Ahem, the CSS tests'
-box font, exactly), so what's compared is layout. In the latest run 5,341 of the 10,894 reftests pass (49.0%; the first run passed 26.7%);
+box font, exactly), so what's compared is layout. In the latest run 6,550 of the 10,894 reftests pass (60.1%; the first run passed 26.7%);
 `scripts/wpt/reftest-baseline.tsv` holds which, and CI fails when one of them stops passing.
 
 `volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Simple Page and reports what

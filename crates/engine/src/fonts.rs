@@ -103,6 +103,8 @@ impl Fonts for ApproxFonts {
         let per_mille: u32 = text
             .chars()
             .map(|c| match font.family.generic() {
+                // Combining marks and zero-width characters take no room of their own.
+                _ if matches!(c as u32, 0x300..=0x36f | 0x1ab0..=0x1aff | 0x1dc0..=0x1dff | 0x20d0..=0x20ff | 0xfe20..=0xfe2f | 0x200b..=0x200d | 0xfeff) => 0,
                 Family::Mono => 600,
                 fam => {
                     let table = if fam == Family::Serif { &SERIF } else { &SANS };
@@ -110,7 +112,7 @@ impl Fonts for ApproxFonts {
                         32..=126 => table[(c as u32 - 32) as usize] as u32,
                         0x3000..=0x9fff | 0xac00..=0xd7af | 0xff00..=0xffef => 1000, // CJK, Hangul, full-width
                         0xa0 => table[0] as u32,                                     // no-break space
-                        0x2000..=0x200b => 250,                                      // spaces
+                        0x2000..=0x200a => 250,                                      // spaces
                         _ => 556,
                     }
                 }

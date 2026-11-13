@@ -511,7 +511,7 @@ dom/events/scrolling/scroll-events-fired-once-per-frame-across-display-none.html
 dom/events/scrolling/scrollIntoView-in-onscroll-to-sticky.html	0
 dom/events/scrolling/scrollend-event-fired-after-instant-scroll-in-microtask.html	0
 dom/events/scrolling/scrollend-event-fired-after-layout-clamping.html	0
-dom/events/scrolling/scrollend-event-fired-after-sequence-of-scrolls.tentative.html	0
+dom/events/scrolling/scrollend-event-fired-after-sequence-of-scrolls.tentative.html	2
 dom/events/scrolling/scrollend-event-fired-after-snap.html	0
 dom/events/scrolling/scrollend-event-fired-for-mandatory-snap-point-after-load.html	0
 dom/events/scrolling/scrollend-event-fired-for-programmatic-scroll.html	0
@@ -522,8 +522,8 @@ dom/events/scrolling/scrollend-event-fired-to-element-with-overscroll-behavior.h
 dom/events/scrolling/scrollend-event-fired-to-window.html	0
 dom/events/scrolling/scrollend-event-fires-for-repeat-key-ending-after-scroll-container-end-is-reached.html	0
 dom/events/scrolling/scrollend-event-fires-on-visual-viewport.html	0
-dom/events/scrolling/scrollend-event-fires-to-iframe-window.html	0
-dom/events/scrolling/scrollend-event-for-user-scroll.html	0
+dom/events/scrolling/scrollend-event-fires-to-iframe-window.html	3
+dom/events/scrolling/scrollend-event-for-user-scroll.html	3
 dom/events/scrolling/scrollend-event-handler-content-attributes.html	0
 dom/events/scrolling/scrollend-event-not-fired-after-removing-scroller.tentative.html	0
 dom/events/scrolling/scrollend-event-not-fired-on-no-scroll.html	0

@@ -67,8 +67,8 @@ impl Shape {
         if x < self.x || y < self.y || x > self.x + self.w || y > self.y + self.h {
             return false;
         }
-        let cx = x.clamp(self.x + r, self.x + self.w - r);
-        let cy = y.clamp(self.y + r, self.y + self.h - r);
+        let cx = x.max(self.x + r).min((self.x + self.w - r).max(self.x + r));
+        let cy = y.max(self.y + r).min((self.y + self.h - r).max(self.y + r));
         (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r
     }
 }
@@ -128,6 +128,39 @@ impl Canvas {
         let x1 = (r.ceil().max(0.0) as u32).min(self.width);
         let y1 = (b.ceil().max(0.0) as u32).min(self.height);
         (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+    }
+
+    /// Draws a background image's tiles over `area` in one pass (no seams between tiles):
+    /// each pixel takes the texel under its centre.
+    fn tiled(&mut self, area: Shape, bmp: &Bitmap, (ox, oy): (f32, f32), (tw, th): (f32, f32), (sx, sy): (f32, f32), clips: &[Shape]) {
+        if bmp.width == 0 || bmp.height == 0 || tw <= 0.0 || th <= 0.0 {
+            return;
+        }
+        let Some((x0, y0, x1, y1)) = self.span(area, clips) else { return };
+        // Where in a tile a point falls, if it's on one.
+        let within = |c: f32, o: f32, size: f32, step: f32| -> Option<f32> {
+            let d = c - o;
+            let d = if step > 0.0 { d - (d / step).floor() * step } else { d };
+            (d >= 0.0 && d < size).then_some(d)
+        };
+        for py in y0..y1 {
+            let Some(v) = within(py as f32 + 0.5, oy, th, sy) else { continue };
+            let v = ((v / th * bmp.height as f32) as u32).min(bmp.height - 1);
+            for px in x0..x1 {
+                let Some(u) = within(px as f32 + 0.5, ox, tw, sx) else { continue };
+                let mut c = area.coverage(px, py);
+                for k in clips {
+                    c *= k.coverage(px, py);
+                }
+                if c <= 0.0 {
+                    continue;
+                }
+                let u = ((u / tw * bmp.width as f32) as u32).min(bmp.width - 1);
+                let k = ((v * bmp.width + u) * 4) as usize;
+                let p = [bmp.rgba[k], bmp.rgba[k + 1], bmp.rgba[k + 2], bmp.rgba[k + 3]];
+                self.blend(px, py, p, c);
+            }
+        }
     }
 
     /// Draws a picture scaled to fill the box (nearest pixel), clipped.
@@ -239,6 +272,11 @@ pub fn draw(page: &Page, width: u32, height: u32, fonts: &dyn Fonts, images: &Ha
                     cv.fill(Shape { x: *x, y: y + dy - font.size * 0.3, w, h: th, r: 0.0 }, rgba(*color), &clips);
                 }
             }
+            Item::Tiled { x, y, w, h, radius, src, ox, oy, tw, th, sx, sy } => {
+                if let Some(b) = images.get(src) {
+                    cv.tiled(Shape { x: *x, y: y + dy, w: *w, h: *h, r: *radius }, b, (*ox, oy + dy), (*tw, *th), (*sx, *sy), &clips);
+                }
+            }
             Item::Clip { x, y, w, h, radius } => clips.push(Shape { x: *x, y: y + dy, w: *w, h: *h, r: *radius }),
             Item::Unclip => {
                 clips.pop();
@@ -246,6 +284,24 @@ pub fn draw(page: &Page, width: u32, height: u32, fonts: &dyn Fonts, images: &Ha
         }
     }
     cv
+}
+
+/// Where the tiles of a background image go within the spans `xs` and `ys`: from `(ox, oy)`,
+/// `size` each, every `step` (0: only the one on that axis).
+pub fn tiles(xs: (f32, f32), ys: (f32, f32), (ox, oy): (f32, f32), (tw, th): (f32, f32), (sx, sy): (f32, f32)) -> Vec<(f32, f32)> {
+    let span = |(a, b): (f32, f32), o: f32, size: f32, step: f32| -> Vec<f32> {
+        if step <= 0.0 {
+            return if o < b && o + size > a { vec![o] } else { Vec::new() };
+        }
+        let first = ((a - o) / step).floor() as i64;
+        let last = ((b - o) / step).ceil() as i64;
+        (first..last.min(first + 100_000)).map(|k| o + k as f32 * step).filter(|p| *p < b && p + size > a).collect()
+    };
+    let (cols, rows) = (span(xs, ox, tw, sx), span(ys, oy, th, sy));
+    if cols.len() * rows.len() > 2_000_000 {
+        return Vec::new();
+    }
+    rows.iter().flat_map(|y| cols.iter().map(move |x| (*x, *y))).collect()
 }
 
 /// How two canvases differ: (pixels that differ, the largest channel difference).

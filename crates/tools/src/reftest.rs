@@ -94,11 +94,26 @@ fn fuzzy(html: &str, url: &str, reference: &str) -> Option<((u32, u32), (u64, u6
     None
 }
 
-struct Images(HashMap<String, Bitmap>);
+/// The decoded pictures, and the ones layout asked for that weren't there.
+struct Images(HashMap<String, Bitmap>, std::cell::RefCell<Vec<String>>);
 
 impl volant_engine::Images for Images {
     fn size(&self, src: &str) -> Option<(f32, f32)> {
-        self.0.get(src).map(|b| (b.width as f32, b.height as f32))
+        let b = self.0.get(src);
+        if b.is_none() {
+            self.1.borrow_mut().push(src.to_string());
+        }
+        b.map(|b| (b.width as f32, b.height as f32))
+    }
+}
+
+/// Fetches and decodes a picture (PNG only) for `src` as the page wrote it.
+fn load_picture(host: &dyn script::Host, page: &str, src: &str, into: &mut HashMap<String, Bitmap>) {
+    let abs = volant_core::url::resolve(page, src).unwrap_or_default();
+    if let Some(r) = host.get_for(&abs, page).filter(|r| r.success()) {
+        if let Ok((w, h, rgba)) = volant_core::png::decode(&r.body) {
+            into.insert(src.to_string(), Bitmap { width: w, height: h, rgba });
+        }
     }
 }
 
@@ -112,7 +127,7 @@ fn render(host: &WptHost, url: &str) -> Result<(Canvas, String), String> {
     let reply = host.request(&req).filter(|r| r.status == 200).ok_or_else(|| format!("{url} not found"))?;
     let (html, charset) = volant_core::encoding::decode_html(&reply.body, &reply.content_type);
     let host: std::rc::Rc<dyn script::Host> = std::rc::Rc::new(WptHost { root: host.root.clone() });
-    let env = volant_engine::Env { width: W as f32, dark: false };
+    let env = volant_engine::Env { width: W as f32, height: H as f32, dark: false };
     let mut rt = script::Runtime::new_typed(&html, url, &reply.content_type, env, host.clone());
     rt.state.borrow_mut().charset = charset;
     rt.budget = 500_000_000;
@@ -132,7 +147,7 @@ fn render(host: &WptHost, url: &str) -> Result<(Canvas, String), String> {
     let mut sheets = Vec::new();
     for (href, _media) in script::stylesheet_links(&snap.dom, &snap.url) {
         if let Some(r) = host.get_for(&href, &snap.url).filter(|r| r.success()) {
-            sheets.push(volant_core::encoding::decode_html(&r.body, &r.content_type).0);
+            sheets.push(volant_engine::css::absolute_urls(&volant_core::encoding::decode_html(&r.body, &r.content_type).0, &href));
         }
     }
     // The page's pictures, by the src they're asked for with.
@@ -145,15 +160,28 @@ fn render(host: &WptHost, url: &str) -> Result<(Canvas, String), String> {
         if images.contains_key(src) {
             continue;
         }
-        let abs = volant_core::url::resolve(&snap.url, src).unwrap_or_default();
-        if let Some(r) = host.get_for(&abs, &snap.url).filter(|r| r.success()) {
-            if let Ok((w, h, rgba)) = volant_core::png::decode(&r.body) {
-                images.insert(src.to_string(), Bitmap { width: w, height: h, rgba });
-            }
+        load_picture(&*host, &snap.url, src, &mut images);
+    }
+    let mut images = Images(images, Default::default());
+    let mut page = script::render_snapshot(&snap, &sheets, env, &volant_engine::ApproxFonts, &images);
+    // Background images: layout asks for them; fetch those and lay out again.
+    let wanted = std::mem::take(&mut *images.1.borrow_mut());
+    let before = images.0.len();
+    for src in wanted {
+        if !images.0.contains_key(&src) {
+            load_picture(&*host, &snap.url, &src, &mut images.0);
         }
     }
-    let images = Images(images);
-    let page = script::render_snapshot(&snap, &sheets, env, &volant_engine::ApproxFonts, &images);
+    if images.0.len() > before {
+        page = script::render_snapshot(&snap, &sheets, env, &volant_engine::ApproxFonts, &images);
+    }
+    // VOLANT_DUMP=1 prints the display list, for debugging a failure.
+    if std::env::var_os("VOLANT_DUMP").is_some() {
+        eprintln!("== {url}");
+        for it in &page.items {
+            eprintln!("{it:?}");
+        }
+    }
     Ok((raster::draw(&page, W, H, &volant_engine::ApproxFonts, &images.0), html))
 }
 

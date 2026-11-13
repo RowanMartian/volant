@@ -33,6 +33,16 @@ pub fn to_svg(page: &Page) -> String {
                 ));
             }
             Item::Unclip => out.push_str("</g>"),
+            Item::Tiled { x, y, w, h, radius, src, ox, oy, tw, th, sx, sy } => {
+                clips += 1;
+                out.push_str(&format!(
+                    r#"<clipPath id="c{clips}"><rect x="{x:.2}" y="{y:.2}" width="{w:.2}" height="{h:.2}" rx="{radius:.2}"/></clipPath><g clip-path="url(#c{clips})">"#
+                ));
+                for (tx, ty) in crate::raster::tiles((*x, x + w), (*y, y + h.min(8192.0)), (*ox, *oy), (*tw, *th), (*sx, *sy)).into_iter().take(4096) {
+                    out.push_str(&format!(r#"<image href="{}" x="{tx:.2}" y="{ty:.2}" width="{tw:.2}" height="{th:.2}" preserveAspectRatio="none"/>"#, esc(src)));
+                }
+                out.push_str("</g>");
+            }
             Item::Rect { x, y, w, h, color, radius } => {
                 out.push_str(&format!(r#"<rect x="{x:.2}" y="{y:.2}" width="{w:.2}" height="{h:.2}" rx="{radius:.2}" fill="{}"/>"#, css(*color)))
             }

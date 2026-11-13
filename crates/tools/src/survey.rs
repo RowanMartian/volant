@@ -133,7 +133,7 @@ pub fn one(url: &str) {
         return;
     }
     let (html, charset) = volant_core::encoding::decode_html(&reply.body, &reply.content_type);
-    let env = volant_engine::Env { width: 1100.0, dark: false };
+    let env = volant_engine::Env { width: 1100.0, height: 800.0, dark: false };
     let t = Instant::now();
     let mut rt = script::Runtime::new(&html, &page, env, host.clone());
     rt.state.borrow_mut().charset = charset;

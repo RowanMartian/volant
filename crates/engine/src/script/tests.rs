@@ -44,7 +44,7 @@ impl Host for FakeHost {
 }
 
 fn page(html: &str) -> Runtime {
-    let mut rt = Runtime::new(html, "https://example.com/dir/page.html?q=1", Env { width: 800.0, dark: false }, Rc::new(FakeHost));
+    let mut rt = Runtime::new(html, "https://example.com/dir/page.html?q=1", Env { width: 800.0, height: 600.0, dark: false }, Rc::new(FakeHost));
     rt.run_scripts();
     rt
 }
@@ -109,7 +109,7 @@ fn scripts_build_and_change_the_dom() {
     assert_eq!(snap.dom.attr(made, "data-kind"), Some("note"));
     assert_eq!(snap.dom.attr(made, "style"), Some("color: red"));
     // The snapshot is in document order and lays out.
-    let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
+    let page = render_snapshot(&snap, &[], Env { width: 800.0, height: 600.0, dark: false }, &ApproxFonts, &NoImages);
     let svg = crate::svg::to_svg(&page);
     assert!(svg.contains(">Hello</text>") && svg.contains(">one</text>") && !svg.contains(">two</text>"), "{svg}");
 }
@@ -204,7 +204,7 @@ fn forms_typing_and_submit() {
     assert_eq!(rt.take_navigation().map(|n| n.url).as_deref(), Some("https://example.com/search?q=volant+r&safe=on&lang=fr"));
     // The snapshot shows the typed value inside the field.
     let snap = rt.snapshot();
-    let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
+    let page = render_snapshot(&snap, &[], Env { width: 800.0, height: 600.0, dark: false }, &ApproxFonts, &NoImages);
     let svg = crate::svg::to_svg(&page);
     assert!(svg.contains(">volant r</text>") && svg.contains("French") && svg.contains(">✓</text>"), "{svg}");
     // Hit testing finds the field, mapped back to the runtime's node.
@@ -376,7 +376,7 @@ fn hover_focus_target_and_caret_in_snapshots() {
     rt.click(f);
     rt.key("ArrowLeft");
     let snap = rt.snapshot();
-    let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
+    let page = render_snapshot(&snap, &[], Env { width: 800.0, height: 600.0, dark: false }, &ApproxFonts, &NoImages);
     let svg = crate::svg::to_svg(&page);
     assert!(svg.contains(">ab</text>") && svg.contains(">c</text>"), "the caret splits the value: {svg}");
     // A same-page link scrolls to its target, which is :target.
@@ -384,7 +384,7 @@ fn hover_focus_target_and_caret_in_snapshots() {
     assert!(rt.take_navigation().is_none(), "#links stay on the page");
     let snap = rt.snapshot();
     assert!(snap.url.ends_with("#sec"));
-    let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
+    let page = render_snapshot(&snap, &[], Env { width: 800.0, height: 600.0, dark: false }, &ApproxFonts, &NoImages);
     let y = anchor_y(&snap, &page, "sec").expect("the section is on the page");
     assert!(y > 40.0, "{y}");
 }
@@ -419,7 +419,7 @@ fn canvas_drawing_is_recorded() {
     }
     assert!(matches!(&canvas.ops[2], Op::Text { text, size, bold: true, serif: true, align: Align::Center, .. } if text == "Hi" && *size == 16.0));
     // Laid out like a picture of that size.
-    let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
+    let page = render_snapshot(&snap, &[], Env { width: 800.0, height: 600.0, dark: false }, &ApproxFonts, &NoImages);
     let boxes: Vec<(f32, f32, String)> = page.items.iter().filter_map(|i| match i {
         crate::Item::Image { w, h, src, .. } => Some((*w, *h, src.clone())),
         _ => None,
@@ -433,7 +433,7 @@ fn canvas_drawing_is_recorded() {
 #[test]
 fn assess_finds_pages_simple_page_cannot_show() {
     let check = |html: &str, errors: usize| {
-        let mut rt = Runtime::new(html, "https://example.com/", Env { width: 800.0, dark: false }, Rc::new(FakeHost));
+        let mut rt = Runtime::new(html, "https://example.com/", Env { width: 800.0, height: 600.0, dark: false }, Rc::new(FakeHost));
         assess(&rt.snapshot(), errors)
     };
     let article = format!("<p>{}</p>", "Jet engines push air backwards. ".repeat(30));

@@ -770,6 +770,26 @@ fn paint_items(page: &Page, range: std::ops::Range<usize>, skip: &[(usize, usize
                 }
                 NSGraphicsContext::restoreGraphicsState_class();
             }
+            Item::Tiled { x, y, w, h, radius, src, ox, oy, tw, th, sx, sy } => {
+                // A background image, repeated across its area.
+                if !intersects(dirty, *x as f64, *y as f64, *w as f64, *h as f64) {
+                    continue;
+                }
+                let Some(img) = images.get(src) else { continue };
+                NSGraphicsContext::saveGraphicsState_class();
+                rounded(rect(*x as f64, *y as f64, *w as f64, *h as f64), *radius as f64).addClip();
+                // Only the tiles that show in the part being redrawn.
+                let (dx, dy) = (dirty.origin.x as f32, dirty.origin.y as f32);
+                let (dw, dh) = (dirty.size.width as f32, dirty.size.height as f32);
+                let xs = (x.max(dx), (x + w).min(dx + dw));
+                let ys = (y.max(dy), (y + h).min(dy + dh));
+                for (tx, ty) in volant_engine::raster::tiles(xs, ys, (*ox, *oy), (*tw, *th), (*sx, *sy)).into_iter().take(20_000) {
+                    unsafe {
+                        img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(rect(tx as f64, ty as f64, *tw as f64, *th as f64), NSRect::ZERO, NSCompositingOperation::SourceOver, 1.0, true, None);
+                    }
+                }
+                NSGraphicsContext::restoreGraphicsState_class();
+            }
             Item::Text { x, y, text, font, color, underline, strike, .. } => {
                 let size = font.size as f64;
                 if !intersects(dirty, *x as f64, *y as f64 - size * 1.3, dirty.size.width + 1e6, size * 1.8) {
@@ -968,7 +988,7 @@ pub fn sync(b: &Browser) {
     if e.laid != Some(want) {
         let started = std::time::Instant::now();
         let images = MacImages { known: &e.images, wanted: RefCell::new(Vec::new()) };
-        let env = volant_engine::Env { width: width as f32, dark };
+        let env = volant_engine::Env { width: width as f32, height: (cb.size.height - top).max(1.0) as f32, dark };
         let (page, base) = if let Some(p) = &e.page {
             *view.ivars().map.borrow_mut() = p.snap.map.clone();
             *view.ivars().canvases.borrow_mut() = p.snap.canvases.clone();
@@ -1346,7 +1366,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
     }
     let (html, charset) = volant_core::encoding::decode_html(&body, &reply.content_type);
     let host: Rc<dyn script::Host> = Rc::new(NetHost);
-    let env = volant_engine::Env { width, dark };
+    let env = volant_engine::Env { width, height: 768.0, dark };
     let mut rt = script::Runtime::new_typed(&html, &url, &reply.content_type, env, host.clone());
     rt.state.borrow_mut().charset = charset;
     eprintln!("engine: loaded {url} ({status}, {} KB) in {:.0} ms", body.len() / 1024, started.elapsed().as_secs_f64() * 1000.0);
@@ -1373,7 +1393,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
                 Some((_, t)) => t.clone(),
                 None => {
                     let t = match rt.host().get_for(&href, &snap.url) {
-                        Some(r) if r.success() => String::from_utf8_lossy(&r.body).into_owned(),
+                        Some(r) if r.success() => volant_engine::css::absolute_urls(&String::from_utf8_lossy(&r.body), &href),
                         _ => String::new(),
                     };
                     sheets.push((href.clone(), t.clone()));
@@ -1480,7 +1500,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
                 let changed = {
                     let mut st = rt.state.borrow_mut();
                     let was = (st.env.width, st.env.dark);
-                    st.env = volant_engine::Env { width: w, dark: d };
+                    st.env = volant_engine::Env { width: w, height: st.env.height, dark: d };
                     was != (w, d)
                 };
                 if changed {
