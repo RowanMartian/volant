@@ -33,6 +33,17 @@ pub enum Len {
     Auto,
 }
 
+/// A sizing keyword: min-content, max-content, fit-content or stretch.
+fn sizing_kw(v: &str) -> Option<Sizing> {
+    match v.trim_start_matches("-moz-").trim_start_matches("-webkit-") {
+        "min-content" => Some(Sizing::Min),
+        "max-content" => Some(Sizing::Max),
+        "fit-content" => Some(Sizing::Fit),
+        "stretch" | "fill-available" | "available" => Some(Sizing::Stretch),
+        _ => None,
+    }
+}
+
 /// A gap's (px, percent) parts.
 fn gap_parts(l: Len) -> (f32, f32) {
     match l {
@@ -277,6 +288,19 @@ pub struct Style {
     pub size_kw: f32,
     /// `font-family` is exactly the generic `monospace`.
     pub mono_generic: bool,
+    /// overflow-wrap: break-word or anywhere, or word-break: break-all: a word too long for
+    /// its line may break anywhere. (By default it overflows.)
+    pub break_words: bool,
+    /// word-break: break-all: a line may break between any two letters.
+    pub break_all: bool,
+    /// overflow-wrap: anywhere: as break_words, and its min-content is a letter wide too.
+    pub wrap_anywhere: bool,
+    /// word-break: keep-all: no breaks between ideographs (only at spaces and punctuation).
+    pub keep_all: bool,
+    /// white-space: break-spaces: preserved spaces wrap instead of hanging.
+    pub break_spaces: bool,
+    /// line-break: 0 auto or normal, 1 strict, 2 loose, 3 anywhere.
+    pub line_break: u8,
     pub weight: u16,
     pub italic: bool,
     pub family: Family,
@@ -367,6 +391,9 @@ pub struct Style {
     /// The `translate` property (applied with the transform's).
     pub translate_own: Option<(Len, Len)>,
     pub min_width: Len,
+    /// min-width and max-width as min-content, max-content, fit-content (the Len is then auto).
+    pub min_kw: Option<Sizing>,
+    pub max_kw: Option<Sizing>,
     pub min_height: Len,
     /// Custom properties (`--name`), inherited.
     pub vars: Rc<HashMap<String, String>>,
@@ -413,6 +440,12 @@ impl Default for Style {
             font_size: 16.0,
             size_kw: 1.0,
             mono_generic: false,
+            break_words: false,
+            break_all: false,
+            wrap_anywhere: false,
+            keep_all: false,
+            break_spaces: false,
+            line_break: 0,
             weight: 400,
             italic: false,
             family: Family::Sans,
@@ -468,6 +501,8 @@ impl Default for Style {
             translate: None,
             translate_own: None,
             min_width: Len::Auto,
+            min_kw: None,
+            max_kw: None,
             min_height: Len::Auto,
             vars: Rc::new(HashMap::new()),
             column: false,
@@ -1782,7 +1817,27 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
                 _ => Align::Left,
             }
         }
+        "overflow-wrap" | "word-wrap" => {
+            s.break_words = matches!(lower.as_str(), "break-word" | "anywhere");
+            s.wrap_anywhere = lower == "anywhere";
+        }
+        "line-break" => {
+            s.line_break = match lower.as_str() {
+                "strict" => 1,
+                "loose" => 2,
+                "anywhere" => 3,
+                _ => 0,
+            }
+        }
+        "word-break" => {
+            s.break_all = lower == "break-all";
+            s.keep_all = lower == "keep-all";
+            if lower == "break-word" {
+                s.break_words = true;
+            }
+        }
         "white-space" => {
+            s.break_spaces = lower == "break-spaces";
             s.space = match lower.as_str() {
                 "pre" => Space::Pre,
                 "pre-wrap" | "pre-line" | "break-spaces" => Space::PreWrap,
@@ -1933,8 +1988,10 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
             }
         }
         "min-width" => {
-            if let Some(l) = len(v) {
-                s.min_width = l
+            if let Some(kw) = sizing_kw(&lower) {
+                (s.min_width, s.min_kw) = (Len::Auto, Some(kw));
+            } else if let Some(l) = len(v) {
+                (s.min_width, s.min_kw) = (l, None);
             }
         }
         "min-height" => {
@@ -2140,18 +2197,7 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
             }
         }
         "width" => {
-            let kw = lower.trim_start_matches("-moz-").trim_start_matches("-webkit-");
-            let kw = if kw == "min-content" {
-                Some(Sizing::Min)
-            } else if kw == "max-content" {
-                Some(Sizing::Max)
-            } else if kw == "fit-content" {
-                Some(Sizing::Fit)
-            } else if matches!(kw, "stretch" | "fill-available" | "available") {
-                Some(Sizing::Stretch)
-            } else {
-                None
-            };
+            let kw = sizing_kw(&lower);
             if kw.is_some() {
                 s.width = Len::Auto;
                 s.width_kw = kw;
@@ -2180,7 +2226,13 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         }
         // (Negative sizes are invalid: the declaration is ignored.)
         "max-width" => {
-            s.max_width = if lower == "none" { Len::Auto } else { len(v).filter(|l| !negative(*l)).unwrap_or(s.max_width) };
+            if let Some(kw) = sizing_kw(&lower) {
+                (s.max_width, s.max_kw) = (Len::Auto, Some(kw));
+            } else if lower == "none" {
+                (s.max_width, s.max_kw) = (Len::Auto, None);
+            } else if let Some(l) = len(v).filter(|l| !negative(*l)) {
+                (s.max_width, s.max_kw) = (l, None);
+            }
         }
         "max-height" => {
             s.max_height = if lower == "none" { Len::Auto } else { len(v).filter(|l| !negative(*l)).unwrap_or(s.max_height) };
@@ -2290,6 +2342,12 @@ pub(crate) fn inherited(p: &Style) -> Style {
         font_size: p.font_size,
         size_kw: p.size_kw,
         mono_generic: p.mono_generic,
+        break_words: p.break_words,
+        break_all: p.break_all,
+        wrap_anywhere: p.wrap_anywhere,
+        keep_all: p.keep_all,
+        break_spaces: p.break_spaces,
+        line_break: p.line_break,
         weight: p.weight,
         italic: p.italic,
         family: p.family,
@@ -2848,9 +2906,11 @@ fn cascade(s: &mut Style, found: &mut [((bool, u8, (u16, u16, u16), usize), &Dec
             apply(s, &d, parent, rem);
         }
     }
-    // A border with no style (or `hidden`) has no width.
+    // A border with no style (or `hidden`) has no width; one that has is whole pixels (at least one).
     for i in 0..4 {
-        s.border_width[i] = if s.border_style[i].visible() { s.border_spec[i] } else { 0.0 };
+        let w = s.border_spec[i];
+        let snapped = if w <= 0.0 { 0.0 } else if w < 1.0 { 1.0 } else { w.floor() };
+        s.border_width[i] = if s.border_style[i].visible() { snapped } else { 0.0 };
         if s.border_current[i] {
             s.border_color[i] = s.color;
         }

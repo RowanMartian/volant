@@ -255,10 +255,10 @@ pub fn draw(page: &Page, width: u32, height: u32, fonts: &dyn Fonts, images: &Ha
     let mut clips: Vec<Shape> = Vec::new();
     for (i, dy) in order {
         match &page.items[i] {
-            Item::Rect { x, y, w, h, color, radius } => cv.fill(Shape { x: *x, y: y + dy, w: *w, h: *h, r: *radius }, rgba(*color), &clips),
+            Item::Rect { x, y, w, h, color, radius } => cv.fill(snapped(*x, y + dy, *w, *h, *radius), rgba(*color), &clips),
             Item::Image { x, y, w, h, src, radius } => {
                 if let Some(b) = images.get(src) {
-                    cv.image(Shape { x: *x, y: y + dy, w: *w, h: *h, r: *radius }, b, &clips);
+                    cv.image(snapped(*x, y + dy, *w, *h, *radius), b, &clips);
                 }
             }
             Item::Text { x, y, text: t, font, color, underline, strike, .. } => {
@@ -284,6 +284,16 @@ pub fn draw(page: &Page, width: u32, height: u32, fonts: &dyn Fonts, images: &Ha
         }
     }
     cv
+}
+
+/// A box's area on the pixel grid: square boxes and pictures snap to whole pixels, as
+/// browsers paint them, so neighbours meet with no seam. (Rounded ones keep their edges.)
+fn snapped(x: f32, y: f32, w: f32, h: f32, r: f32) -> Shape {
+    if r > 0.0 {
+        return Shape { x, y, w, h, r };
+    }
+    let (x0, y0, x1, y1) = (x.round(), y.round(), (x + w).round(), (y + h).round());
+    Shape { x: x0, y: y0, w: x1 - x0, h: y1 - y0, r: 0.0 }
 }
 
 /// Where the tiles of a background image go within the spans `xs` and `ys`: from `(ox, oy)`,

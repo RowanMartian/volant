@@ -949,6 +949,9 @@ struct Atom<'r> {
     drop: f32,
     /// An inline-block's top margin (its height includes both vertical margins).
     mt: f32,
+    /// A line may break before this atom (after a space, around an inline block or image,
+    /// between ideographs, after a hyphen): pieces with no opportunity between them stay together.
+    brk: bool,
 }
 
 impl Atom<'_> {
@@ -1274,6 +1277,22 @@ impl<'r> Ctx<'_> {
             .fold(f32::MIN, f32::max)
     }
 
+    /// The border-box width a new formatting context needs beside floats (at its narrowest
+    /// when its width is auto), and its left and right margins.
+    fn fit_width(&mut self, b: &BlockBox, width: f32) -> (f32, f32, f32) {
+        let s = &self.styles[b.node as usize];
+        let (ml, mr) = (s.margin[3].resolve(width), s.margin[1].resolve(width));
+        let frame = s.padding[1].resolve(width) + s.padding[3].resolve(width) + s.border_width[1] + s.border_width[3];
+        let border_w = match (s.width, &b.kind) {
+            (Len::Auto, _) | (_, BoxKind::Table(_)) => self.intrinsic(b).0,
+            (w, _) => {
+                let w = w.resolve(width);
+                if s.border_box { w.max(frame) } else { w + frame }
+            }
+        };
+        (border_w, ml, mr)
+    }
+
     /// Places a float at `top` (or lower, if it doesn't fit beside the floats already there).
     fn place_float(&mut self, b: &BlockBox, mut top: f32, x: f32, width: f32) {
         let s = self.styles[b.node as usize].clone();
@@ -1315,6 +1334,55 @@ impl<'r> Ctx<'_> {
 
     /// (min-content, max-content) border-box widths.
     fn intrinsic(&mut self, b: &BlockBox) -> (f32, f32) {
+        let (min, max) = self.intrinsic_content(b);
+        // Within its min and max widths (fixed ones or keywords; the min wins).
+        let frame_px = {
+            let (bw, own) = self.borders(b);
+            let s = &self.styles[b.node as usize];
+            let pad = own || !matches!(b.kind, BoxKind::Table(_));
+            (if pad { px_only(s.padding[1]) + px_only(s.padding[3]) } else { 0.0 }) + bw[1] + bw[3]
+        };
+        let s = &self.styles[b.node as usize];
+        let border = |m: f32| if s.border_box { m.max(frame_px) } else { m + frame_px };
+        let kw = |k: Sizing| match k {
+            Sizing::Min => min,
+            _ => max,
+        };
+        let hi = match (s.max_width, s.max_kw) {
+            (_, Some(k)) => Some(kw(k)),
+            (Len::Px(m), _) => Some(border(m)),
+            _ => None,
+        };
+        let lo = match (s.min_width, s.min_kw) {
+            (_, Some(k)) => Some(kw(k)),
+            (Len::Px(m), _) => Some(border(m)),
+            _ => None,
+        };
+        let clamp = |mut v: f32| {
+            if let Some(h) = hi {
+                v = v.min(h);
+            }
+            if let Some(l) = lo {
+                v = v.max(l);
+            }
+            v
+        };
+        (clamp(min), clamp(max))
+    }
+
+    /// The border-box width a min-width or max-width keyword stands for, in `avail`.
+    fn kw_width(&mut self, b: &BlockBox, k: Sizing, avail: f32) -> f32 {
+        let (min, max) = self.intrinsic_content(b);
+        match k {
+            Sizing::Min => min,
+            Sizing::Max => max,
+            Sizing::Fit => max.min(avail).max(min),
+            Sizing::Stretch => avail,
+        }
+    }
+
+    /// (min-content, max-content) border-box widths of the content, before min and max widths.
+    fn intrinsic_content(&mut self, b: &BlockBox) -> (f32, f32) {
         let s = self.styles[b.node as usize].clone();
         let (bw, own) = self.borders(b);
         let pad = own || !matches!(b.kind, BoxKind::Table(_));
@@ -1385,9 +1453,19 @@ impl<'r> Ctx<'_> {
                                         joined = 0.0;
                                         mn = mn.max(word);
                                     }
-                                    Kind::Word => {
-                                        word = a.w;
+                                    Kind::Word if self.styles[a.style as usize].wrap_anywhere => {
+                                        // (overflow-wrap: anywhere: it could break after any letter.)
+                                        let font = font_of(&self.styles[a.style as usize].clone());
+                                        let widest = a.text.chars().map(|c| self.measure(c.encode_utf8(&mut [0; 4]), &font)).fold(0.0, f32::max);
+                                        word = widest;
                                         joined = 0.0;
+                                        mn = mn.max(word);
+                                    }
+                                    Kind::Word => {
+                                        // (Pieces with no break opportunity between them are one.)
+                                        word = if a.brk { a.w } else { word + a.w };
+                                        joined = 0.0;
+                                        mn = mn.max(word);
                                     }
                                     Kind::Space if keep => joined += a.w,
                                     Kind::Open | Kind::Close => {}
@@ -1406,7 +1484,7 @@ impl<'r> Ctx<'_> {
                                     }
                                     Kind::Space if !matches!(self.styles[a.style as usize].space, Space::Pre | Space::PreWrap) => spaces += a.w,
                                     _ => {
-                                        if a.kind != Kind::Space {
+                                        if a.kind != Kind::Space && !(a.kind == Kind::Word && self.styles[a.style as usize].wrap_anywhere) {
                                             mn = mn.max(a.w);
                                         }
                                         line += spaces + a.w;
@@ -1846,8 +1924,14 @@ impl<'r> Ctx<'_> {
             if s.max_width != Len::Auto && replaced.is_none() {
                 content_w = content_w.min(inner(s.max_width));
             }
+            if let (Some(k), None) = (s.max_kw, replaced) {
+                content_w = content_w.min(self.kw_width(b, k, cb_w - ml - mr) - frame);
+            }
             if s.min_width != Len::Auto {
                 content_w = content_w.max(inner(s.min_width));
+            }
+            if let Some(k) = s.min_kw {
+                content_w = content_w.max(self.kw_width(b, k, cb_w - ml - mr) - frame);
             }
         }
         // A table is never narrower than its columns need.
@@ -1922,7 +2006,8 @@ impl<'r> Ctx<'_> {
         if self.avail_h.is_none() && s.height == Len::Auto && opts.min_h > 0.0 && replaced.is_none() {
             self.avail_h = Some((opts.min_h - vframe).max(0.0));
         }
-        let saved = opts.bfc.then(|| std::mem::take(&mut self.floats));
+        // (Any box that starts a formatting context keeps its floats in.)
+        let saved = (opts.bfc || self.own_context(b)).then(|| std::mem::take(&mut self.floats));
         let mut cursor = content_y;
         match &b.kind {
             BoxKind::Image(img) => {
@@ -1980,7 +2065,36 @@ impl<'r> Ctx<'_> {
                             if clear != Clear::None {
                                 at = at.max(self.clear_to(clear));
                             }
-                            let h = self.block(cb, content_x, at, content_w, Opts { collapse: true, ..Default::default() });
+                            // A new formatting context goes beside the floats, or below them when it doesn't fit.
+                            let (mut bx, mut bwid) = (content_x, content_w);
+                            if !self.floats.is_empty() && self.own_context(cb) {
+                                // (Only its border box has to clear the floats: its margins, from the
+                                // containing block's edges, may run under them. A fixed width's right
+                                // margin gives way, as when the widths don't add up.)
+                                let (need, ml, mut mr) = self.fit_width(cb, content_w);
+                                if !matches!(self.styles[cb.node as usize].width, Len::Auto) {
+                                    mr = mr.min(0.0);
+                                }
+                                // (Where no float narrows a side, the margin alone sets it: a negative one widens the box.)
+                                let (cl, cr) = (content_x + ml, content_x + content_w - mr);
+                                let bounds = |(l, r): (f32, f32)| (if l > content_x { l.max(cl) } else { cl }, if r < content_x + content_w { r.min(cr) } else { cr });
+                                let (mut l, mut r) = bounds(self.span(at, 1.0, content_x, content_w));
+                                for _ in 0..64 {
+                                    if r - l + FIT >= need {
+                                        break;
+                                    }
+                                    match self.next_float_bottom(at, 1.0) {
+                                        Some(bottom) => {
+                                            at = bottom;
+                                            (l, r) = bounds(self.span(at, 1.0, content_x, content_w));
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                // The box's containing block, narrowed so its border box lands there.
+                                (bx, bwid) = (l - ml, (r - l).max(need) + ml + mr);
+                            }
+                            let h = self.block(cb, bx, at, bwid, Opts { collapse: true, ..Default::default() });
                             cursor = at + h;
                             prev = self.edge_margin(cb, content_w, true);
                             tail_cleared = self.cleared_empty(cb);
@@ -2591,7 +2705,11 @@ impl<'r> Ctx<'_> {
             if st.max_width != Len::Auto {
                 base = base.min(outer(st.max_width));
             }
+            if let Some(k) = st.max_kw {
+                base = base.min(self.kw_width(b, k, width));
+            }
             let min = match st.min_width {
+                _ if st.min_kw.is_some() => self.kw_width(b, st.min_kw.expect("checked"), width),
                 Len::Auto => {
                     if specified.is_some() {
                         imin.min(base)
@@ -3087,11 +3205,24 @@ impl<'r> Ctx<'_> {
             float: None,
             drop: 0.0,
             mt: 0.0,
+            brk: false,
+        };
+        // Whether what's been placed so far ends at a break opportunity.
+        let mut open = false;
+        let push = |atoms: &mut Vec<Atom<'r>>, mut a: Atom<'r>, open: &mut bool| {
+            let atomic = matches!(a.kind, Kind::Image | Kind::Block);
+            a.brk = *open || atomic || a.kind == Kind::Break;
+            match a.kind {
+                Kind::Space | Kind::Break | Kind::Image | Kind::Block => *open = true,
+                Kind::Word | Kind::Open => *open = false,
+                _ => {}
+            }
+            atoms.push(a);
         };
         for item in run {
             match item {
                 Inline::Break { style } => {
-                    atoms.push(atom(Kind::Break, String::new(), 0.0, *style, None, &inside));
+                    push(&mut atoms, atom(Kind::Break, String::new(), 0.0, *style, None, &inside), &mut open);
                     last_space = true;
                 }
                 Inline::Open(node) => {
@@ -3099,7 +3230,7 @@ impl<'r> Ctx<'_> {
                     inside = Rc::from(stack.clone());
                     let s = &self.styles[*node as usize];
                     let w = s.margin[3].resolve(cb_w) + s.border_width[3] + s.padding[3].resolve(cb_w);
-                    atoms.push(atom(Kind::Open, String::new(), w, *node, None, &inside));
+                    push(&mut atoms, atom(Kind::Open, String::new(), w, *node, None, &inside), &mut open);
                 }
                 Inline::Resume(node) => {
                     stack.push(*node);
@@ -3108,7 +3239,7 @@ impl<'r> Ctx<'_> {
                 Inline::Close(node) => {
                     let s = &self.styles[*node as usize];
                     let w = s.margin[1].resolve(cb_w) + s.border_width[1] + s.padding[1].resolve(cb_w);
-                    atoms.push(atom(Kind::Close, String::new(), w, *node, None, &inside));
+                    push(&mut atoms, atom(Kind::Close, String::new(), w, *node, None, &inside), &mut open);
                     stack.pop();
                     inside = Rc::from(stack.clone());
                 }
@@ -3121,7 +3252,7 @@ impl<'r> Ctx<'_> {
                         let (w, h) = (w + fl + fr, h + ft + fb);
                         let mut a = atom(Kind::Image, String::new(), ml + w + mr, *node, *link, &inside);
                         a.image = Some((ml, w, h, img.src.as_str()));
-                        atoms.push(a);
+                        push(&mut atoms, a, &mut open);
                         last_space = false;
                     }
                 }
@@ -3160,18 +3291,18 @@ impl<'r> Ctx<'_> {
                     a.float = Some(b);
                     a.drop = drop;
                     a.mt = mt;
-                    atoms.push(a);
+                    push(&mut atoms, a, &mut open);
                     last_space = false;
                 }
                 Inline::Float(b) => {
                     let mut a = atom(Kind::Float, String::new(), 0.0, b.node, None, &inside);
                     a.float = Some(b);
-                    atoms.push(a);
+                    push(&mut atoms, a, &mut open);
                 }
                 Inline::Abs(b) => {
                     let mut a = atom(Kind::Abs, String::new(), 0.0, b.node, None, &inside);
                     a.float = Some(b);
-                    atoms.push(a);
+                    push(&mut atoms, a, &mut open);
                 }
                 Inline::Text { text, style, link } => {
                     let s = self.styles[*style as usize].clone();
@@ -3181,27 +3312,54 @@ impl<'r> Ctx<'_> {
                     let mut word = String::new();
                     for c in text.chars().chain(std::iter::once('\u{0}')) {
                         let end = c == '\u{0}';
-                        let ws = !end && c.is_whitespace() && c != '\u{a0}';
+                        // (Only CSS's white space collapses: other spaces are characters.)
+                        let ws = !end && matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
                         if (end || ws || (keep && c == '\n')) && !word.is_empty() {
                             let w = self.measure(&word, &font);
-                            atoms.push(atom(Kind::Word, std::mem::take(&mut word), w, *style, *link, &inside));
+                            push(&mut atoms, atom(Kind::Word, std::mem::take(&mut word), w, *style, *link, &inside), &mut open);
                         }
                         if end {
                             break;
                         }
                         if keep && c == '\n' {
-                            atoms.push(atom(Kind::Break, String::new(), 0.0, *style, None, &inside));
+                            push(&mut atoms, atom(Kind::Break, String::new(), 0.0, *style, None, &inside), &mut open);
                         } else if ws {
                             if keep {
                                 let sp = if c == '\t' { "        " } else { " " };
                                 let w = self.measure(sp, &font);
-                                atoms.push(atom(Kind::Space, sp.into(), w, *style, *link, &inside));
+                                push(&mut atoms, atom(Kind::Space, sp.into(), w, *style, *link, &inside), &mut open);
                             } else if !last_space {
                                 let w = self.measure(" ", &font);
-                                atoms.push(atom(Kind::Space, " ".into(), w, *style, *link, &inside));
+                                push(&mut atoms, atom(Kind::Space, " ".into(), w, *style, *link, &inside), &mut open);
                                 last_space = true;
                             }
                         } else {
+                            // A break opportunity inside the text (between ideographs, after a hyphen,
+                            // at a zero-width space) ends a piece of the word.
+                            let zwsp = c == '\u{200b}';
+                            if let Some(prev) = word.chars().last() {
+                                if s.space != Space::NoWrap && (zwsp || soft_break(&word, prev, c, &s)) {
+                                    let w = self.measure(&word, &font);
+                                    push(&mut atoms, atom(Kind::Word, std::mem::take(&mut word), w, *style, *link, &inside), &mut open);
+                                    open = true;
+                                }
+                            }
+                            if zwsp {
+                                open = true;
+                                continue;
+                            }
+                            // Other spaces keep their width and never collapse; a line may break after one.
+                            if matches!(c, '\u{3000}' | '\u{1680}' | '\u{2000}'..='\u{2006}' | '\u{2008}'..='\u{200a}' | '\u{205f}') {
+                                if !word.is_empty() {
+                                    let w = self.measure(&word, &font);
+                                    push(&mut atoms, atom(Kind::Word, std::mem::take(&mut word), w, *style, *link, &inside), &mut open);
+                                }
+                                let sp = c.to_string();
+                                let w = self.measure(&sp, &font);
+                                push(&mut atoms, atom(Kind::Space, sp, w, *style, *link, &inside), &mut open);
+                                last_space = false;
+                                continue;
+                            }
                             word.push(c);
                             last_space = false;
                         }
@@ -3209,11 +3367,37 @@ impl<'r> Ctx<'_> {
                 }
             }
         }
+        // Break opportunities where one element's text meets the next one's.
+        let mut prev: Option<usize> = None;
+        for i in 0..atoms.len() {
+            match atoms[i].kind {
+                Kind::Word => {
+                    if let (Some(j), false) = (prev, atoms[i].brk) {
+                        let s = &self.styles[atoms[i].style as usize];
+                        if let (Some(p), Some(n)) = (atoms[j].text.chars().last(), atoms[i].text.chars().next()) {
+                            if s.space != Space::NoWrap && soft_break(&atoms[j].text, p, n, s) {
+                                atoms[i].brk = true;
+                            }
+                        }
+                    }
+                    prev = Some(i);
+                }
+                Kind::Open | Kind::Close | Kind::Float | Kind::Abs => {}
+                _ => prev = None,
+            }
+        }
         atoms
     }
 
     fn collapsible(&self, a: &Atom) -> bool {
-        a.kind == Kind::Space && matches!(self.styles[a.style as usize].space, Space::Normal | Space::NoWrap)
+        a.kind == Kind::Space && a.text == " " && matches!(self.styles[a.style as usize].space, Space::Normal | Space::NoWrap)
+    }
+
+    /// A space that hangs past the end of a line: a collapsible one, or another kind of space
+    /// (an ideographic one...) where text wraps.
+    fn hangs(&self, a: &Atom) -> bool {
+        let s = &self.styles[a.style as usize];
+        self.collapsible(a) || (a.kind == Kind::Space && a.text != " " && a.text != "        " && s.space != Space::Pre && !s.break_spaces)
     }
 
     /// Breaks a run of inline content into lines at (x, y), `width` wide (less
@@ -3276,20 +3460,39 @@ impl<'r> Ctx<'_> {
                 }
                 let avail = right - left;
                 let has_content = line.iter().any(|l| l.content());
-                if wraps && has_content && line_w + a.w > avail + FIT {
+                if has_content && line_w + a.w > avail + FIT {
                     // A collapsible space hangs past the end: what follows decides whether the line breaks.
-                    if self.collapsible(&a) {
+                    if wraps && self.hangs(&a) {
                         hung = true;
+                        // (A collapsible one goes; another kind stays, painted, past the end.)
+                        if !self.collapsible(&a) {
+                            line.push(a);
+                        }
                         continue;
                     }
-                    queue.push_front(a);
-                    // An opening edge belongs with the word after it.
-                    while line.last().map(|l| l.kind == Kind::Open).unwrap_or(false) {
-                        queue.push_front(line.pop().expect("checked"));
+                    let wrap_at = |l: &Atom| l.brk && matches!(self.styles[l.style as usize].space, Space::Normal | Space::PreWrap);
+                    // Break before this atom if that's an opportunity, else at the last one on the line.
+                    let back = if (wraps && a.brk) || hung {
+                        Some(line.len())
+                    } else {
+                        (1..line.len()).rev().find(|&i| wrap_at(&line[i]) && line[..i].iter().any(|l| l.content()))
                     }
-                    break;
+                    // (With none, overflow-wrap may break between the pieces.)
+                    .or_else(|| (wraps && a.kind == Kind::Word && self.styles[a.style as usize].break_words).then_some(line.len()));
+                    if let Some(i) = back {
+                        queue.push_front(a);
+                        for l in line.drain(i..).rev() {
+                            queue.push_front(l);
+                        }
+                        // An opening edge belongs with the word after it.
+                        while line.last().map(|l| l.kind == Kind::Open).unwrap_or(false) {
+                            queue.push_front(line.pop().expect("checked"));
+                        }
+                        break;
+                    }
+                    // No opportunity: the content overflows.
                 }
-                if a.kind == Kind::Word && wraps && line_w + a.w > avail + FIT && !has_content {
+                if a.kind == Kind::Word && wraps && line_w + a.w > avail + FIT && !has_content && (self.styles[a.style as usize].break_words || unspaced(&a.text)) {
                     // A word longer than the line (a URL): break it where it must.
                     let font = font_of(&self.styles[a.style as usize].clone());
                     let mut piece = String::new();
@@ -3308,7 +3511,7 @@ impl<'r> Ctx<'_> {
                     let mut head = Atom { text: piece, w: pw, ..a };
                     if !tail.is_empty() {
                         let tw = self.measure(&tail, &font);
-                        let more = Atom { kind: Kind::Word, text: tail, w: tw, style: head.style, link: head.link, inside: head.inside.clone(), image: None, float: None, drop: 0.0, mt: 0.0 };
+                        let more = Atom { kind: Kind::Word, text: tail, w: tw, style: head.style, link: head.link, inside: head.inside.clone(), image: None, float: None, drop: 0.0, mt: 0.0, brk: true };
                         queue.push_front(more);
                         split = true;
                         head.kind = Kind::Word;
@@ -3883,6 +4086,49 @@ fn stack(items: Vec<Item>, segs: &[Seg], layers: &mut [Layer]) -> Vec<Item> {
     out
 }
 
+/// Characters laid out like ideographs: a line may break on either side of one.
+fn ideographic(c: char) -> bool {
+    matches!(c as u32, 0x2E80..=0x2FFF | 0x3040..=0x30FF | 0x3100..=0x31FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA960..=0xA97F | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF01..=0xFF9F | 0x20000..=0x3FFFF)
+}
+
+/// Whether a line may break between `prev` (the end of `word`) and `next` in text with no
+/// space between them (a small part of Unicode's line breaking rules).
+fn soft_break(word: &str, prev: char, next: char, s: &Style) -> bool {
+    let all = s.break_all;
+    if s.line_break == 3 {
+        return true;
+    }
+    // Closing punctuation and the like never start a line; opening punctuation never ends one.
+    const NO_BEFORE: &str = ")]}!?:;,.、。，．？！）」』】〕〉》〗〙〛］｝｠\u{301c}\u{30a0}｡､";
+    const NO_AFTER: &str = "([{「『【〔〈《〖〘〚（［｛｟\u{201c}\u{2018}｢";
+    // Small kana and the prolonged sound mark may start a line unless line-break is strict;
+    // iteration marks and centred punctuation only when it's loose.
+    const SMALL: &str = "ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿｧｨｩｪｫｬｭｮｯーｰ";
+    const LOOSE: &str = "々〻ゝゞヽヾ・：；･‼⁇⁈⁉";
+    // (In CJK text, hyphens and the wave dash may start a line unless line-break is strict.)
+    if ideographic(prev) && matches!(next, '\u{2010}' | '\u{2013}' | '\u{301c}' | '\u{30a0}') {
+        return s.line_break != 1;
+    }
+    if NO_BEFORE.contains(next) || NO_AFTER.contains(prev) || (s.line_break == 1 && SMALL.contains(next)) || (s.line_break != 2 && LOOSE.contains(next)) {
+        return false;
+    }
+    // (Hyphens and dashes don't start a line either.)
+    if (ideographic(prev) || ideographic(next)) && !s.keep_all || all && !matches!(next, '-' | '\u{2010}' | '\u{2012}' | '\u{2013}') && !next.is_whitespace() {
+        return true;
+    }
+    // After a hyphen-minus between letters ("well-known"), after hyphens and dashes, and
+    // around an em dash.
+    let hyphen = prev == '-' && next.is_alphabetic() && word.chars().rev().nth(1).is_some_and(|c| c.is_alphanumeric());
+    hyphen || matches!(prev, '\u{2010}' | '\u{2012}' | '\u{2013}' | '\u{2014}') || (next == '\u{2014}' && prev != '\u{2014}')
+}
+
+/// Text in a script written without spaces whose words a browser finds with a dictionary
+/// (Thai, Lao, Khmer, Myanmar) or by syllable (Javanese, Balinese...). With neither here,
+/// such a word may break where it must rather than overflow.
+fn unspaced(text: &str) -> bool {
+    text.chars().next().is_some_and(|c| matches!(c as u32, 0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF | 0x1A20..=0x1AAF | 0x1B00..=0x1BFF | 0xA980..=0xA9DF | 0xAA60..=0xAA7F))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3997,7 +4243,10 @@ mod tests {
         assert_eq!(words(&page("<ol start=3><li>one<li>two</ol><ul><li>dot</ul>", css, 300.0)), ["3.", "one", "4.", "two", "•", "dot"]);
         let t = texts(&page("<p style='text-align:center'>hi</p>", "body{margin:0;font-size:10px}", 100.0));
         assert!((t[0].1 - (100.0 - 7.78) / 2.0).abs() < 0.01);
-        let long = page("<p>https://example.com/a/very/long/address/that/cannot/fit</p>", css, 60.0);
+        // A word too long for its line overflows, unless overflow-wrap lets it break.
+        let url = "<p>https://example.com/a/very/long/address/that/cannot/fit</p>";
+        assert_eq!(texts(&page(url, css, 60.0)).len(), 1);
+        let long = page(url, &format!("{css} p {{ overflow-wrap: anywhere }}"), 60.0);
         let f = Font { family: style::Family::Sans, size: 10.0, weight: 400, italic: false };
         assert!(texts(&long).len() > 3 && texts(&long).iter().all(|(s, ..)| ApproxFonts.width(s, &f) <= 60.0));
         assert_eq!(words(&page("<p>a<span style='display:none'>hidden</span><script>x()</script></p>", css, 100.0)), ["a"]);
