@@ -29,6 +29,7 @@
 pub mod cookies;
 pub mod deflate;
 pub mod encoding;
+mod single_byte;
 pub mod url;
 pub mod xml;
 pub mod favicon;

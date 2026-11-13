@@ -1344,10 +1344,11 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
         super::on_main(move || with(move |b| fall_back(b, serial, url, false)));
         return;
     }
-    let html = String::from_utf8_lossy(&body).into_owned();
+    let (html, charset) = volant_core::encoding::decode_html(&body, &reply.content_type);
     let host: Rc<dyn script::Host> = Rc::new(NetHost);
     let env = volant_engine::Env { width, dark };
     let mut rt = script::Runtime::new(&html, &url, env, host.clone());
+    rt.state.borrow_mut().charset = charset;
     eprintln!("engine: loaded {url} ({status}, {} KB) in {:.0} ms", body.len() / 1024, started.elapsed().as_secs_f64() * 1000.0);
     let mut sheets: Vec<(String, String)> = Vec::new();
     let mut shown = 0u64;

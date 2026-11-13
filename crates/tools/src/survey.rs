@@ -132,10 +132,11 @@ pub fn one(url: &str) {
         println!("{}", row.to_line());
         return;
     }
-    let html = String::from_utf8_lossy(&reply.body).into_owned();
+    let (html, charset) = volant_core::encoding::decode_html(&reply.body, &reply.content_type);
     let env = volant_engine::Env { width: 1100.0, dark: false };
     let t = Instant::now();
     let mut rt = script::Runtime::new(&html, &page, env, host.clone());
+    rt.state.borrow_mut().charset = charset;
     // VOLANT_PROFILE=1: where the page's JavaScript spends its time (to stderr).
     let profile = std::env::var_os("VOLANT_PROFILE").is_some();
     if profile {

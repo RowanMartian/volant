@@ -89,7 +89,8 @@ backed by the real cascade. `prelude.js` builds the rest of the platform in Java
 Underneath, volant-core carries the platform's standards as plain Rust: `url.rs` is the WHATWG URL Standard (the
 basic URL parser with its setter state overrides, IPv4/IPv6/opaque hosts, Punycode, origins and form encoding),
 behind `URL`, `URLSearchParams`, `<a>`'s URL parts and every link, script and form the engine resolves (with
-`<base href>`); `encoding.rs` is the Encoding Standard's labels and decoders, behind `TextDecoder`; `xml.rs` parses
+`<base href>`); `encoding.rs` is the Encoding Standard's labels and decoders (UTF-8, UTF-16 and every single-byte encoding, from the
+standard's own indexes), behind `TextDecoder` and the charset sniffing that decodes each page; `xml.rs` parses
 XML with namespaces for XML documents, SVG and `DOMParser` (malformed input gives a `<parsererror>` document).
 Elements carry namespaces and prefixes (`createElementNS`, `namespaceURI`, XML documents and `XMLDocument`), and
 iframes get documents of their own: about:blank, `srcdoc`, or a same-origin `src` loaded before the window's load
@@ -193,7 +194,7 @@ cargo run --release -p volant-core --example compile_lists -- easylist.txt easyp
 HTML's DOM interfaces, at the commit in `scripts/wpt/WPT_COMMIT`) through the engine with no browser: each file
 in its own process, the tests served from the checkout, and testharness.js reporting back. It writes a table by
 folder and the most common failures; `--baseline scripts/wpt/baseline.tsv` fails when a file passes fewer subtests
-than before. In the latest run 85,272 of 96,157 subtests pass (88.7%), and 220 of
+than before. In the latest run 85,586 of 96,157 subtests pass (89.0%), and 221 of
 the 962 files pass completely (the first run passed 53.2%).
 
 `volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Simple Page and reports what

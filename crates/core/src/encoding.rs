@@ -1,6 +1,7 @@
-//! The WHATWG Encoding Standard's labels, and decoders for the encodings the
-//! web uses most: UTF-8, UTF-16 (both orders), windows-1252 (which `latin1`
-//! and `iso-8859-1` also mean) and x-user-defined.
+//! The WHATWG Encoding Standard's labels, and decoders for UTF-8, UTF-16
+//! (both orders), every single-byte encoding (windows-125x, ISO-8859-x,
+//! KOI8, IBM866, the Mac ones; `latin1` and `iso-8859-1` mean windows-1252)
+//! and x-user-defined.
 
 /// The encoding a label names (ASCII whitespace trimmed, any case), by its canonical name.
 pub fn for_label(label: &str) -> Option<&'static str> {
@@ -52,11 +53,130 @@ const LABELS: &[(&str, &str)] = &[
     ("x-user-defined", "x-user-defined"),
 ];
 
-/// windows-1252's 0x80–0x9F (the rest is Latin-1).
-const W1252: [u16; 32] = [
-    0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x8D, 0x017D, 0x8F, 0x90, 0x2018, 0x2019, 0x201C,
-    0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D, 0x017E, 0x0178,
-];
+/// The encoding an HTML page is in, as HTML's "encoding sniffing" finds it:
+/// a byte order mark, then the Content-Type header's charset, then a
+/// `<meta charset>` or `<meta http-equiv=content-type>` in the first 1024
+/// bytes, else UTF-8.
+pub fn sniff_html(bytes: &[u8], content_type: &str) -> &'static str {
+    if let Some(e) = bom(bytes) {
+        return e.0;
+    }
+    let from_header = content_type
+        .split(';')
+        .skip(1)
+        .find_map(|p| p.trim().strip_prefix("charset=").or_else(|| p.trim().strip_prefix("CHARSET=")))
+        .and_then(|v| for_label(v.trim_matches(|c| c == '"' || c == '\'')));
+    if let Some(e) = from_header {
+        return e;
+    }
+    match prescan(&bytes[..bytes.len().min(1024)]) {
+        // A page can't really be UTF-16 if its ASCII markup said so.
+        Some("UTF-16LE" | "UTF-16BE") => "UTF-8",
+        Some("x-user-defined") => "windows-1252",
+        Some(e) => e,
+        None => "UTF-8",
+    }
+}
+
+/// A byte order mark's encoding and length.
+pub fn bom(bytes: &[u8]) -> Option<(&'static str, usize)> {
+    match bytes {
+        [0xEF, 0xBB, 0xBF, ..] => Some(("UTF-8", 3)),
+        [0xFE, 0xFF, ..] => Some(("UTF-16BE", 2)),
+        [0xFF, 0xFE, ..] => Some(("UTF-16LE", 2)),
+        _ => None,
+    }
+}
+
+/// Decodes a page in the encoding [`sniff_html`] finds, dropping a byte order mark.
+pub fn decode_html(bytes: &[u8], content_type: &str) -> (String, &'static str) {
+    let enc = sniff_html(bytes, content_type);
+    let skip = bom(bytes).filter(|b| b.0 == enc).map_or(0, |b| b.1);
+    let text = decode(enc, &bytes[skip..], false, false).map(|t| t.0).unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned());
+    (text, enc)
+}
+
+/// HTML's prescan for a `<meta>` naming the encoding.
+fn prescan(b: &[u8]) -> Option<&'static str> {
+    let lower = |c: u8| c.to_ascii_lowercase();
+    let ws = |c: u8| matches!(c, b'\t' | b'\n' | 0x0c | b'\r' | b' ');
+    let mut i = 0;
+    while i < b.len() {
+        if b[i..].starts_with(b"<!--") {
+            i = b[i + 4..].windows(3).position(|w| w == b"-->").map_or(b.len(), |k| i + 4 + k + 3);
+            continue;
+        }
+        if b[i] == b'<' && b.len() > i + 5 && b[i + 1..i + 5].iter().map(|&c| lower(c)).eq(*b"meta") && (ws(b[i + 5]) || b[i + 5] == b'/') {
+            i += 5;
+            let (mut http_equiv, mut content, mut charset) = (false, None::<String>, None::<String>);
+            // Attributes, up to the tag's end.
+            loop {
+                while i < b.len() && (ws(b[i]) || b[i] == b'/') {
+                    i += 1;
+                }
+                if i >= b.len() || b[i] == b'>' {
+                    break;
+                }
+                let start = i;
+                while i < b.len() && !ws(b[i]) && !matches!(b[i], b'=' | b'>' | b'/') {
+                    i += 1;
+                }
+                let name: String = b[start..i].iter().map(|&c| lower(c) as char).collect();
+                while i < b.len() && ws(b[i]) {
+                    i += 1;
+                }
+                let mut value = String::new();
+                if i < b.len() && b[i] == b'=' {
+                    i += 1;
+                    while i < b.len() && ws(b[i]) {
+                        i += 1;
+                    }
+                    if i < b.len() && (b[i] == b'"' || b[i] == b'\'') {
+                        let q = b[i];
+                        i += 1;
+                        let s = i;
+                        while i < b.len() && b[i] != q {
+                            i += 1;
+                        }
+                        value = b[s..i].iter().map(|&c| lower(c) as char).collect();
+                        i += 1;
+                    } else {
+                        let s = i;
+                        while i < b.len() && !ws(b[i]) && b[i] != b'>' {
+                            i += 1;
+                        }
+                        value = b[s..i].iter().map(|&c| lower(c) as char).collect();
+                    }
+                }
+                match name.as_str() {
+                    "http-equiv" => http_equiv |= value == "content-type",
+                    "content" if content.is_none() => content = Some(value),
+                    "charset" if charset.is_none() => charset = Some(value),
+                    _ => {}
+                }
+            }
+            let label = charset.or_else(|| {
+                let c = content.filter(|_| http_equiv)?;
+                let rest = &c[c.find("charset")? + 7..];
+                let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+                let rest = rest.trim_start_matches(['"', '\'']);
+                Some(rest.split(|ch: char| ch == ';' || ch == '"' || ch == '\'' || ch.is_ascii_whitespace()).next().unwrap_or("").to_string())
+            });
+            if let Some(e) = label.and_then(|l| for_label(&l)) {
+                return Some(e);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A single-byte encoding's table for bytes 0x80-0xFF (ISO-8859-8-I is ISO-8859-8's).
+fn single_byte(encoding: &str) -> Option<&'static [u16; 128]> {
+    let name = if encoding == "ISO-8859-8-I" { "ISO-8859-8" } else { encoding };
+    crate::single_byte::SINGLE_BYTE.iter().find(|(n, _)| *n == name).map(|(_, t)| t)
+}
 
 /// Decodes `bytes` as `encoding` (a canonical name). With `stream`, an
 /// incomplete sequence at the end is left for the next call: returns the text
@@ -75,8 +195,25 @@ pub fn decode(encoding: &str, bytes: &[u8], fatal: bool, stream: bool) -> Result
             }
         }
         "x-user-defined" => Ok((bytes.iter().map(|&b| if b < 0x80 { b as char } else { char::from_u32(0xF780 + b as u32 - 0x80).unwrap_or('\u{FFFD}') }).collect(), bytes.len())),
-        // windows-1252, and (until they have tables of their own) the other single-byte encodings.
-        _ => Ok((bytes.iter().map(|&b| if (0x80..0xA0).contains(&b) { char::from_u32(W1252[b as usize - 0x80] as u32).unwrap_or('\u{FFFD}') } else { b as char }).collect(), bytes.len())),
+        _ => match single_byte(encoding) {
+            Some(table) => {
+                let mut out = String::with_capacity(bytes.len());
+                for &b in bytes {
+                    if b < 0x80 {
+                        out.push(b as char);
+                        continue;
+                    }
+                    match table[b as usize - 0x80] {
+                        0 if fatal => return Err(()),
+                        0 => out.push('\u{FFFD}'),
+                        c => out.push(char::from_u32(c as u32).unwrap_or('\u{FFFD}')),
+                    }
+                }
+                Ok((out, bytes.len()))
+            }
+            // The CJK encodings have no decoders yet: their ASCII comes through.
+            None => Ok((bytes.iter().map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' }).collect(), bytes.len())),
+        },
     }
 }
 
@@ -179,5 +316,14 @@ mod tests {
         assert_eq!(decode("UTF-16LE", &[0x3D, 0xD8, 0x00, 0xDE, 0x41, 0x00], false, false).unwrap().0, "😀A");
         assert_eq!(decode("UTF-16BE", &[0x00, 0x41, 0x00], false, false).unwrap().0, "A\u{FFFD}");
         assert_eq!(decode("windows-1252", &[0x80, 0xE9], false, false).unwrap().0, "€é");
+        assert_eq!(decode("KOI8-U", &[0xAE, 0xC1], false, false).unwrap().0, "ўа");
+        assert_eq!(decode("ISO-8859-8-I", &[0xE0], false, false).unwrap().0, "א");
+        assert!(decode("windows-1253", &[0xAA], true, false).is_err());
+        assert_eq!(sniff_html(b"<meta charset=koi8-r><p>", ""), "KOI8-R");
+        assert_eq!(sniff_html(b"<!-- <meta charset=x --><META HTTP-EQUIV='Content-Type' CONTENT='text/html; charset=\"windows-1251\"'>", ""), "windows-1251");
+        assert_eq!(sniff_html(b"<meta charset=latin1>", "text/html; charset=utf-8"), "UTF-8");
+        assert_eq!(sniff_html(b"\xEF\xBB\xBF<meta charset=latin1>", ""), "UTF-8");
+        assert_eq!(sniff_html(b"<meta charset=utf-16>", ""), "UTF-8");
+        assert_eq!(decode_html(b"<meta charset=iso-8859-7>\xE1", "").0, "<meta charset=iso-8859-7>α");
     }
 }

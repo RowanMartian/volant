@@ -665,7 +665,7 @@ encoding/remove-only-one-bom.html	0
 encoding/replacement-encodings.any.html	0
 encoding/sharedarraybuffer.https.html	0
 encoding/single-byte-decoder-iframe.window.html	0
-encoding/single-byte-decoder.any.html	17
+encoding/single-byte-decoder.any.html	168
 encoding/sniffing.html	0
 encoding/streams/backpressure.any.html	0
 encoding/streams/decode-attributes.any.html	0
@@ -684,12 +684,12 @@ encoding/textdecoder-arguments.any.html	3
 encoding/textdecoder-byte-order-marks.any.html	3
 encoding/textdecoder-copy.any.html	1
 encoding/textdecoder-eof.any.html	0
-encoding/textdecoder-fatal-single-byte.any.html	7018
+encoding/textdecoder-fatal-single-byte.any.html	7168
 encoding/textdecoder-fatal-streaming.any.html	1
 encoding/textdecoder-fatal.any.html	36
 encoding/textdecoder-ignorebom.any.html	4
 encoding/textdecoder-labels.any.html	222
-encoding/textdecoder-mistakes.any.html	41
+encoding/textdecoder-mistakes.any.html	54
 encoding/textdecoder-streaming.any.html	16
 encoding/textdecoder-utf16-surrogates.any.html	10
 encoding/textencoder-constructor-non-utf.any.html	79

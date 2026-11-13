@@ -499,6 +499,8 @@ pub struct State {
     computed: Option<Computed>,
     /// The document's base URL, for the generation and URL it was worked out at.
     base_cache: RefCell<Option<(u64, String, String)>>,
+    /// The page's encoding (document.characterSet), as its loader decoded it.
+    pub charset: &'static str,
     /// The document each node made by (or adopted into) a document other than
     /// the page's belongs to, where its tree doesn't say.
     owners: HashMap<NodeId, NodeId>,
@@ -1557,6 +1559,14 @@ fn is_js(dom: &Dom, id: NodeId) -> bool {
     script_kind(dom, id).is_some()
 }
 
+/// A subresource's text: in its BOM's or Content-Type's encoding, else UTF-8.
+fn decode_text(body: &[u8], content_type: &str) -> String {
+    let named = content_type.split(';').skip(1).find_map(|p| p.trim().strip_prefix("charset=")).and_then(volant_core::encoding::for_label);
+    let enc = volant_core::encoding::bom(body).map(|b| b.0).or(named).unwrap_or("UTF-8");
+    let skip = volant_core::encoding::bom(body).filter(|b| b.0 == enc).map_or(0, |b| b.1);
+    volant_core::encoding::decode(enc, &body[skip..], false, false).map(|t| t.0).unwrap_or_default()
+}
+
 /// A script's source and where it came from: inline, or fetched from its `src`.
 fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
     let (src, text, url, host) = {
@@ -1565,7 +1575,7 @@ fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
     };
     match src {
         Some(abs) => match host.get_for(&abs, &url) {
-            Some(r) if r.success() => Ok((String::from_utf8_lossy(&r.body).into_owned(), abs)),
+            Some(r) if r.success() => Ok((decode_text(&r.body, &r.content_type), abs)),
             _ => Err(format!("couldn't load {abs}")),
         },
         None => Ok((text, url)),
@@ -3947,7 +3957,7 @@ fn install(i: &mut Interp, st: &S) {
     });
     getter(i, st, &document, "referrer", |_i, _st, _id| Ok(str_val("")));
     for name in ["characterSet", "charset", "inputEncoding"] {
-        getter(i, st, &document, name, |_i, _st, _id| Ok(str_val("UTF-8")));
+        getter(i, st, &document, name, |_i, st, id| Ok(str_val(if id == ROOT { st.borrow().charset } else { "UTF-8" })));
     }
     getter(i, st, &document, "compatMode", |_i, _st, _id| Ok(str_val("CSS1Compat")));
     getter(i, st, &document, "contentType", |_i, st, id| Ok(str_val(st.borrow().documents.get(&id).map(String::as_str).unwrap_or("text/html"))));
@@ -4630,6 +4640,7 @@ impl Runtime {
             generation: 1,
             computed: None,
             base_cache: RefCell::new(None),
+            charset: "UTF-8",
             owners: HashMap::new(),
             doc_urls: HashMap::new(),
             documents: HashMap::new(),
