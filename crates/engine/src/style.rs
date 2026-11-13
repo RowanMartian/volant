@@ -113,12 +113,27 @@ pub enum Clear {
     Both,
 }
 
+/// An intrinsic size keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sizing {
+    Min,
+    Max,
+    Fit,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VAlign {
+    /// The baseline, raised by `Style::raise` (a length or percentage).
     Baseline,
     Super,
     Sub,
     Middle,
+    /// Against the line box's top or bottom.
+    Top,
+    Bottom,
+    /// Against the top or bottom of the parent's font.
+    TextTop,
+    TextBottom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -209,6 +224,7 @@ pub struct Style {
     pub border_color: [Color; 4],
     pub width: Len,
     pub max_width: Len,
+    pub max_height: Len,
     pub height: Len,
     pub hidden: bool,
     pub float: Float,
@@ -217,8 +233,8 @@ pub struct Style {
     /// How far this text's baseline sits below its line's (negative: raised),
     /// from `vertical-align` on it and its inline ancestors.
     pub shift: f32,
-    /// `border-radius`, in px.
-    pub radius: f32,
+    /// `border-radius` (a percentage is of the box).
+    pub radius: Len,
     /// `box-sizing: border-box`: width and height include padding and borders.
     pub border_box: bool,
     /// `caption-side: bottom` (inherited).
@@ -229,9 +245,17 @@ pub struct Style {
     pub border_collapse: bool,
     /// `z-index` (`None` for `auto`).
     pub z_index: Option<i32>,
+    /// How far `vertical-align: <length>` raises the box.
+    pub raise: f32,
     /// `aspect-ratio` as width / height, and whether `auto` came with it
     /// (an image's own ratio then wins).
     pub aspect: Option<(f32, bool)>,
+    /// `width: min-content | max-content | fit-content` (`width` is then auto).
+    pub width_kw: Option<Sizing>,
+    /// `contain: size` (or `strict`): the box sizes as if empty, or to `contain-intrinsic-size`.
+    pub contain_size: bool,
+    /// `contain-intrinsic-size` (width, height) in px.
+    pub intrinsic_size: (Option<f32>, Option<f32>),
     /// `object-fit` and `object-position` (x, y) for images.
     pub object_fit: Fit,
     pub object_pos: (Len, Len),
@@ -305,19 +329,24 @@ impl Default for Style {
             border_color: [Color::BLACK; 4],
             width: Len::Auto,
             max_width: Len::Auto,
+            max_height: Len::Auto,
             height: Len::Auto,
             hidden: false,
             float: Float::None,
             clear: Clear::None,
             valign: VAlign::Baseline,
             shift: 0.0,
-            radius: 0.0,
+            radius: Len::Px(0.0),
             border_box: false,
             caption_bottom: false,
             border_spacing: (0.0, 0.0),
             border_collapse: false,
             z_index: None,
             aspect: None,
+            width_kw: None,
+            contain_size: false,
+            intrinsic_size: (None, None),
+            raise: 0.0,
             object_fit: Fit::Fill,
             object_pos: (Len::Pct(50.0), Len::Pct(50.0)),
             opacity: 1.0,
@@ -363,7 +392,9 @@ li { display: list-item }
 table { display: table; border-spacing: 2px }
 thead, tbody, tfoot { display: table-row-group }
 tr { display: table-row }
-td, th { display: table-cell }
+td, th { display: table-cell; vertical-align: inherit }
+thead, tbody, tfoot { vertical-align: middle }
+tr { vertical-align: inherit }
 th { font-weight: bold; text-align: center }
 caption { display: table-caption; text-align: center }
 colgroup, col { display: none }
@@ -441,36 +472,202 @@ pub fn parse_color(v: &str) -> Option<Color> {
         }
         return Some(Color { r: chan(parts[0])?, g: chan(parts[1])?, b: chan(parts[2])?, a: parts.get(3).map(|a| alpha(a)).unwrap_or(Some(255))? });
     }
-    let named = |r, g, b| Some(Color::rgb(r, g, b));
-    match v.as_str() {
-        "transparent" => Some(Color::TRANSPARENT),
-        "black" => named(0, 0, 0),
-        "white" => named(255, 255, 255),
-        "red" => named(255, 0, 0),
-        "green" => named(0, 128, 0),
-        "blue" => named(0, 0, 255),
-        "gray" | "grey" => named(128, 128, 128),
-        "darkgray" | "darkgrey" => named(169, 169, 169),
-        "lightgray" | "lightgrey" => named(211, 211, 211),
-        "silver" => named(192, 192, 192),
-        "maroon" => named(128, 0, 0),
-        "purple" => named(128, 0, 128),
-        "fuchsia" | "magenta" => named(255, 0, 255),
-        "lime" => named(0, 255, 0),
-        "olive" => named(128, 128, 0),
-        "yellow" => named(255, 255, 0),
-        "navy" => named(0, 0, 128),
-        "teal" => named(0, 128, 128),
-        "aqua" | "cyan" => named(0, 255, 255),
-        "orange" => named(255, 165, 0),
-        "brown" => named(165, 42, 42),
-        "pink" => named(255, 192, 203),
-        "whitesmoke" => named(245, 245, 245),
-        "gainsboro" => named(220, 220, 220),
-        "dimgray" | "dimgrey" => named(105, 105, 105),
-        _ => None,
+    if let Some(args) = v.strip_prefix("hsla(").or_else(|| v.strip_prefix("hsl(")).and_then(|a| a.strip_suffix(')')) {
+        let parts: Vec<&str> = args.split([',', ' ', '/']).map(str::trim).filter(|p| !p.is_empty()).collect();
+        if parts.len() < 3 {
+            return None;
+        }
+        let h = parts[0];
+        let turns = if let Some(n) = h.strip_suffix("deg") {
+            n.parse::<f32>().ok()? / 360.0
+        } else if let Some(n) = h.strip_suffix("grad") {
+            n.parse::<f32>().ok()? / 400.0
+        } else if let Some(n) = h.strip_suffix("rad") {
+            n.parse::<f32>().ok()? / std::f32::consts::TAU
+        } else if let Some(n) = h.strip_suffix("turn") {
+            n.parse::<f32>().ok()?
+        } else {
+            h.parse::<f32>().ok()? / 360.0
+        };
+        let hue = turns.rem_euclid(1.0);
+        let pct = |p: &str| p.trim_end_matches('%').parse::<f32>().ok().map(|n| (n / 100.0).clamp(0.0, 1.0));
+        let (sat, light) = (pct(parts[1])?, pct(parts[2])?);
+        let a = match parts.get(3) {
+            Some(p) => match p.strip_suffix('%') {
+                Some(n) => n.parse::<f32>().ok()? / 100.0,
+                None => p.parse::<f32>().ok()?,
+            },
+            None => 1.0,
+        };
+        let q = if light < 0.5 { light * (1.0 + sat) } else { light + sat - light * sat };
+        let p = 2.0 * light - q;
+        let ch = |t: f32| {
+            let t = t.rem_euclid(1.0);
+            let v = if t < 1.0 / 6.0 { p + (q - p) * 6.0 * t } else if t < 0.5 { q } else if t < 2.0 / 3.0 { p + (q - p) * (2.0 / 3.0 - t) * 6.0 } else { p };
+            (v * 255.0).round().clamp(0.0, 255.0) as u8
+        };
+        return Some(Color { r: ch(hue + 1.0 / 3.0), g: ch(hue), b: ch(hue - 1.0 / 3.0), a: (a.clamp(0.0, 1.0) * 255.0).round() as u8 });
     }
+    if v == "transparent" {
+        return Some(Color::TRANSPARENT);
+    }
+    NAMED.binary_search_by(|(n, _)| (*n).cmp(v.as_str())).ok().map(|i| {
+        let c = NAMED[i].1;
+        Color::rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+    })
 }
+
+/// The CSS named colours, sorted for binary search.
+const NAMED: [(&str, u32); 148] = [
+    ("aliceblue", 0xf0f8ff),
+    ("antiquewhite", 0xfaebd7),
+    ("aqua", 0x00ffff),
+    ("aquamarine", 0x7fffd4),
+    ("azure", 0xf0ffff),
+    ("beige", 0xf5f5dc),
+    ("bisque", 0xffe4c4),
+    ("black", 0x000000),
+    ("blanchedalmond", 0xffebcd),
+    ("blue", 0x0000ff),
+    ("blueviolet", 0x8a2be2),
+    ("brown", 0xa52a2a),
+    ("burlywood", 0xdeb887),
+    ("cadetblue", 0x5f9ea0),
+    ("chartreuse", 0x7fff00),
+    ("chocolate", 0xd2691e),
+    ("coral", 0xff7f50),
+    ("cornflowerblue", 0x6495ed),
+    ("cornsilk", 0xfff8dc),
+    ("crimson", 0xdc143c),
+    ("cyan", 0x00ffff),
+    ("darkblue", 0x00008b),
+    ("darkcyan", 0x008b8b),
+    ("darkgoldenrod", 0xb8860b),
+    ("darkgray", 0xa9a9a9),
+    ("darkgreen", 0x006400),
+    ("darkgrey", 0xa9a9a9),
+    ("darkkhaki", 0xbdb76b),
+    ("darkmagenta", 0x8b008b),
+    ("darkolivegreen", 0x556b2f),
+    ("darkorange", 0xff8c00),
+    ("darkorchid", 0x9932cc),
+    ("darkred", 0x8b0000),
+    ("darksalmon", 0xe9967a),
+    ("darkseagreen", 0x8fbc8f),
+    ("darkslateblue", 0x483d8b),
+    ("darkslategray", 0x2f4f4f),
+    ("darkslategrey", 0x2f4f4f),
+    ("darkturquoise", 0x00ced1),
+    ("darkviolet", 0x9400d3),
+    ("deeppink", 0xff1493),
+    ("deepskyblue", 0x00bfff),
+    ("dimgray", 0x696969),
+    ("dimgrey", 0x696969),
+    ("dodgerblue", 0x1e90ff),
+    ("firebrick", 0xb22222),
+    ("floralwhite", 0xfffaf0),
+    ("forestgreen", 0x228b22),
+    ("fuchsia", 0xff00ff),
+    ("gainsboro", 0xdcdcdc),
+    ("ghostwhite", 0xf8f8ff),
+    ("gold", 0xffd700),
+    ("goldenrod", 0xdaa520),
+    ("gray", 0x808080),
+    ("green", 0x008000),
+    ("greenyellow", 0xadff2f),
+    ("grey", 0x808080),
+    ("honeydew", 0xf0fff0),
+    ("hotpink", 0xff69b4),
+    ("indianred", 0xcd5c5c),
+    ("indigo", 0x4b0082),
+    ("ivory", 0xfffff0),
+    ("khaki", 0xf0e68c),
+    ("lavender", 0xe6e6fa),
+    ("lavenderblush", 0xfff0f5),
+    ("lawngreen", 0x7cfc00),
+    ("lemonchiffon", 0xfffacd),
+    ("lightblue", 0xadd8e6),
+    ("lightcoral", 0xf08080),
+    ("lightcyan", 0xe0ffff),
+    ("lightgoldenrodyellow", 0xfafad2),
+    ("lightgray", 0xd3d3d3),
+    ("lightgreen", 0x90ee90),
+    ("lightgrey", 0xd3d3d3),
+    ("lightpink", 0xffb6c1),
+    ("lightsalmon", 0xffa07a),
+    ("lightseagreen", 0x20b2aa),
+    ("lightskyblue", 0x87cefa),
+    ("lightslategray", 0x778899),
+    ("lightslategrey", 0x778899),
+    ("lightsteelblue", 0xb0c4de),
+    ("lightyellow", 0xffffe0),
+    ("lime", 0x00ff00),
+    ("limegreen", 0x32cd32),
+    ("linen", 0xfaf0e6),
+    ("magenta", 0xff00ff),
+    ("maroon", 0x800000),
+    ("mediumaquamarine", 0x66cdaa),
+    ("mediumblue", 0x0000cd),
+    ("mediumorchid", 0xba55d3),
+    ("mediumpurple", 0x9370db),
+    ("mediumseagreen", 0x3cb371),
+    ("mediumslateblue", 0x7b68ee),
+    ("mediumspringgreen", 0x00fa9a),
+    ("mediumturquoise", 0x48d1cc),
+    ("mediumvioletred", 0xc71585),
+    ("midnightblue", 0x191970),
+    ("mintcream", 0xf5fffa),
+    ("mistyrose", 0xffe4e1),
+    ("moccasin", 0xffe4b5),
+    ("navajowhite", 0xffdead),
+    ("navy", 0x000080),
+    ("oldlace", 0xfdf5e6),
+    ("olive", 0x808000),
+    ("olivedrab", 0x6b8e23),
+    ("orange", 0xffa500),
+    ("orangered", 0xff4500),
+    ("orchid", 0xda70d6),
+    ("palegoldenrod", 0xeee8aa),
+    ("palegreen", 0x98fb98),
+    ("paleturquoise", 0xafeeee),
+    ("palevioletred", 0xdb7093),
+    ("papayawhip", 0xffefd5),
+    ("peachpuff", 0xffdab9),
+    ("peru", 0xcd853f),
+    ("pink", 0xffc0cb),
+    ("plum", 0xdda0dd),
+    ("powderblue", 0xb0e0e6),
+    ("purple", 0x800080),
+    ("rebeccapurple", 0x663399),
+    ("red", 0xff0000),
+    ("rosybrown", 0xbc8f8f),
+    ("royalblue", 0x4169e1),
+    ("saddlebrown", 0x8b4513),
+    ("salmon", 0xfa8072),
+    ("sandybrown", 0xf4a460),
+    ("seagreen", 0x2e8b57),
+    ("seashell", 0xfff5ee),
+    ("sienna", 0xa0522d),
+    ("silver", 0xc0c0c0),
+    ("skyblue", 0x87ceeb),
+    ("slateblue", 0x6a5acd),
+    ("slategray", 0x708090),
+    ("slategrey", 0x708090),
+    ("snow", 0xfffafa),
+    ("springgreen", 0x00ff7f),
+    ("steelblue", 0x4682b4),
+    ("tan", 0xd2b48c),
+    ("teal", 0x008080),
+    ("thistle", 0xd8bfd8),
+    ("tomato", 0xff6347),
+    ("turquoise", 0x40e0d0),
+    ("violet", 0xee82ee),
+    ("wheat", 0xf5deb3),
+    ("white", 0xffffff),
+    ("whitesmoke", 0xf5f5f5),
+    ("yellow", 0xffff00),
+    ("yellowgreen", 0x9acd32),
+];
 
 /// A length in px (or %/auto), with `em` relative to `em` and `rem` to `rem`.
 pub fn parse_len(v: &str, em: f32, rem: f32) -> Option<Len> {
@@ -825,6 +1022,10 @@ fn border(v: &str, em: f32, rem: f32, current: Color) -> Option<(f32, Color)> {
 }
 
 /// Splits a value on spaces outside parentheses (so `rgb(1, 2, 3)` stays whole).
+fn negative(l: Len) -> bool {
+    matches!(l, Len::Px(v) | Len::Pct(v) if v < 0.0)
+}
+
 fn split_spaces(v: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -931,8 +1132,56 @@ fn four<T: Copy>(v: &[T]) -> Option<[T; 4]> {
 
 const SIDES: [&str; 4] = ["top", "right", "bottom", "left"];
 
+/// Logical properties as physical ones, for horizontal, left-to-right text:
+/// (name, [(physical name, which of the value's two parts)]).
+fn logical(name: &str) -> Option<Vec<(String, usize)>> {
+    let one = |p: &str| Some(vec![(p.to_string(), 0)]);
+    match name {
+        "inline-size" => return one("width"),
+        "block-size" => return one("height"),
+        "min-inline-size" => return one("min-width"),
+        "max-inline-size" => return one("max-width"),
+        "min-block-size" => return one("min-height"),
+        "max-block-size" => return one("max-height"),
+        _ => {}
+    }
+    let (head, rest) = ["margin", "padding", "inset", "border"].iter().find_map(|h| name.strip_prefix(h).map(|r| (*h, r)))?;
+    let rest = rest.strip_prefix('-')?;
+    let (axis, tail) = rest.split_once('-').unwrap_or((rest, ""));
+    let (start, end) = match axis {
+        "inline" => ("left", "right"),
+        "block" => ("top", "bottom"),
+        _ => return None,
+    };
+    let (sides, tail) = match tail.split_once('-') {
+        Some(("start", t)) => (vec![(start, 0)], t),
+        Some(("end", t)) => (vec![(end, 0)], t),
+        _ if tail == "start" => (vec![(start, 0)], ""),
+        _ if tail == "end" => (vec![(end, 0)], ""),
+        // Both sides: `margin-inline: a b` is start then end; a border's value goes to both.
+        _ if head == "border" => (vec![(start, 0), (end, 0)], tail),
+        _ if tail.is_empty() => (vec![(start, 0), (end, 1)], ""),
+        _ => return None,
+    };
+    let phys = |side: &str| match head {
+        "inset" => side.to_string(),
+        _ if tail.is_empty() => format!("{head}-{side}"),
+        _ => format!("{head}-{side}-{tail}"),
+    };
+    Some(sides.into_iter().map(|(side, k)| (phys(side), k)).collect())
+}
+
 /// Applies one declaration to `s` (whose inherited values come from `parent`).
 fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
+    if let Some(targets) = logical(&d.name) {
+        let parts = split_spaces(d.value.trim());
+        let two = targets.iter().any(|t| t.1 == 1);
+        for (name, k) in targets {
+            let value = if two { parts.get(k).or(parts.first()).cloned().unwrap_or_default() } else { d.value.clone() };
+            apply(s, &Decl { name, value, important: d.important }, parent, rem);
+        }
+        return;
+    }
     let v = d.value.trim();
     let lower = v.to_ascii_lowercase();
     if lower == "inherit" {
@@ -1347,16 +1596,27 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
             }
         }
         "vertical-align" => {
+            s.raise = 0.0;
             s.valign = match lower.as_str() {
-                "super" | "text-top" | "top" => VAlign::Super,
-                "sub" | "text-bottom" | "bottom" => VAlign::Sub,
+                "super" => VAlign::Super,
+                "sub" => VAlign::Sub,
+                "top" => VAlign::Top,
+                "bottom" => VAlign::Bottom,
+                "text-top" => VAlign::TextTop,
+                "text-bottom" => VAlign::TextBottom,
                 "middle" => VAlign::Middle,
-                _ => VAlign::Baseline,
+                other => {
+                    // A length, or a percentage of the line height.
+                    if let Some(l) = len(other) {
+                        s.raise = l.resolve(s.line_height);
+                    }
+                    VAlign::Baseline
+                }
             }
         }
         "border-radius" => {
             if let Some(l) = split_spaces(v).first().and_then(|p| len(p)) {
-                s.radius = l.resolve(0.0);
+                s.radius = l;
             }
         }
         "height" => {
@@ -1365,12 +1625,48 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
             }
         }
         "width" => {
-            if let Some(l) = len(v) {
-                s.width = l
+            let kw = lower.trim_start_matches("-moz-").trim_start_matches("-webkit-");
+            let kw = if kw == "min-content" {
+                Some(Sizing::Min)
+            } else if kw == "max-content" {
+                Some(Sizing::Max)
+            } else if kw == "fit-content" {
+                Some(Sizing::Fit)
+            } else {
+                None
+            };
+            if kw.is_some() {
+                s.width = Len::Auto;
+                s.width_kw = kw;
+            } else if let Some(l) = len(v) {
+                s.width = l;
+                s.width_kw = None;
             }
         }
+        "contain" => {
+            let words: Vec<&str> = lower.split_whitespace().collect();
+            s.contain_size = words.iter().any(|w| matches!(*w, "size" | "strict"));
+        }
+        "contain-intrinsic-size" => {
+            let px = |p: &str| match len(p) {
+                Some(Len::Px(v)) if v >= 0.0 => Some(Some(v)),
+                _ if p == "none" => Some(None),
+                _ => None,
+            };
+            let parts: Vec<&str> = lower.split_whitespace().filter(|p| *p != "auto").collect();
+            let vals: Option<Vec<Option<f32>>> = parts.iter().map(|p| px(p)).collect();
+            match vals.as_deref() {
+                Some([a]) => s.intrinsic_size = (*a, *a),
+                Some([a, b]) => s.intrinsic_size = (*a, *b),
+                _ => {}
+            }
+        }
+        // (Negative sizes are invalid: the declaration is ignored.)
         "max-width" => {
-            s.max_width = if lower == "none" { Len::Auto } else { len(v).unwrap_or(s.max_width) };
+            s.max_width = if lower == "none" { Len::Auto } else { len(v).filter(|l| !negative(*l)).unwrap_or(s.max_width) };
+        }
+        "max-height" => {
+            s.max_height = if lower == "none" { Len::Auto } else { len(v).filter(|l| !negative(*l)).unwrap_or(s.max_height) };
         }
         "margin" | "padding" => {
             let vals: Option<Vec<Len>> = split_spaces(v).iter().map(|p| len(p)).collect();
@@ -1438,6 +1734,10 @@ fn inherit_one(s: &mut Style, name: &str, p: &Style) {
         "font-family" => s.family = p.family,
         "line-height" => s.line_height = p.line_height,
         "background-color" | "background" => s.background = p.background,
+        "vertical-align" => {
+            s.valign = p.valign;
+            s.raise = p.raise;
+        }
         _ => {}
     }
 }
@@ -1811,6 +2111,10 @@ fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, St
         if s.clipped && matches!(s.position, Position::Absolute | Position::Fixed) {
             s.display = Display::None; // visually hidden: for screen readers only
         }
+        // Flex and grid items are blocks (so vertical-align and the like don't apply).
+        if matches!(parent.display, Display::Flex | Display::Grid) && matches!(s.display, Display::Inline | Display::InlineBlock) {
+            s.display = Display::Block;
+        }
         // HTML's presentational hints that still matter.
         if tag == "font" {
             if let Some(c) = attr(attrs, "color").and_then(parse_color) {
@@ -1823,12 +2127,22 @@ fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, St
         if tag == "html" {
             rem = s.font_size;
         }
-        if matches!(tag, "td" | "th" | "table" | "col" | "img" | "hr" | "iframe" | "canvas" | "video") && s.width == Len::Auto {
+        // (A canvas's width and height are its bitmap's size, not CSS sizes.)
+        if matches!(tag, "td" | "th" | "table" | "col" | "img" | "hr" | "iframe" | "video") && s.width == Len::Auto {
             if let Some(w) = attr(attrs, "width").map(str::trim) {
                 if let Some(p) = w.strip_suffix('%').and_then(|p| p.trim().parse::<f32>().ok()) {
                     s.width = Len::Pct(p);
                 } else if let Ok(px) = w.trim_end_matches("px").parse::<f32>() {
                     s.width = Len::Px(px);
+                }
+            }
+        }
+        if matches!(tag, "td" | "th" | "tr" | "table" | "img" | "iframe" | "video") && s.height == Len::Auto {
+            if let Some(h) = attr(attrs, "height").map(str::trim) {
+                if let Some(p) = h.strip_suffix('%').and_then(|p| p.trim().parse::<f32>().ok()) {
+                    s.height = Len::Pct(p);
+                } else if let Ok(px) = h.trim_end_matches("px").parse::<f32>() {
+                    s.height = Len::Px(px);
                 }
             }
         }
@@ -1872,6 +2186,7 @@ fn element_style(&self, dom: &Dom, id: NodeId, tag: &str, attrs: &[(Box<str>, St
         let own = match s.valign {
             VAlign::Super => -0.4 * parent.font_size,
             VAlign::Sub => 0.2 * parent.font_size,
+            VAlign::Baseline => -s.raise,
             _ => 0.0,
         };
         s.shift = if s.display == Display::Inline { inherited_shift + own } else { 0.0 };
@@ -2029,5 +2344,19 @@ mod tests {
         let b = style_of("<p>x</p>", "p { border-left: 4px solid #ccc; border-top: none }", "p");
         assert_eq!((b.border_width, b.border_color[3]), ([0.0, 0.0, 0.0, 4.0], Color::rgb(204, 204, 204)));
         assert_eq!(style_of("<p>x</p>", "<style>", "p").display, Display::Block);
+    }
+
+    #[test]
+    fn colours_logical_properties_and_sizing_keywords() {
+        assert_eq!(parse_color("Coral"), Some(Color::rgb(255, 127, 80)));
+        assert_eq!(parse_color("rebeccapurple"), Some(Color::rgb(102, 51, 153)));
+        assert_eq!(parse_color("hsl(120, 100%, 25%)"), Some(Color::rgb(0, 128, 0)));
+        assert_eq!(parse_color("hsl(0.5turn 100% 50% / 50%)").map(|c| (c.r, c.g, c.b, c.a)), Some((0, 255, 255, 128)));
+        let p = style_of("<p>x</p>", "p { margin-inline: 1px 2px; padding-block-start: 3px; inline-size: 50px; border-inline-start: 4px solid red }", "p");
+        assert_eq!((p.margin[3], p.margin[1], p.padding[0], p.width), (Len::Px(1.0), Len::Px(2.0), Len::Px(3.0), Len::Px(50.0)));
+        assert_eq!((p.border_width[3], p.border_color[3]), (4.0, Color::rgb(255, 0, 0)));
+        let c = style_of("<p>x</p>", "p { color: hsl(120/**/100%/**/25%); width: fit-content; contain: size; contain-intrinsic-size: 10px 20px }", "p");
+        assert_eq!((c.color, c.width, c.width_kw), (Color::rgb(0, 128, 0), Len::Auto, Some(Sizing::Fit)), "a comment separates tokens");
+        assert_eq!((c.contain_size, c.intrinsic_size), (true, (Some(10.0), Some(20.0))));
     }
 }

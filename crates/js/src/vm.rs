@@ -1312,6 +1312,11 @@ impl Interp {
         if self.has_property(&self.global_obj.clone(), k) {
             return self.get(&g, k);
         }
+        if let Some(f) = self.global_fallback.clone() {
+            if let Some(v) = f(self, k) {
+                return Ok(v);
+            }
+        }
         self.throw("ReferenceError", &format!("{k} is not defined"))
     }
 

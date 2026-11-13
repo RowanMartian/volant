@@ -357,8 +357,8 @@ dom/nodes/post-connection-steps-shadow-tree.html	0
 dom/nodes/prepend-on-Document.html	2
 dom/nodes/processing-instruction-attributes.html	3
 dom/nodes/query-target-in-load-event.html	0
-dom/nodes/querySelector-empty-id.html	0
-dom/nodes/querySelector-id-nth-child.html	1
+dom/nodes/querySelector-empty-id.html	1
+dom/nodes/querySelector-id-nth-child.html	2
 dom/nodes/querySelector-mixed-case.html	0
 dom/nodes/remove-and-adopt-thcrash.html	0
 dom/nodes/remove-next-sibling-during-replace-with.html	0
@@ -736,7 +736,7 @@ html/dom/aria-attribute-reflection.html	41
 html/dom/aria-attribute-reflection.tentative.html	3
 html/dom/aria-element-reflection-disconnected.html	0
 html/dom/aria-element-reflection-labelledby.html	0
-html/dom/aria-element-reflection.html	1
+html/dom/aria-element-reflection.html	5
 html/dom/documents/dom-tree-accessors/Document.body.html	13
 html/dom/documents/dom-tree-accessors/Document.currentScript.html	5
 html/dom/documents/dom-tree-accessors/Document.getElementsByClassName-null-undef.html	1
@@ -854,7 +854,7 @@ html/dom/elements/the-innertext-and-outertext-properties/dynamic-getter.html	0
 html/dom/elements/the-innertext-and-outertext-properties/getter-first-letter-marker-multicol.html	0
 html/dom/elements/the-innertext-and-outertext-properties/getter.html	0
 html/dom/elements/the-innertext-and-outertext-properties/innertext-setter.html	88
-html/dom/elements/the-innertext-and-outertext-properties/innertext-whitespace-pre-line.html	0
+html/dom/elements/the-innertext-and-outertext-properties/innertext-whitespace-pre-line.html	1
 html/dom/elements/the-innertext-and-outertext-properties/innertext-with-white-spaces.html	27
 html/dom/elements/the-innertext-and-outertext-properties/multiple-text-nodes.window.html	0
 html/dom/elements/the-innertext-and-outertext-properties/outertext-setter.html	2
@@ -894,13 +894,13 @@ html/dom/render-blocking/element-render-blocking-002.html	0
 html/dom/render-blocking/element-render-blocking-003.html	1
 html/dom/render-blocking/element-render-blocking-004.html	0
 html/dom/render-blocking/element-render-blocking-005.html	0
-html/dom/render-blocking/element-render-blocking-006.html	0
+html/dom/render-blocking/element-render-blocking-006.html	1
 html/dom/render-blocking/element-render-blocking-007.html	0
-html/dom/render-blocking/element-render-blocking-008.html	0
+html/dom/render-blocking/element-render-blocking-008.html	1
 html/dom/render-blocking/element-render-blocking-009.html	0
 html/dom/render-blocking/element-render-blocking-010.html	0
-html/dom/render-blocking/element-render-blocking-011.html	0
-html/dom/render-blocking/element-render-blocking-012.html	0
+html/dom/render-blocking/element-render-blocking-011.html	1
+html/dom/render-blocking/element-render-blocking-012.html	1
 html/dom/render-blocking/element-render-blocking-013.html	0
 html/dom/render-blocking/element-render-blocking-014.html	0
 html/dom/render-blocking/element-render-blocking-015.html	0
@@ -915,7 +915,7 @@ html/dom/render-blocking/element-render-blocking-023.html	0
 html/dom/render-blocking/element-render-blocking-024.html	1
 html/dom/render-blocking/element-render-blocking-025.html	0
 html/dom/render-blocking/element-render-blocking-026.html	0
-html/dom/render-blocking/element-render-blocking-027.html	0
+html/dom/render-blocking/element-render-blocking-027.html	1
 html/dom/render-blocking/element-render-blocking-028.html	0
 html/dom/render-blocking/element-render-blocking-029.html	0
 html/dom/render-blocking/element-render-blocking-030.html	0

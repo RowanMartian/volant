@@ -393,6 +393,9 @@ pub struct Interp {
     /// The virtual clock, in ms since the page started.
     pub now: f64,
     pub timer_seq: u32,
+    /// Asked for a global name that isn't defined, before it's a ReferenceError
+    /// (a browser's window finds elements by id this way).
+    pub global_fallback: Option<Rc<dyn Fn(&mut Interp, &str) -> Option<Value>>>,
     /// Operand stacks to reuse (each run of the VM takes one).
     pub(crate) stack_pool: Vec<Vec<Value>>,
     /// JS frames active across all runs (a recursion limit independent of the native stack).
@@ -460,6 +463,7 @@ impl Interp {
             timers: Vec::new(),
             now: 0.0,
             timer_seq: 0,
+            global_fallback: None,
             stack_pool: Vec::new(),
             frames: 0,
             yielded: None,

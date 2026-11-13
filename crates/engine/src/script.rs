@@ -2162,6 +2162,17 @@ fn focus(i: &mut Interp, st: &S, n: Option<NodeId>) {
 // ------------------------------------------------------------------ the API
 
 fn install(i: &mut Interp, st: &S) {
+    // Named access: an element's id works as a global name (when nothing else has it).
+    {
+        let st = st.clone();
+        i.global_fallback = Some(Rc::new(move |i: &mut Interp, k: &str| {
+            let found = {
+                let s = st.borrow();
+                descendants(&s.dom, ROOT).into_iter().find(|&n| s.dom.attr(n, "id") == Some(k))
+            }?;
+            Some(wrap(i, &st, found))
+        }));
+    }
     let mk = |i: &Interp, proto: Option<Obj>| -> Obj {
         let o = i.obj(Kind::Plain);
         let Value::Obj(o) = o else { unreachable!() };

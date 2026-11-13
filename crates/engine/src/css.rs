@@ -127,14 +127,17 @@ pub struct Selector {
     pub specificity: (u16, u16, u16),
 }
 
-/// Removes `/* comments */`.
+/// Replaces `/* comments */` with a space, since a comment separates tokens.
 fn strip_comments(css: &str) -> String {
     let mut out = String::with_capacity(css.len());
     let mut rest = css;
     while let Some(i) = rest.find("/*") {
         out.push_str(&rest[..i]);
         match rest[i + 2..].find("*/") {
-            Some(j) => rest = &rest[i + 2 + j + 2..],
+            Some(j) => {
+                out.push(' ');
+                rest = &rest[i + 2 + j + 2..]
+            }
             None => return out,
         }
     }
