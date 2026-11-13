@@ -4,6 +4,44 @@
 //! advance widths (which the free Liberation fonts match).
 
 use crate::style::Family;
+use std::sync::Mutex;
+
+/// Web font families that are loaded and can be used, by lower-case name.
+static DECLARED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Numbers for (web font family, its fallback) pairs, for [`Family::Face`].
+static FACES: Mutex<Vec<(String, Family)>> = Mutex::new(Vec::new());
+
+/// A web font family is ready (its files are loaded): styles may use it now.
+pub fn declare_face(name: &str) {
+    let name = name.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
+    if let Ok(mut d) = DECLARED.lock() {
+        if !d.contains(&name) {
+            d.push(name);
+        }
+    }
+}
+
+pub fn is_declared(name: &str) -> bool {
+    DECLARED.lock().map(|d| d.iter().any(|n| n == name)).unwrap_or(false)
+}
+
+/// The [`Family`] for a web font family with this fallback.
+pub fn face(name: &str, fallback: Family) -> Family {
+    let Ok(mut faces) = FACES.lock() else { return fallback };
+    if let Some(i) = faces.iter().position(|(n, f)| n == name && *f == fallback) {
+        return Family::Face(i as u16);
+    }
+    if faces.len() >= u16::MAX as usize {
+        return fallback;
+    }
+    faces.push((name.to_string(), fallback));
+    Family::Face(faces.len() as u16 - 1)
+}
+
+/// A web font's family name (lower case) and fallback.
+pub fn face_info(i: u16) -> Option<(String, Family)> {
+    FACES.lock().ok()?.get(i as usize).cloned()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Font {
@@ -60,7 +98,7 @@ impl Fonts for ApproxFonts {
     fn width(&self, text: &str, font: &Font) -> f32 {
         let per_mille: u32 = text
             .chars()
-            .map(|c| match font.family {
+            .map(|c| match font.family.generic() {
                 Family::Mono => 600,
                 fam => {
                     let table = if fam == Family::Serif { &SERIF } else { &SANS };
@@ -74,7 +112,7 @@ impl Fonts for ApproxFonts {
                 }
             })
             .sum();
-        let bold = if font.bold() && font.family != Family::Mono { 1.06 } else { 1.0 };
+        let bold = if font.bold() && font.family.generic() != Family::Mono { 1.06 } else { 1.0 };
         per_mille as f32 / 1000.0 * font.size * bold
     }
 }

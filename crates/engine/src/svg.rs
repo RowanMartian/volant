@@ -44,10 +44,18 @@ pub fn to_svg(page: &Page) -> String {
                 ))
             }
             Item::Text { x, y, text, font, color, underline, strike, .. } => {
-                let family = match font.family {
-                    Family::Sans => "Liberation Sans, Arial, Helvetica, sans-serif",
+                let generic = match font.family.generic() {
                     Family::Serif => "Liberation Serif, Times New Roman, Times, serif",
                     Family::Mono => "Liberation Mono, Menlo, monospace",
+                    _ => "Liberation Sans, Arial, Helvetica, sans-serif",
+                };
+                let named;
+                let family = match font.family {
+                    Family::Face(i) => {
+                        named = format!("'{}', {generic}", crate::fonts::face_info(i).map(|(n, _)| n).unwrap_or_default().replace(['\'', '"', '<', '&'], ""));
+                        named.as_str()
+                    }
+                    _ => generic,
                 };
                 let mut deco = Vec::new();
                 if *underline {

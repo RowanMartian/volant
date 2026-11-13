@@ -302,6 +302,84 @@ fn parse_rules(css: &str, rules: &mut Vec<Rule>, media: &[String]) {
     }
 }
 
+/// An `@font-face` rule: a web font file for a family, weight range and slant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFace {
+    /// Lower case, unquoted.
+    pub family: String,
+    pub weight: (u16, u16),
+    pub italic: bool,
+    /// The `url()`s of its `src`, as written (relative to the style sheet), in order,
+    /// leaving out formats macOS can't use (Embedded OpenType, SVG fonts).
+    pub sources: Vec<String>,
+}
+
+/// The `@font-face` rules of a style sheet (including those inside `@media` and `@supports`).
+pub fn font_faces(css: &str) -> Vec<FontFace> {
+    fn walk(css: &str, out: &mut Vec<FontFace>) {
+        let b = css.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let Some(rel) = css[i..].find(['{', ';']) else { break };
+            let at = i + rel;
+            let prelude = css[i..at].trim();
+            if b[at] == b';' {
+                i = at + 1;
+                continue;
+            }
+            let end = block_end(b, at);
+            let body = &css[at + 1..end.saturating_sub(1).max(at + 1)];
+            let name = prelude.strip_prefix('@').map(|r| r.split(|c: char| c.is_whitespace()).next().unwrap_or("").to_ascii_lowercase());
+            match name.as_deref() {
+                Some("font-face") => {
+                    let decls = parse_declarations(body);
+                    let get = |n: &str| decls.iter().rev().find(|d| d.name == n).map(|d| d.value.as_str());
+                    let family = get("font-family").unwrap_or("").trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
+                    let weight = match get("font-weight").map(|w| w.trim().to_ascii_lowercase()) {
+                        None => (400, 400),
+                        Some(w) => {
+                            let one = |w: &str| match w {
+                                "normal" => Some(400),
+                                "bold" => Some(700),
+                                n => n.parse::<f32>().ok().map(|n| n.clamp(1.0, 1000.0) as u16),
+                            };
+                            let mut parts = w.split_whitespace();
+                            let a = parts.next().and_then(one).unwrap_or(400);
+                            (a, parts.next().and_then(one).unwrap_or(a))
+                        }
+                    };
+                    let italic = get("font-style").map(|s| s.contains("italic") || s.contains("oblique")).unwrap_or(false);
+                    let mut sources = Vec::new();
+                    for part in split_top(get("src").unwrap_or(""), b',') {
+                        let lower = part.to_ascii_lowercase();
+                        if lower.contains("embedded-opentype") || lower.contains("format(\"svg") || lower.contains("format('svg") || lower.contains(".eot") {
+                            continue;
+                        }
+                        if let Some(start) = lower.find("url(") {
+                            let rest = &part[start + 4..];
+                            if let Some(close) = rest.find(')') {
+                                let u = rest[..close].trim().trim_matches(|c| c == '"' || c == '\'');
+                                if !u.is_empty() {
+                                    sources.push(u.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if !family.is_empty() && !sources.is_empty() {
+                        out.push(FontFace { family, weight, italic, sources });
+                    }
+                }
+                Some("media" | "supports" | "layer") => walk(body, out),
+                _ => {}
+            }
+            i = end;
+        }
+    }
+    let mut out = Vec::new();
+    walk(&strip_comments(css), &mut out);
+    out
+}
+
 /// `color: red; margin: 0 auto !important` → declarations.
 pub fn parse_declarations(text: &str) -> Vec<Decl> {
     split_top(text, b';')

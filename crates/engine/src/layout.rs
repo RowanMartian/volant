@@ -80,9 +80,64 @@ pub struct Page {
     pub links: Vec<Link>,
     /// The boxes of elements and runs of text, for hit testing.
     pub hits: Vec<Hit>,
+    /// Boxes that move as the page scrolls (`position: fixed` and `sticky`),
+    /// drawn over the rest. Their items, hits and links are ranges of the lists above.
+    pub layers: Vec<Layer>,
+}
+
+/// A fixed or sticky box: what of the page it is, and how it moves with scrolling.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layer {
+    pub items: (usize, usize),
+    pub hits: (usize, usize),
+    pub links: (usize, usize),
+    pub kind: LayerKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayerKind {
+    /// Laid out at the top of the page; stays put in the window (at its `bottom` inset, if it has one instead of `top`).
+    Fixed { bottom: Option<f32>, y: f32, h: f32 },
+    /// Laid out in the flow at `y`; held at `top` (or `bottom`) from the window's edge
+    /// while its parent (`limit`, top and bottom) is in view.
+    Sticky { top: Option<f32>, bottom: Option<f32>, y: f32, h: f32, parent: NodeId, limit: (f32, f32) },
 }
 
 impl Page {
+    /// How far a layer moves down when the page is scrolled to `scroll_y` in a window `view_h` tall.
+    pub fn layer_offset(&self, l: &Layer, scroll_y: f32, view_h: f32) -> f32 {
+        match l.kind {
+            LayerKind::Fixed { bottom: None, .. } => scroll_y,
+            LayerKind::Fixed { bottom: Some(b), y, h } => scroll_y + view_h - b - h - y,
+            LayerKind::Sticky { top: Some(t), y, h, limit, .. } => (scroll_y + t - y).min(limit.1 - (y + h)).max(0.0),
+            LayerKind::Sticky { bottom: Some(b), y, h, limit, .. } => (scroll_y + view_h - b - (y + h)).max(limit.0 - y).min(0.0),
+            LayerKind::Sticky { .. } => 0.0,
+        }
+    }
+
+    /// The innermost node drawn at (x, y) of the page as it shows when scrolled to
+    /// `scroll_y` (fixed and sticky boxes first, as they're drawn on top).
+    pub fn hit_scrolled(&self, x: f32, y: f32, scroll_y: f32, view_h: f32) -> Option<NodeId> {
+        let smallest = |hs: &mut dyn Iterator<Item = (&Hit, f32)>| {
+            hs.filter(|(h, dy)| x >= h.x && x < h.x + h.w && y >= h.y + dy && y < h.y + dy + h.h)
+                .min_by(|a, b| (a.0.w * a.0.h).partial_cmp(&(b.0.w * b.0.h)).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(h, _)| h.node)
+        };
+        for l in self.layers.iter().rev() {
+            let dy = self.layer_offset(l, scroll_y, view_h);
+            if let Some(n) = smallest(&mut self.hits[l.hits.0..l.hits.1].iter().map(|h| (h, dy))) {
+                return Some(n);
+            }
+        }
+        let layered = |i: usize| self.layers.iter().any(|l| i >= l.hits.0 && i < l.hits.1);
+        smallest(&mut self.hits.iter().enumerate().filter(|(i, _)| !layered(*i)).map(|(_, h)| (h, 0.0)))
+    }
+
+    /// Is item `i` part of a fixed or sticky layer (drawn separately, on top)?
+    pub fn in_layer(&self, i: usize) -> bool {
+        self.layers.iter().any(|l| i >= l.items.0 && i < l.items.1)
+    }
+
     /// The innermost node drawn at (x, y): the smallest box containing the point.
     pub fn hit(&self, x: f32, y: f32) -> Option<NodeId> {
         self.hits
@@ -506,6 +561,8 @@ struct Ctx<'a> {
     /// Containing blocks for absolutely positioned boxes: (x, y, width) of each
     /// positioned ancestor's padding box, the viewport first.
     cbs: Vec<(f32, f32, f32)>,
+    layers: Vec<Layer>,
+    dom: &'a Dom,
 }
 
 fn font_of(s: &Style) -> Font {
@@ -953,6 +1010,7 @@ impl<'r> Ctx<'_> {
         }
         let n_under = under.len();
         self.items.splice(paint_at..paint_at, under);
+        self.layers_moved(paint_at, n_under);
         if positioned {
             self.cbs.pop();
         }
@@ -962,11 +1020,13 @@ impl<'r> Ctx<'_> {
             let (cx, cy) = (box_x + bw[3], y + bw[0]);
             let (cw, ch) = ((border_w - bw[1] - bw[3]).max(0.0), (height - bw[0] - bw[2]).max(0.0));
             self.items.insert(paint_at + n_under, Item::Clip { x: cx, y: cy, w: cw, h: ch, radius: s.radius });
+            self.layers_moved(paint_at + n_under, 1);
             self.items.push(Item::Unclip);
         }
         if s.opacity < 1.0 {
             if s.opacity <= 0.01 {
                 self.items.truncate(paint_at);
+                self.layers.retain(|l| l.items.0 < paint_at);
                 self.links.truncate(links_at);
             } else {
                 for it in &mut self.items[paint_at..] {
@@ -989,7 +1049,35 @@ impl<'r> Ctx<'_> {
         if dx != 0.0 || dy != 0.0 {
             self.shift(paint_at, links_at, hits_at, dx, dy);
         }
+        // position: sticky: it moves with scrolling, within its parent.
+        if s.position == Position::Sticky && (s.inset[0] != Len::Auto || s.inset[2] != Len::Auto) {
+            let inset = |i: usize| (s.inset[i] != Len::Auto).then(|| s.inset[i].resolve(cb_w));
+            let parent = self.dom.nodes.get(b.node as usize).map(|n| n.parent).unwrap_or(0);
+            let kind = LayerKind::Sticky { top: inset(0), bottom: if inset(0).is_none() { inset(2) } else { None }, y, h: height, parent, limit: (0.0, f32::MAX) };
+            self.add_layer(paint_at, hits_at, links_at, kind);
+        }
         height
+    }
+
+    /// Records a fixed or sticky layer over everything drawn since the given indices
+    /// (taking in any layers inside it).
+    fn add_layer(&mut self, items_at: usize, hits_at: usize, links_at: usize, kind: LayerKind) {
+        let (ni, nh, nl) = (self.items.len(), self.hits.len(), self.links.len());
+        if ni == items_at {
+            return;
+        }
+        self.layers.retain(|l| !(l.items.0 >= items_at && l.items.1 <= ni));
+        self.layers.push(Layer { items: (items_at, ni), hits: (hits_at, nh), links: (links_at, nl), kind });
+    }
+
+    /// `n` items were inserted at `at`: layers after it move along.
+    fn layers_moved(&mut self, at: usize, n: usize) {
+        for l in &mut self.layers {
+            if l.items.0 >= at {
+                l.items.0 += n;
+                l.items.1 += n;
+            }
+        }
     }
 
     /// Moves everything drawn since the given indices.
@@ -1010,6 +1098,12 @@ impl<'r> Ctx<'_> {
         for h in &mut self.hits[hits_at..] {
             h.x += dx;
             h.y += dy;
+        }
+        for l in &mut self.layers {
+            if l.items.0 >= items_at {
+                let (LayerKind::Sticky { y, .. } | LayerKind::Fixed { y, .. }) = &mut l.kind;
+                *y += dy;
+            }
         }
     }
 
@@ -1034,8 +1128,14 @@ impl<'r> Ctx<'_> {
         let x = left.map(|l| cx + l + ml).or(right.map(|r| cx + cw - r - mr - border_w)).unwrap_or(sx + ml);
         let y = top.map(|t| cy + t + mt).unwrap_or(sy + mt);
         let floats = std::mem::take(&mut self.floats);
-        self.block(b, x, y, border_w, Opts { width: Some(border_w), bfc: true, ..Default::default() });
+        let (items_at, hits_at, links_at) = (self.items.len(), self.hits.len(), self.links.len());
+        let h = self.block(b, x, y, border_w, Opts { width: Some(border_w), bfc: true, ..Default::default() });
         self.floats = floats;
+        // position: fixed stays where it is in the window as the page scrolls.
+        if st.position == Position::Fixed {
+            let bottom = (top.is_none()).then(|| (st.inset[2] != Len::Auto).then(|| st.inset[2].resolve(cw))).flatten();
+            self.add_layer(items_at, hits_at, links_at, LayerKind::Fixed { bottom, y, h });
+        }
     }
 
     /// The content width a table takes inside `avail`.
@@ -1058,6 +1158,7 @@ impl<'r> Ctx<'_> {
         let floats = self.floats.clone();
         let h = self.block(b, 0.0, 0.0, w, Opts { bfc: true, width: Some(w), ..Default::default() });
         self.items.truncate(ni);
+        self.layers.retain(|l| l.items.0 < ni);
         self.links.truncate(nl);
         self.hits.truncate(nh);
         self.floats = floats;
@@ -1829,12 +1930,24 @@ pub fn layout(dom: &Dom, styled: &css_style::Styled, width: f32, fonts: &dyn Fon
     let root = builder.block(0, 0);
     let mut all: Vec<Style> = styles.clone();
     all.extend(std::mem::take(&mut builder.anon));
-    let mut ctx = Ctx { styles: &all, fonts, images, hrefs: builder.hrefs, items: Vec::new(), links: Vec::new(), hits: Vec::new(), cache: HashMap::new(), floats: Vec::new(), cbs: vec![(0.0, 0.0, width)] };
+    let mut ctx = Ctx { styles: &all, fonts, images, hrefs: builder.hrefs, items: Vec::new(), links: Vec::new(), hits: Vec::new(), cache: HashMap::new(), floats: Vec::new(), cbs: vec![(0.0, 0.0, width)], layers: Vec::new(), dom };
     // The canvas takes the root's background, or else the body's.
     let bg_of = |tag: &str| dom.find(tag).map(|id| styles[id as usize].background).filter(|c| c.a > 0);
     let background = bg_of("html").or_else(|| bg_of("body")).unwrap_or(Color::rgb(255, 255, 255));
     let height = ctx.block(&root, 0.0, 0.0, width, Opts { bfc: true, ..Default::default() });
-    Page { width, height, background, items: ctx.items, links: ctx.links, hits: ctx.hits }
+    // A sticky box stays within its parent's box.
+    let mut layers = ctx.layers;
+    for l in &mut layers {
+        if let LayerKind::Sticky { parent, limit, .. } = &mut l.kind {
+            if let Some(p) = ctx.hits.iter().rev().find(|h| h.node == *parent) {
+                *limit = (p.y, p.y + p.h);
+            } else {
+                *limit = (0.0, height);
+            }
+        }
+    }
+    layers.sort_by_key(|l| l.items.0);
+    Page { width, height, background, items: ctx.items, links: ctx.links, hits: ctx.hits, layers }
 }
 
 #[cfg(test)]
@@ -1856,6 +1969,38 @@ mod tests {
         let dom = html::parse(&html);
         let styled = style::compute(&dom, &[css.to_string()], &crate::css::Env { width, dark: false });
         layout(&dom, &styled, width, &ApproxFonts, &FixedImages)
+    }
+
+    #[test]
+    fn fixed_and_sticky_layers() {
+        let p = page(
+            "<header class=bar>Top bar</header><section class=s><h2 class=st>Heading</h2><p class=tall>a</p></section><p class=tall>b</p><div class=banner>Cookies</div>",
+            "body { margin: 0 } .bar { position: fixed; top: 0; left: 0; right: 0; height: 40px; background: #eee }\
+             .s { padding: 0 } .st { position: sticky; top: 10px; margin: 0; height: 30px; background: #ddd } .tall { height: 1000px; margin: 0 }\
+             .banner { position: fixed; bottom: 0; left: 0; height: 50px; background: #ccc }",
+            800.0,
+        );
+        assert_eq!(p.layers.len(), 3, "{:?}", p.layers);
+        let kinds: Vec<&LayerKind> = p.layers.iter().map(|l| &l.kind).collect();
+        let bar = p.layers.iter().find(|l| matches!(l.kind, LayerKind::Fixed { bottom: None, .. })).unwrap();
+        let banner = p.layers.iter().find(|l| matches!(l.kind, LayerKind::Fixed { bottom: Some(_), .. })).unwrap();
+        let sticky = p.layers.iter().find(|l| matches!(l.kind, LayerKind::Sticky { .. })).expect("sticky");
+        // The bar follows the window; the banner sits at its bottom edge.
+        assert_eq!(p.layer_offset(bar, 500.0, 600.0), 500.0);
+        let LayerKind::Fixed { y, h, .. } = banner.kind else { unreachable!() };
+        assert_eq!(y + p.layer_offset(banner, 500.0, 600.0) + h, 1100.0, "{kinds:?}");
+        // The heading sticks 10px from the top while its section is in view, then leaves with it.
+        let LayerKind::Sticky { y, h, limit, .. } = sticky.kind else { unreachable!() };
+        assert_eq!((y, h), (0.0, 30.0));
+        assert_eq!(p.layer_offset(sticky, 0.0, 600.0), 10.0);
+        assert_eq!(p.layer_offset(sticky, 400.0, 600.0), 410.0);
+        assert_eq!(p.layer_offset(sticky, 2000.0, 600.0), limit.1 - 30.0);
+        // Its items are drawn as a layer, and clicks find it where it shows.
+        assert!(p.in_layer(sticky.items.0));
+        let at = p.hit_scrolled(5.0, 400.0 + 15.0, 400.0, 600.0);
+        assert!(at.is_some() && p.hits[sticky.hits.0..sticky.hits.1].iter().any(|h| Some(h.node) == at), "{at:?}");
+        // Without the layers, that point is the tall paragraph's.
+        assert!(!p.hits[sticky.hits.0..sticky.hits.1].iter().any(|h| Some(h.node) == p.hit(5.0, 415.0)));
     }
 
     fn texts(p: &Page) -> Vec<(String, f32, f32)> {

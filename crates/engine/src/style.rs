@@ -68,6 +68,8 @@ pub enum Position {
     Relative,
     Absolute,
     Fixed,
+    /// In the flow, but held at its `top` (or `bottom`) inset while its parent scrolls past.
+    Sticky,
 }
 
 /// One `grid-template-columns` track.
@@ -124,6 +126,18 @@ pub enum Family {
     Sans,
     Serif,
     Mono,
+    /// A page's web font (`@font-face`), by its number in [`crate::fonts::face`]'s table.
+    Face(u16),
+}
+
+impl Family {
+    /// Sans, Serif or Mono: a web font's fallback, or the family itself.
+    pub fn generic(self) -> Family {
+        match self {
+            Family::Face(i) => crate::fonts::face_info(i).map(|(_, f)| f).unwrap_or(Family::Sans),
+            f => f,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -687,8 +701,14 @@ fn content_text(v: &str, attrs: &[(Box<str>, String)]) -> Option<String> {
 }
 
 fn family_of(v: &str) -> Option<Family> {
-    for f in css_split_commas(v) {
+    let names = css_split_commas(v);
+    for (k, f) in names.iter().enumerate() {
         let f = f.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
+        // A web font the page loaded: it, with the rest of the list as its fallback.
+        if crate::fonts::is_declared(&f) {
+            let fallback = family_of(&names[k + 1..].join(",")).map(Family::generic).unwrap_or(Family::Sans);
+            return Some(crate::fonts::face(&f, fallback));
+        }
         if f.contains("mono") || ["courier", "courier new", "menlo", "monaco", "consolas", "sf mono", "ui-monospace"].contains(&f.as_str()) {
             return Some(Family::Mono);
         }
@@ -1213,7 +1233,8 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         }
         "position" => {
             s.position = match lower.as_str() {
-                "relative" | "sticky" | "-webkit-sticky" => Position::Relative,
+                "relative" => Position::Relative,
+                "sticky" | "-webkit-sticky" => Position::Sticky,
                 "absolute" => Position::Absolute,
                 "fixed" => Position::Fixed,
                 _ => Position::Static,
@@ -1763,6 +1784,25 @@ mod tests {
         let styled = compute(&dom, &[css.to_string()], &Env::default());
         let id = dom.find(tag).unwrap();
         styled.styles[id as usize].clone()
+    }
+
+    #[test]
+    fn web_fonts() {
+        let css = "@font-face { font-family: 'Brand Sans'; src: url(a.eot); src: url(/f/brand.woff2) format('woff2'), url(/f/brand.eot) format('embedded-opentype'), url(\"/f/brand.ttf\"); font-weight: 300 700 }\
+                   @media screen { @font-face { font-family: Brand Sans; font-style: italic; src: url(i.woff) } }\
+                   p { font-family: 'Brand Sans', Georgia, serif } h1 { font-family: \"Not Loaded\", monospace }";
+        let faces = crate::css::font_faces(css);
+        assert_eq!(faces.len(), 2);
+        assert_eq!((faces[0].family.as_str(), faces[0].weight, faces[0].italic), ("brand sans", (300, 700), false));
+        assert_eq!(faces[0].sources, vec!["/f/brand.woff2", "/f/brand.ttf"]);
+        assert!(faces[1].italic);
+        // Until its files load, the family falls back; then it's used, with its fallback kept.
+        assert_eq!(style_of("<p>x</p>", css, "p").family, Family::Serif);
+        crate::fonts::declare_face("Brand Sans");
+        let f = style_of("<p>x</p>", css, "p").family;
+        assert!(matches!(f, Family::Face(_)) && f.generic() == Family::Serif, "{f:?}");
+        assert_eq!(crate::fonts::face_info(match f { Family::Face(i) => i, _ => 0 }).map(|(n, _)| n).as_deref(), Some("brand sans"));
+        assert_eq!(style_of("<h1>x</h1>", css, "h1").family, Family::Mono);
     }
 
     #[test]

@@ -218,12 +218,78 @@ type FontKey = (Family, u32, u16, bool);
 
 thread_local! {
     static NS_FONTS: RefCell<HashMap<FontKey, Retained<NSFont>>> = RefCell::new(HashMap::new());
+    /// Pages' web fonts, by lower-case family: (weight range, italic, the font).
+    static WEB_FONTS: RefCell<HashMap<String, Vec<(u16, u16, bool, Retained<objc2_app_kit::NSFontDescriptor>)>>> = RefCell::new(HashMap::new());
+}
+
+#[link(name = "CoreText", kind = "framework")]
+extern "C" {
+    /// Takes a CFData (TrueType, OpenType, WOFF 2) and returns a +1 CTFontDescriptor, or null.
+    fn CTFontManagerCreateFontDescriptorFromData(data: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+/// The most web font files one page loads.
+const MAX_FACES: usize = 16;
+
+/// A downloaded web font, ready to register on the main thread.
+struct FaceData {
+    family: String,
+    weight: (u16, u16),
+    italic: bool,
+    bytes: Vec<u8>,
+}
+
+/// Web fonts arrived: they're registered and the page is laid out again with them.
+fn fonts_arrived(b: &mut Browser, faces: Vec<FaceData>) {
+    let mut added = 0;
+    for f in faces {
+        let data = NSData::with_bytes(&f.bytes);
+        let raw = unsafe { CTFontManagerCreateFontDescriptorFromData(Retained::as_ptr(&data) as *const std::ffi::c_void) };
+        // CTFontDescriptor is toll-free bridged to NSFontDescriptor.
+        let Some(desc) = (unsafe { Retained::from_raw(raw as *mut objc2_app_kit::NSFontDescriptor) }) else {
+            eprintln!("engine: couldn't use the web font {} ({} KB)", f.family, f.bytes.len() / 1024);
+            continue;
+        };
+        WEB_FONTS.with(|w| w.borrow_mut().entry(f.family.clone()).or_default().push((f.weight.0, f.weight.1, f.italic, desc)));
+        volant_engine::fonts::declare_face(&f.family);
+        added += 1;
+    }
+    if added == 0 {
+        return;
+    }
+    NS_FONTS.with(|c| c.borrow_mut().clear());
+    if let Ok(mut e) = b.engine.0.try_borrow_mut() {
+        e.laid = None;
+    }
+    sync(b);
+}
+
+/// The registered web font closest to `f` (its weight within the face's range, or nearest; its slant).
+fn web_font(f: &Font) -> Option<Retained<NSFont>> {
+    let Family::Face(i) = f.family else { return None };
+    let (name, _) = volant_engine::fonts::face_info(i)?;
+    WEB_FONTS.with(|w| {
+        let w = w.borrow();
+        let faces = w.get(&name)?;
+        let distance = |(lo, hi, italic, _): &&(u16, u16, bool, Retained<objc2_app_kit::NSFontDescriptor>)| {
+            let off = if f.weight < *lo { lo - f.weight } else { f.weight.saturating_sub(*hi) };
+            off as u32 + if *italic != f.italic { 10_000 } else { 0 }
+        };
+        let best = faces.iter().min_by_key(distance)?;
+        NSFont::fontWithDescriptor_size(&best.3, f.size as f64)
+    })
 }
 
 fn ns_font(f: &Font) -> Retained<NSFont> {
     NS_FONTS.with(|cache| {
         if let Some(font) = cache.borrow().get(&f.key()) {
             return font.clone();
+        }
+        if let Family::Face(_) = f.family {
+            // The page's own font, or (until it loads) its fallback.
+            let font = web_font(f).unwrap_or_else(|| ns_font(&Font { family: f.family.generic(), ..*f }));
+            cache.borrow_mut().insert(f.key(), font.clone());
+            return font;
         }
         let size = f.size as f64;
         let weight = unsafe {
@@ -346,7 +412,8 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, dirty: NSRect) {
             if let Some(page) = self.ivars().page.borrow().as_ref() {
-                paint(page, dirty, &self.ivars().images.borrow(), &self.ivars().canvases.borrow(), &self.ivars().hits.borrow(), &self.ivars().sel_areas.borrow());
+                let view = self.visibleRect();
+                paint(page, dirty, (view.origin.y, view.size.height), &self.ivars().images.borrow(), &self.ivars().canvases.borrow(), &self.ivars().hits.borrow(), &self.ivars().sel_areas.borrow());
             }
         }
 
@@ -394,7 +461,7 @@ define_class!(
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
             if self.ivars().live.get() {
                 // The page's own scripts decide what a click does (links included).
-                let node = self.ivars().page.borrow().as_ref().and_then(|page| page.hit(p.x as f32, p.y as f32));
+                let node = self.ivars().page.borrow().as_ref().and_then(|page| self.hit(page, p));
                 let target = node.and_then(|n| self.ivars().map.borrow().get(n as usize).copied());
                 if let Some(t) = target {
                     with(move |b| send(b, Cmd::Click(t)));
@@ -494,7 +561,7 @@ define_class!(
                 return;
             }
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
-            let node = self.ivars().page.borrow().as_ref().and_then(|page| page.hit(p.x as f32, p.y as f32));
+            let node = self.ivars().page.borrow().as_ref().and_then(|page| self.hit(page, p));
             let target = node.and_then(|n| self.ivars().map.borrow().get(n as usize).copied());
             if target != self.ivars().hovered.get() {
                 self.ivars().hovered.set(target);
@@ -580,6 +647,12 @@ impl EngineView {
         self.setNeedsDisplay(true);
     }
 
+    /// The node under a point, with fixed and sticky boxes where scrolling has put them.
+    fn hit(&self, page: &Page, p: NSPoint) -> Option<volant_core::html::NodeId> {
+        let view = self.visibleRect();
+        page.hit_scrolled(p.x as f32, p.y as f32, view.origin.y as f32, view.size.height as f32)
+    }
+
     /// Space, arrows, Page Up/Down, Home and End scroll the article.
     fn scroll_key(&self, e: &NSEvent) -> bool {
         let Some(scroll) = self.enclosingScrollView() else { return false };
@@ -614,11 +687,42 @@ fn rounded(r: NSRect, radius: f64) -> Retained<NSBezierPath> {
     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, radius, radius)
 }
 
-/// Draws the part of the page inside `dirty`.
-fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>, canvases: &HashMap<String, std::sync::Arc<volant_engine::canvas::Canvas>>, hits: &(Vec<NSRect>, usize), selection: &[NSRect]) {
+/// Draws the part of the page inside `dirty`; `view` is the visible part's top and
+/// height, where fixed and sticky boxes are drawn.
+fn paint(page: &Page, dirty: NSRect, view: (f64, f64), images: &HashMap<String, Retained<NSImage>>, canvases: &HashMap<String, std::sync::Arc<volant_engine::canvas::Canvas>>, hits: &(Vec<NSRect>, usize), selection: &[NSRect]) {
     ns_color(page.background).setFill();
     NSBezierPath::fillRect(dirty);
-    for item in &page.items {
+    let mut skip = page.layers.iter().map(|l| l.items).collect::<Vec<_>>();
+    skip.sort();
+    paint_items(page, 0..page.items.len(), &skip, dirty, images, canvases);
+    // Fixed and sticky boxes, on top, moved to where scrolling puts them.
+    for l in &page.layers {
+        let dy = page.layer_offset(l, view.0 as f32, view.1 as f32) as f64;
+        NSGraphicsContext::saveGraphicsState_class();
+        let t = objc2_foundation::NSAffineTransform::transform();
+        t.translateXBy_yBy(0.0, dy);
+        objc2_app_kit::NSAffineTransformNSAppKitAdditions::concat(&*t);
+        let shifted = NSRect::new(NSPoint::new(dirty.origin.x, dirty.origin.y - dy), dirty.size);
+        paint_items(page, l.items.0..l.items.1, &[], shifted, images, canvases);
+        NSGraphicsContext::restoreGraphicsState_class();
+    }
+    paint_marks(dirty, hits, selection);
+}
+
+/// Draws `range` of the page's items, leaving out those in `skip` (sorted ranges).
+fn paint_items(page: &Page, range: std::ops::Range<usize>, skip: &[(usize, usize)], dirty: NSRect, images: &HashMap<String, Retained<NSImage>>, canvases: &HashMap<String, std::sync::Arc<volant_engine::canvas::Canvas>>) {
+    let mut i = range.start;
+    let mut next = 0;
+    while i < range.end {
+        while next < skip.len() && skip[next].1 <= i {
+            next += 1;
+        }
+        if next < skip.len() && skip[next].0 <= i {
+            i = skip[next].1;
+            continue;
+        }
+        let item = &page.items[i];
+        i += 1;
         match item {
             Item::Clip { x, y, w, h, radius } => {
                 // overflow: what follows is clipped until the matching Unclip.
@@ -675,6 +779,10 @@ fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>
             }
         }
     }
+}
+
+/// The selection and find-on-page matches, over the page.
+fn paint_marks(dirty: NSRect, hits: &(Vec<NSRect>, usize), selection: &[NSRect]) {
     // The selection, in the system's highlight colour.
     if !selection.is_empty() {
         NSColor::selectedTextBackgroundColor().colorWithAlphaComponent(0.55).setFill();
@@ -826,6 +934,18 @@ pub fn sync(b: &Browser) {
         scroll.setScrollerStyle(NSScrollerStyle::Overlay);
         let view = EngineView::new(mtm);
         scroll.setDocumentView(Some(&view));
+        // Fixed and sticky boxes move against the page as it scrolls: redraw them.
+        let clip = scroll.contentView();
+        clip.setPostsBoundsChangedNotifications(true);
+        let redraw = view.clone();
+        let block = block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+            if redraw.ivars().page.borrow().as_ref().map(|p| !p.layers.is_empty()).unwrap_or(false) {
+                redraw.setNeedsDisplayInRect(redraw.visibleRect());
+            }
+        });
+        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+        let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(objc2_app_kit::NSViewBoundsDidChangeNotification), Some(&clip), None, &block) };
+        std::mem::forget(token);
         e.scroll = Some(scroll);
         e.view = Some(view);
     }
@@ -1206,8 +1326,14 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
     let mut frozen = false;
     // Simple Page judges the page a moment after its scripts ran (they may still be fetching).
     let mut judge_at = judge.then(|| std::time::Instant::now() + std::time::Duration::from_millis(1500));
-    let publish = |rt: &mut script::Runtime, sheets: &mut Vec<(String, String)>| {
+    // Web fonts the page's style sheets ask for: (the face, the address its urls are relative to).
+    let mut faces: Vec<(volant_engine::css::FontFace, String)> = Vec::new();
+    let mut faces_seen: std::collections::HashSet<(String, u16, bool)> = Default::default();
+    let publish = |rt: &mut script::Runtime, sheets: &mut Vec<(String, String)>, faces: &mut Vec<(volant_engine::css::FontFace, String)>| {
         let snap = rt.snapshot();
+        for text in volant_engine::style_sheets(&snap.dom) {
+            faces.extend(volant_engine::css::font_faces(&text).into_iter().map(|f| (f, snap.url.clone())));
+        }
         // Linked style sheets, fetched once each.
         let mut texts = Vec::new();
         for (href, media) in script::stylesheet_links(&snap.dom, &snap.url) {
@@ -1219,6 +1345,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
                         _ => String::new(),
                     };
                     sheets.push((href.clone(), t.clone()));
+                    faces.extend(volant_engine::css::font_faces(&t).into_iter().map(|f| (f, href.clone())));
                     t
                 }
             };
@@ -1228,12 +1355,47 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
         let anchor = rt.take_anchor_scroll();
         super::on_main(move || with(move |b| arrived(b, serial, tab, snap, texts, focused, anchor)));
     };
+    // Fetches new web fonts on a thread of their own, so the page isn't held up.
+    let mut fonts_left = MAX_FACES;
+    let mut load_fonts = |faces: &mut Vec<(volant_engine::css::FontFace, String)>, page: &str| {
+        let mut batch = Vec::new();
+        for (f, base) in faces.drain(..) {
+            if fonts_left == 0 || !faces_seen.insert((f.family.clone(), f.weight.0, f.italic)) {
+                continue;
+            }
+            fonts_left -= 1;
+            batch.push((f, base));
+        }
+        if batch.is_empty() {
+            return;
+        }
+        let page = page.to_string();
+        let _ = std::thread::Builder::new().name("volant-fonts".into()).spawn(move || {
+            let mut out = Vec::new();
+            for (f, base) in batch {
+                for src in &f.sources {
+                    let abs = script::resolve_url(&base, src);
+                    let Some(r) = script::Host::get_for(&NetHost, &abs, &page).filter(|r| r.success() && r.body.len() <= 4 << 20) else { continue };
+                    let bytes = if volant_core::woff::is_woff(&r.body) { volant_core::woff::to_sfnt(&r.body, 8 << 20) } else { Some(r.body) };
+                    if let Some(bytes) = bytes {
+                        out.push(FaceData { family: f.family.clone(), weight: f.weight, italic: f.italic, bytes });
+                        break;
+                    }
+                }
+            }
+            if !out.is_empty() {
+                super::on_main(move || with(move |b| fonts_arrived(b, out)));
+            }
+        });
+    };
     // First paint: the page as served, before its scripts.
-    publish(&mut rt, &mut sheets);
+    publish(&mut rt, &mut sheets, &mut faces);
+    load_fonts(&mut faces, &url);
     rt.run_scripts();
     eprintln!("engine: ran {url}'s scripts in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
     shown = shown.max(rt.generation());
-    publish(&mut rt, &mut sheets);
+    publish(&mut rt, &mut sheets, &mut faces);
+    load_fonts(&mut faces, &url);
     loop {
         for line in rt.take_console() {
             if line.starts_with("Uncaught ") {
@@ -1313,7 +1475,8 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
         }
         if rt.generation() != shown {
             shown = rt.generation();
-            publish(&mut rt, &mut sheets);
+            publish(&mut rt, &mut sheets, &mut faces);
+            load_fonts(&mut faces, &url);
         }
         // A click or key opened a `<select>`: its menu is native.
         if let Some((select, items)) = rt.take_menu() {
