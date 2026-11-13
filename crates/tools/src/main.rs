@@ -28,11 +28,13 @@ use volant_core::{hash, macho, zip};
 struct CurlHost;
 
 impl volant_engine::script::Host for CurlHost {
-    fn fetch(&self, method: &str, url: &str, body: Option<&str>) -> Option<(u16, String, Vec<u8>)> {
+    fn request(&self, req: &volant_engine::script::Request) -> Option<volant_engine::script::Reply> {
+        use volant_engine::script::Reply;
+        let (method, url) = (req.method, req.url);
         if let Some(path) = url.strip_prefix("file://") {
             // Local files, for testing pages offline.
             let path = path.split(['?', '#']).next().unwrap_or(path);
-            return std::fs::read(path).ok().map(|b| (200, String::new(), b));
+            return std::fs::read(path).ok().map(|b| Reply::ok(200, "", b));
         }
         if !url.starts_with("http") {
             return None;
@@ -49,15 +51,24 @@ impl volant_engine::script::Host for CurlHost {
                 let nl = b.iter().position(|&x| x == b'\n')?;
                 let head = String::from_utf8_lossy(&b[..nl]).to_string();
                 let (code, ty) = head.split_once(' ').unwrap_or((&head, ""));
-                return Some((code.parse().ok()?, ty.to_string(), b[nl + 1..].to_vec()));
+                return Some(Reply::ok(code.parse().ok()?, ty, b[nl + 1..].to_vec()));
             }
         }
         let mut cmd = std::process::Command::new("curl");
         cmd.args(["-sL", "--max-time", "20", "-X", method, "-w", "\n%{http_code} %{content_type}", url]);
-        if let Some(b) = body {
-            cmd.args(["--data-binary", b]);
+        for (k, v) in req.headers {
+            cmd.args(["-H", &format!("{k}: {v}")]);
         }
-        let out = cmd.output().ok()?;
+        let out = match req.body {
+            Some(b) => {
+                use std::io::Write;
+                cmd.args(["--data-binary", "@-"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
+                let mut child = cmd.spawn().ok()?;
+                child.stdin.take()?.write_all(b).ok()?;
+                child.wait_with_output().ok()?
+            }
+            None => cmd.output().ok()?,
+        };
         let mut body = out.stdout;
         let nl = body.iter().rposition(|&b| b == b'\n')?;
         let tail = String::from_utf8_lossy(&body[nl + 1..]).to_string();
@@ -74,7 +85,7 @@ impl volant_engine::script::Host for CurlHost {
             rec.extend_from_slice(&body);
             let _ = std::fs::write(c, rec);
         }
-        Some((code.parse().ok()?, ty.to_string(), body))
+        Some(Reply::ok(code.parse().ok()?, ty, body))
     }
 }
 
@@ -207,8 +218,8 @@ fn run(args: &[String]) -> Result<(), String> {
                     // Linked style sheets, fetched too (unless given with --css).
                     if !args.iter().any(|a| a == "--css") {
                         for (href, media) in script::stylesheet_links(&snap.dom, &snap.url) {
-                            if let Some((200..=299, _, b)) = host.fetch("GET", &href, None) {
-                                let text = String::from_utf8_lossy(&b).into_owned();
+                            if let Some(r) = host.get(&href).filter(|r| r.success()) {
+                                let text = String::from_utf8_lossy(&r.body).into_owned();
                                 sheets.push(if media.is_empty() || media == "all" { text } else { format!("@media {media} {{\n{text}\n}}") });
                             }
                         }

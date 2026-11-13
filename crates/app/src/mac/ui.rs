@@ -501,9 +501,17 @@ pub fn update_chrome(b: &Browser) {
     views::recolor(&ui.address_text, if dim { t.text3 } else { t.text });
     ui.address_icon.setImage(symbol(icon, 11.0, Weight::Semibold).as_deref());
     views::tint(&ui.address_icon, if dim { t.text3 } else { t.text2 });
-    ui.back.set_enabled(web.map(|w| unsafe { w.web.canGoBack() }).unwrap_or(false));
-    ui.forward.set_enabled(web.map(|w| unsafe { w.web.canGoForward() }).unwrap_or(false));
-    let loading = web.map(|w| unsafe { w.web.isLoading() }).unwrap_or(false);
+    let engine = b.tabs.active.and_then(|id| super::engine_view::nav_state(b, id));
+    let (can_back, can_forward, loading) = match engine {
+        Some(state) => state,
+        None => (
+            web.map(|w| unsafe { w.web.canGoBack() }).unwrap_or(false),
+            web.map(|w| unsafe { w.web.canGoForward() }).unwrap_or(false),
+            web.map(|w| unsafe { w.web.isLoading() }).unwrap_or(false),
+        ),
+    };
+    ui.back.set_enabled(can_back);
+    ui.forward.set_enabled(can_forward);
     ui.reload.img.setImage(symbol(if loading { "xmark" } else { "arrow.clockwise" }, if loading { 12.0 } else { 13.0 }, Weight::Medium).as_deref());
     ui.reload.hit.setToolTip(Some(&ns(if loading { "Stop (⌘.)" } else { "Reload (⌘R)" })));
     let title = tab.map(tab_title).unwrap_or_else(|| "Volant".into());

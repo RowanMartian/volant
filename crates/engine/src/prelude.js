@@ -315,15 +315,55 @@
     clone() { return new Request(this) }
   }
   g.Request = Request
-  const bodyText = b => (b == null ? undefined : typeof b === 'string' ? b : b instanceof URLSearchParams ? b.toString() : b instanceof FormData ? new URLSearchParams(b._e).toString() : JSON.stringify(b))
+  // A request body as text, and the type it implies (FormData goes as multipart).
+  const encodeBody = b => {
+    if (b == null) return [undefined, null]
+    if (typeof b === 'string') return [b, 'text/plain;charset=UTF-8']
+    if (b instanceof URLSearchParams) return [b.toString(), 'application/x-www-form-urlencoded;charset=UTF-8']
+    if (b instanceof FormData) {
+      const boundary = '----VolantFormBoundary' + Math.random().toString(36).slice(2, 14)
+      let out = ''
+      for (const [k, v] of b._e) {
+        const file = v instanceof g.Blob
+        out += '--' + boundary + '\r\nContent-Disposition: form-data; name="' + String(k).replace(/"/g, '%22') + '"' +
+          (file ? '; filename="' + (v.name || 'blob') + '"\r\nContent-Type: ' + (v.type || 'application/octet-stream') : '') +
+          '\r\n\r\n' + (file ? (v._t || '') : v) + '\r\n'
+      }
+      return [out + '--' + boundary + '--\r\n', 'multipart/form-data; boundary=' + boundary]
+    }
+    if (b instanceof g.Blob) return [b._t || '', b.type || null]
+    if (b instanceof ArrayBuffer || ArrayBuffer.isView(b)) return [new TextDecoder().decode(b), null]
+    return [String(b), 'text/plain;charset=UTF-8']
+  }
+  // Volant's request: [status, contentType, text, finalUrl, headers] or null.
+  const send = (method, url, headers, body) => {
+    const [text, type] = encodeBody(body)
+    const h = []
+    headers.forEach((v, k) => h.push([k, v]))
+    if (type && !headers.has('content-type')) h.push(['content-type', type])
+    return __fetch(method, url, text, h)
+  }
+  const parseHeaders = raw => {
+    const h = new Headers()
+    for (const line of String(raw || '').split('\r\n')) {
+      const i = line.indexOf(':')
+      if (i > 0) h.append(line.slice(0, i).trim(), line.slice(i + 1).trim())
+    }
+    return h
+  }
   g.fetch = (input, init) => {
     init = init || {}
-    const url = typeof input === 'string' || input instanceof URL ? String(input) : input.url
-    const method = (init.method || (input && input.method) || 'GET').toUpperCase()
+    const req = input instanceof Request ? input : null
+    const url = req ? req.url : String(input)
+    const method = (init.method || (req && req.method) || 'GET').toUpperCase()
     if (init.signal && init.signal.aborted) return Promise.reject(init.signal.reason)
-    const r = __fetch(method, url, bodyText(init.body !== undefined ? init.body : input && input.body))
+    const headers = new Headers(init.headers || (req && req.headers))
+    const r = send(method, url, headers, init.body !== undefined ? init.body : req && req.body)
     if (!r) return Promise.reject(new TypeError('Failed to fetch'))
-    return Promise.resolve(new Response(r[2], { status: r[0], headers: { 'content-type': r[1] }, url: r[3] }))
+    const res = new Response(r[2], { status: r[0], headers: parseHeaders(r[4]), url: r[3] })
+    if (!res.headers.has('content-type') && r[1]) res.headers.set('content-type', r[1])
+    res.redirected = r[3] !== __resolve(url)
+    return Promise.resolve(res)
   }
 
   class XMLHttpRequest extends EventTarget {
@@ -334,14 +374,14 @@
       this.upload = new EventTarget()
       this._type = ''
     }
-    open(method, url) { this._method = String(method).toUpperCase(); this._url = String(url); this.readyState = 1 }
-    setRequestHeader() {}
+    open(method, url) { this._method = String(method).toUpperCase(); this._url = String(url); this._headers = new Headers(); this.readyState = 1 }
+    setRequestHeader(k, v) { (this._headers || (this._headers = new Headers())).append(k, v) }
     overrideMimeType() {}
-    getResponseHeader(k) { return String(k).toLowerCase() === 'content-type' ? this._type : null }
-    getAllResponseHeaders() { return this._type ? 'content-type: ' + this._type + '\r\n' : '' }
+    getResponseHeader(k) { return this._res ? this._res.get(k) : null }
+    getAllResponseHeaders() { let out = ''; if (this._res) this._res.forEach((v, k) => { out += k + ': ' + v + '\r\n' }); return out }
     abort() { this._aborted = true }
     send(body) {
-      const r = __fetch(this._method || 'GET', this._url, bodyText(body))
+      const r = send(this._method || 'GET', this._url, this._headers || new Headers(), body)
       setTimeout(() => {
         if (this._aborted) return
         if (!r) {
@@ -352,6 +392,8 @@
           return
         }
         this.status = r[0]; this.statusText = r[0] === 200 ? 'OK' : ''; this._type = r[1]; this.responseURL = r[3]
+        this._res = parseHeaders(r[4])
+        if (!this._res.has('content-type') && r[1]) this._res.set('content-type', r[1])
         this.responseText = r[2]
         if (this.responseType === 'json') { try { this.response = JSON.parse(r[2]) } catch (_) { this.response = null } }
         else if (this.responseType === 'document') { this.response = new DOMParser().parseFromString(r[2], 'text/html') }

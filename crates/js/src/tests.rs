@@ -447,6 +447,8 @@ fn bytecode_vm_semantics() {
     assert_eq!(out("function f() { return f() } try { f() } catch (e) { console.log(e instanceof RangeError) }"), "true");
     // Sloppy-mode `this` is the global object; strict mode keeps undefined.
     assert_eq!(out("function s() { return this === globalThis } function t() { 'use strict'; return this } console.log(s(), t())"), "true undefined");
+    // A method's name isn't bound inside it (only a named function expression's is).
+    assert_eq!(out("const send = () => 'outer'; class X { send() { return send() } } console.log(new X().send(), ({ send() { return send() } }).send(), ({ m() {} }).m.name, ({ k: function () {} }).k.name)"), "outer outer m k");
     // typeof on an undeclared global doesn't throw.
     assert_eq!(out("console.log(typeof nope, typeof nope === 'undefined')"), "undefined true");
     // Lazy function properties behave like eager ones.

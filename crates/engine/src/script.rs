@@ -23,18 +23,79 @@ use std::rc::Rc;
 use volant_core::html::{self, Data, Dom, Node, NodeId, ROOT};
 use volant_js::interp::{Interp, Kind, Obj, Res, Slot, Value};
 
-/// The network, as scripts see it (also used to load `<script src>`).
+/// A request a page makes (a script, a style sheet, fetch(), a form).
+#[derive(Debug, Clone, Copy)]
+pub struct Request<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    /// Request headers the page set (`Content-Type`, …); cookies are the host's to add.
+    pub headers: &'a [(String, String)],
+    pub body: Option<&'a [u8]>,
+}
+
+/// What came back.
+#[derive(Debug, Clone, Default)]
+pub struct Reply {
+    pub status: u16,
+    pub content_type: String,
+    pub body: Vec<u8>,
+    /// Where it finally came from (after redirects); empty means the address asked for.
+    pub url: String,
+    /// Response headers, lower-case names.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Reply {
+    pub fn ok(status: u16, content_type: &str, body: Vec<u8>) -> Reply {
+        Reply { status, content_type: content_type.into(), body, ..Default::default() }
+    }
+    pub fn success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
+
+/// The network, as scripts see it (also used to load `<script src>`), and its cookies.
 pub trait Host {
-    /// Performs a request: (status, content type, body), or None if it failed.
-    fn fetch(&self, method: &str, url: &str, body: Option<&str>) -> Option<(u16, String, Vec<u8>)>;
+    /// Performs a request, or None if it failed.
+    fn request(&self, req: &Request) -> Option<Reply>;
+    /// A plain GET.
+    fn get(&self, url: &str) -> Option<Reply> {
+        self.request(&Request { method: "GET", url, headers: &[], body: None })
+    }
+    /// `document.cookie` for a page (None: the host keeps no cookies, so the page keeps its own).
+    fn cookie(&self, _url: &str) -> Option<String> {
+        None
+    }
+    /// `document.cookie = …`; false if the host keeps no cookies.
+    fn set_cookie(&self, _url: &str, _cookie: &str) -> bool {
+        false
+    }
 }
 
 /// No network: every request fails.
 pub struct NoHost;
 
 impl Host for NoHost {
-    fn fetch(&self, _: &str, _: &str, _: Option<&str>) -> Option<(u16, String, Vec<u8>)> {
+    fn request(&self, _: &Request) -> Option<Reply> {
         None
+    }
+}
+
+/// Where a page asked to go: a link or a GET form (no body), or a POST form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Navigation {
+    pub url: String,
+    pub method: String,
+    pub body: Option<Vec<u8>>,
+    /// The body's type (`application/x-www-form-urlencoded`, `multipart/form-data; boundary=…`).
+    pub content_type: Option<String>,
+    /// The page it came from (for `Referer` and `Origin`); the app fills it in.
+    pub referrer: Option<String>,
+}
+
+impl Navigation {
+    pub fn get(url: String) -> Navigation {
+        Navigation { url, method: "GET".into(), body: None, content_type: None, referrer: None }
     }
 }
 
@@ -76,8 +137,9 @@ pub struct State {
     datasets: HashMap<NodeId, Value>,
     handlers: HashMap<(NodeId, String), Value>,
     pub focus: Option<NodeId>,
-    pub navigate: Option<String>,
-    cookies: Vec<(String, String)>,
+    pub navigate: Option<Navigation>,
+    /// Cookies when the host keeps none (tests, previews).
+    cookies: volant_core::cookies::Jar,
     current_script: Option<NodeId>,
     /// Scripts already run (or scheduled), so moving one doesn't run it again.
     ran: std::collections::HashSet<NodeId>,
@@ -842,8 +904,8 @@ fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
         (s.dom.attr(id, "src").map(|x| resolve_url(&s.url, x)), s.dom.text(id), s.url.clone(), s.host.clone())
     };
     match src {
-        Some(abs) => match host.fetch("GET", &abs, None) {
-            Some((200..=299, _, body)) => Ok((String::from_utf8_lossy(&body).into_owned(), abs)),
+        Some(abs) => match host.get(&abs) {
+            Some(r) if r.success() => Ok((String::from_utf8_lossy(&r.body).into_owned(), abs)),
             _ => Err(format!("couldn't load {abs}")),
         },
         None => Ok((text, url)),
@@ -933,9 +995,9 @@ impl volant_js::module::Loader for PageLoader {
         if url.starts_with("bare:") {
             return Err("bare module names need an import map".into());
         }
-        match self.host.fetch("GET", url, None) {
-            Some((200..=299, _, body)) => Ok(String::from_utf8_lossy(&body).into_owned()),
-            Some((status, ..)) => Err(format!("HTTP {status}")),
+        match self.host.get(url) {
+            Some(r) if r.success() => Ok(String::from_utf8_lossy(&r.body).into_owned()),
+            Some(r) => Err(format!("HTTP {}", r.status)),
             None => Err("network error".into()),
         }
     }
@@ -1039,7 +1101,8 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-/// Submits a form (GET): navigates to its action with the fields as the query.
+/// Submits a form: navigates to its action, GET with the fields as the query or
+/// POST with them as the body (url-encoded, multipart or plain text).
 fn submit(i: &mut Interp, st: &S, form: NodeId, submitter: Option<NodeId>) {
     if !fire(i, st, form, "submit", true) {
         return;
@@ -1069,10 +1132,59 @@ fn submit(i: &mut Interp, st: &S, form: NodeId, submitter: Option<NodeId>) {
         }
         pairs.push((name.to_string(), field_value(dom, f)));
     }
-    let query: Vec<String> = pairs.iter().map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v))).collect();
-    let action = dom.attr(form, "action").filter(|a| !a.trim().is_empty()).map(|a| resolve_url(&s.url, a)).unwrap_or_else(|| s.url.clone());
-    let base = action.split(['?', '#']).next().unwrap_or(&action).to_string();
-    s.navigate = Some(format!("{base}?{}", query.join("&")));
+    // The submit button can override the form's action, method and encoding.
+    let attr = |name: &str| {
+        let over = submitter.and_then(|b| dom.attr(b, &format!("form{name}"))).filter(|v| !v.trim().is_empty());
+        over.or_else(|| dom.attr(form, name)).map(|v| v.trim().to_string())
+    };
+    let action = attr("action").filter(|a| !a.is_empty()).map(|a| resolve_url(&s.url, &a)).unwrap_or_else(|| s.url.clone());
+    let method = attr("method").map(|m| m.to_ascii_uppercase()).filter(|m| m == "POST" || m == "DIALOG").unwrap_or_else(|| "GET".into());
+    if method == "DIALOG" {
+        return;
+    }
+    let query = form_urlencode(&pairs);
+    s.navigate = Some(if method == "POST" {
+        let enctype = attr("enctype").unwrap_or_default().to_ascii_lowercase();
+        if enctype == "multipart/form-data" {
+            let boundary = format!("----VolantFormBoundary{:x}", s.generation.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ pairs.len() as u64);
+            let mut body = String::new();
+            for (k, v) in &pairs {
+                body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n{v}\r\n", k.replace('"', "%22")));
+            }
+            body.push_str(&format!("--{boundary}--\r\n"));
+            Navigation { url: action, method, body: Some(body.into_bytes()), content_type: Some(format!("multipart/form-data; boundary={boundary}")), referrer: None }
+        } else if enctype == "text/plain" {
+            let body: String = pairs.iter().map(|(k, v)| format!("{k}={v}\r\n")).collect();
+            Navigation { url: action, method, body: Some(body.into_bytes()), content_type: Some("text/plain".into()), referrer: None }
+        } else {
+            Navigation { url: action, method, body: Some(query.into_bytes()), content_type: Some("application/x-www-form-urlencoded".into()), referrer: None }
+        }
+    } else {
+        // A GET form replaces the action's query; its fragment goes.
+        let base = action.split(['?', '#']).next().unwrap_or(&action).to_string();
+        Navigation::get(format!("{base}?{query}"))
+    });
+}
+
+/// The headers a browser adds to a page's request: `Referer`, and `Origin` when it isn't a GET.
+pub fn request_context(headers: &mut Vec<(String, String)>, page: &str, method: &str) {
+    let has = |h: &[(String, String)], n: &str| h.iter().any(|(k, _)| k.eq_ignore_ascii_case(n));
+    if !page.starts_with("http") {
+        return;
+    }
+    if !has(headers, "referer") {
+        headers.push(("Referer".into(), page.split('#').next().unwrap_or(page).to_string()));
+    }
+    if method != "GET" && method != "HEAD" && !has(headers, "origin") {
+        if let Some(u) = volant_core::http::Url::parse(page) {
+            headers.push(("Origin".into(), u.origin()));
+        }
+    }
+}
+
+/// `application/x-www-form-urlencoded` (spaces as `+`).
+fn form_urlencode(pairs: &[(String, String)]) -> String {
+    pairs.iter().map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v))).collect::<Vec<_>>().join("&")
 }
 
 /// What a click does when no script cancelled it.
@@ -1129,7 +1241,7 @@ fn activate(i: &mut Interp, st: &S, target: NodeId) {
         }
     };
     match act {
-        Act::Link(url) => st.borrow_mut().navigate = Some(url),
+        Act::Link(url) => st.borrow_mut().navigate = Some(Navigation::get(url)),
         Act::Script(code) => {
             let code = code.replace("%20", " ");
             if let Err(e) = i.run(&code) {
@@ -2446,17 +2558,29 @@ fn install(i: &mut Interp, st: &S) {
         st,
         &document,
         "cookie",
-        |_i, st, _id| Ok(str_val(&st.borrow().cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "))),
+        |_i, st, _id| {
+            let (host, url) = {
+                let s = st.borrow();
+                (s.host.clone(), s.url.clone())
+            };
+            let c = match host.cookie(&url) {
+                Some(c) => c,
+                None => match volant_core::http::Url::parse(&url) {
+                    Some(u) => st.borrow_mut().cookies.header(&u, volant_core::cookies::now(), true),
+                    None => String::new(),
+                },
+            };
+            Ok(str_val(&c))
+        },
         |i, st, _id, v| {
-            let c = i.to_str(&v)?;
-            let first = c.split(';').next().unwrap_or("");
-            if let Some((k, v)) = first.split_once('=') {
-                let (k, v) = (k.trim().to_string(), v.trim().to_string());
-                let mut s = st.borrow_mut();
-                s.cookies.retain(|(x, _)| *x != k);
-                let expired = c.to_ascii_lowercase().contains("max-age=0") || c.to_ascii_lowercase().contains("expires=thu, 01 jan 1970");
-                if !expired {
-                    s.cookies.push((k, v));
+            let c = i.to_str(&v)?.to_string();
+            let (host, url) = {
+                let s = st.borrow();
+                (s.host.clone(), s.url.clone())
+            };
+            if !host.set_cookie(&url, &c) {
+                if let Some(u) = volant_core::http::Url::parse(&url) {
+                    st.borrow_mut().cookies.set(&u, &c, volant_core::cookies::now(), true);
                 }
             }
             Ok(())
@@ -2551,21 +2675,36 @@ fn install(i: &mut Interp, st: &S) {
     };
     let st2 = st.clone();
     let f = i.native(move |i, _t, a| {
-        // __fetch(method, url, body) → [status, contentType, text, finalUrl] or null
+        // __fetch(method, url, body, [[name, value]…]) → [status, contentType, text, finalUrl, headers] or null
         let method = i.to_str(&arg(&a, 0))?.to_ascii_uppercase();
         let url = i.to_str(&arg(&a, 1))?;
         let body = match arg(&a, 2) {
             Value::Undefined | Value::Null => None,
             b => Some(i.to_str(&b)?.to_string()),
         };
-        let (host, abs) = {
+        let mut headers = Vec::new();
+        if let Value::Obj(list) = arg(&a, 3) {
+            let len = i.get(&Value::Obj(list.clone()), "length")?;
+            let n = i.to_number(&len).unwrap_or(0.0) as usize;
+            for k in 0..n.min(100) {
+                let pair = i.get(&Value::Obj(list.clone()), &k.to_string())?;
+                let name = i.get(&pair, "0")?;
+                let value = i.get(&pair, "1")?;
+                headers.push((i.to_str(&name)?.to_string(), i.to_str(&value)?.to_string()));
+            }
+        }
+        let (host, abs, page) = {
             let s = st2.borrow();
-            (s.host.clone(), resolve_url(&s.url, &url))
+            (s.host.clone(), resolve_url(&s.url, &url), s.url.clone())
         };
-        Ok(match host.fetch(&method, &abs, body.as_deref()) {
-            Some((status, ty, bytes)) => {
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                i.array(vec![Value::Num(status as f64), str_val(&ty), str_val(&text), str_val(&abs)])
+        request_context(&mut headers, &page, &method);
+        let req = Request { method: &method, url: &abs, headers: &headers, body: body.as_deref().map(str::as_bytes) };
+        Ok(match host.request(&req) {
+            Some(r) => {
+                let text = String::from_utf8_lossy(&r.body).into_owned();
+                let head: String = r.headers.iter().filter(|(k, _)| k != "set-cookie").map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+                let final_url = if r.url.is_empty() { abs } else { r.url };
+                i.array(vec![Value::Num(r.status as f64), str_val(&r.content_type), str_val(&text), str_val(&final_url), str_val(&head)])
             }
             None => Value::Null,
         })
@@ -2597,7 +2736,7 @@ fn install(i: &mut Interp, st: &S) {
         if same_doc {
             s.url = abs;
         } else {
-            s.navigate = Some(abs);
+            s.navigate = Some(Navigation::get(abs));
         }
         Ok(Value::Undefined)
     });
@@ -2729,7 +2868,7 @@ impl Runtime {
             handlers: HashMap::new(),
             focus: None,
             navigate: None,
-            cookies: Vec::new(),
+            cookies: volant_core::cookies::Jar::new(),
             current_script: None,
             ran: std::collections::HashSet::new(),
             loader: Rc::new(PageLoader { host: host.clone(), imports: RefCell::new(Vec::new()) }),
@@ -2949,7 +3088,7 @@ impl Runtime {
     }
 
     /// Where the page asked to go (a link, a form, `location.href = …`), once.
-    pub fn take_navigation(&mut self) -> Option<String> {
+    pub fn take_navigation(&mut self) -> Option<Navigation> {
         self.state.borrow_mut().navigate.take()
     }
 

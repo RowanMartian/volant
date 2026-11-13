@@ -7,8 +7,10 @@
 //! drawn by Volant alone. A session thread fetches the HTML, scripts and style
 //! sheets with Volant's own HTTP and runs the page's JavaScript with
 //! volant-js; this view draws the snapshots it sends, and sends back clicks
-//! and typing. Links and forms navigate the tab (so history works), and the
-//! next page opens in the engine too, until Simple Page is turned off.
+//! and typing. While Simple Page is on, the tab belongs to the engine: links,
+//! forms (GET and POST), the address bar, Back, Forward and Reload all go to
+//! it, with Volant's own history list and cookie jar, and WebKit is left
+//! empty (nothing is loaded or run twice) until Simple Page is turned off.
 //!
 //! Reader itself works exactly as before: the article still loads as the
 //! `volant://reader` page, so history, Back and the Reader toolbar behave the
@@ -55,6 +57,11 @@ struct Inner {
     sticky: Option<TabId>,
     /// The page's script thread.
     session: Option<Session>,
+    /// Simple Page's own history for the tab: addresses, and where we are.
+    trail: Vec<String>,
+    at: usize,
+    /// A page is being fetched (for the reload/stop button).
+    loading: bool,
     serial: u64,
     /// The page has a text field focused (typing goes to it).
     focused: bool,
@@ -77,7 +84,7 @@ struct SimplePage {
     sheets: Vec<String>,
 }
 
-use volant_engine::script::{self, Snapshot};
+use volant_engine::script::{self, Navigation, Snapshot};
 
 /// What the view sends the session thread.
 enum Cmd {
@@ -102,17 +109,32 @@ struct NetHost;
 const PAGE_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15 Volant/1.0";
 
 impl script::Host for NetHost {
-    fn fetch(&self, method: &str, url: &str, _body: Option<&str>) -> Option<(u16, String, Vec<u8>)> {
-        if method != "GET" || !(url.starts_with("https://") || url.starts_with("http://")) {
-            return None; // only GET so far
+    fn request(&self, req: &script::Request) -> Option<script::Reply> {
+        if !(req.url.starts_with("https://") || req.url.starts_with("http://")) {
+            return None;
         }
         let mut opts = super::net::options();
         opts.user_agent = PAGE_UA.into();
         opts.limit = 16 << 20;
         opts.deadline = std::time::Duration::from_secs(20);
-        let r = super::net::get(url, &opts).ok()?;
-        let ty = r.header("content-type").unwrap_or("").to_string();
-        Some((r.status, ty, r.body))
+        opts.method = req.method.to_string();
+        opts.body = req.body.map(<[u8]>::to_vec);
+        opts.headers = req.headers.to_vec();
+        let r = super::net::send(req.url, &opts).ok()?;
+        let content_type = r.header("content-type").unwrap_or("").to_string();
+        Some(script::Reply { status: r.status, content_type, body: r.body, url: r.url, headers: r.headers })
+    }
+    fn cookie(&self, url: &str) -> Option<String> {
+        let u = volant_core::http::Url::parse(url)?;
+        let jar = super::net::cookie_jar()?;
+        Some(jar.lock().map(|mut j| j.header(&u, volant_core::cookies::now(), true)).unwrap_or_default())
+    }
+    fn set_cookie(&self, url: &str, cookie: &str) -> bool {
+        let (Some(u), Some(jar)) = (volant_core::http::Url::parse(url), super::net::cookie_jar()) else { return false };
+        if let Ok(mut j) = jar.lock() {
+            j.set(&u, cookie, volant_core::cookies::now(), true);
+        }
+        true
     }
 }
 
@@ -590,20 +612,9 @@ pub fn sync(b: &Browser) {
     let active = b.tabs.active;
     let on_tab = e.tab.is_some() && e.tab == active;
     let current_url = active.and_then(|id| b.webs.get(&id)).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string());
-    // Simple Page follows the tab: a new address (a link, a form, Back) loads in the engine too.
+    // Simple Page owns its tab's navigation (see `open`); WebKit's address doesn't matter there.
     let sticky = e.sticky.is_some() && e.sticky == active;
-    if sticky {
-        if let Some(url) = current_url.clone().filter(|u| u.starts_with("http")) {
-            let same = |a: &str, b: &str| a.split('#').next() == b.split('#').next();
-            let running = e.session.as_ref().map(|s| same(&s.url, &url)).unwrap_or(false);
-            let shown = e.page.as_ref().map(|p| same(&p.url, &url)).unwrap_or(false);
-            if !running && !shown {
-                if let Some(id) = active {
-                    start_session(&mut e, id, url, b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm));
-                }
-            }
-        }
-    } else if on_tab && e.page.is_some() && current_url.as_deref() != e.page.as_ref().map(|p| p.url.as_str()) {
+    if !sticky && on_tab && e.page.is_some() && current_url.as_deref() != e.page.as_ref().map(|p| p.url.as_str()) {
         e.page = None;
     }
     let simple = on_tab && e.page.is_some();
@@ -751,23 +762,98 @@ pub fn toggle_page(b: &Browser) {
     let Some(id) = b.tabs.active else { return };
     let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
     if e.sticky == Some(id) {
+        // Back to WebKit, at the page Simple Page had reached.
+        let here = e.trail.get(e.at).cloned();
         e.sticky = None;
         e.session = None; // dropping the sender ends the thread
         e.page = None;
         e.focused = false;
+        e.trail.clear();
+        e.loading = false;
         drop(e);
+        if let (Some(url), Some(w)) = (here, b.webs.get(&id)) {
+            super::web::load(&w.web, &url);
+        }
         sync(b);
+        super::ui::update_chrome(b);
         return;
     }
     let url = b.webs.get(&id).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string()).filter(|u| u.starts_with("http"));
-    let Some(url) = url else {
+    let Some(url) = url.or_else(|| b.tabs.get(id).map(|t| t.url.clone()).filter(|u| u.starts_with("http"))) else {
         eprintln!("engine: Simple Page needs a web page");
         objc2_app_kit::NSBeep();
         return;
     };
     e.sticky = Some(id);
     e.tab = Some(id);
-    start_session(&mut e, id, url, b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm));
+    e.trail = vec![url.clone()];
+    e.at = 0;
+    start_session(&mut e, id, Navigation::get(url), b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm));
+    drop(e);
+    // WebKit steps aside: its copy of the page stops running.
+    if let Some(w) = b.webs.get(&id) {
+        unsafe {
+            w.web.stopLoading();
+            w.web.loadHTMLString_baseURL(&super::ns(""), None);
+        }
+    }
+}
+
+/// Is Simple Page running this tab (so navigation goes to the engine, not WebKit)?
+pub fn handles(b: &Browser, tab: TabId) -> bool {
+    b.engine.0.try_borrow().map(|e| e.sticky == Some(tab)).unwrap_or(false)
+}
+
+/// Opens a page in Simple Page (a link, a form, the address bar), as a new history entry.
+pub fn open(b: &mut Browser, nav: Navigation) {
+    let Some(tab) = b.tabs.active else { return };
+    {
+        let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
+        if e.sticky != Some(tab) {
+            return;
+        }
+        let keep = (e.at + 1).min(e.trail.len());
+        e.trail.truncate(keep);
+        e.trail.push(nav.url.clone());
+        e.at = e.trail.len() - 1;
+        start_session(&mut e, tab, nav.clone(), b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm));
+    }
+    if let Some(t) = b.tabs.get_mut(tab) {
+        t.url = nav.url;
+    }
+    super::ui::update_row(b, tab);
+    super::ui::update_chrome(b);
+}
+
+/// Back (-1), Forward (+1) or Reload (0) in Simple Page's history; false if there's nowhere to go.
+pub fn travel(b: &mut Browser, step: i32) -> bool {
+    let Some(tab) = b.tabs.active else { return false };
+    let url = {
+        let Ok(mut e) = b.engine.0.try_borrow_mut() else { return false };
+        if e.sticky != Some(tab) {
+            return false;
+        }
+        let to = e.at as i64 + step as i64;
+        if to < 0 || to as usize >= e.trail.len() {
+            return false;
+        }
+        e.at = to as usize;
+        let url = e.trail[e.at].clone();
+        start_session(&mut e, tab, Navigation::get(url.clone()), b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm));
+        url
+    };
+    if let Some(t) = b.tabs.get_mut(tab) {
+        t.url = url;
+    }
+    super::ui::update_row(b, tab);
+    super::ui::update_chrome(b);
+    true
+}
+
+/// For the toolbar: (can go back, can go forward, loading), if Simple Page runs this tab.
+pub fn nav_state(b: &Browser, tab: TabId) -> Option<(bool, bool, bool)> {
+    let e = b.engine.0.try_borrow().ok()?;
+    (e.sticky == Some(tab)).then(|| (e.at > 0, e.at + 1 < e.trail.len(), e.loading))
 }
 
 /// Sends the live page a command.
@@ -791,11 +877,12 @@ pub fn type_and_press(b: &Browser, text: &str, key: &'static str) {
 }
 
 /// Starts a page's script thread: it fetches, runs and snapshots the page.
-fn start_session(e: &mut Inner, tab: TabId, url: String, width: f32, dark: bool) {
+fn start_session(e: &mut Inner, tab: TabId, nav: Navigation, width: f32, dark: bool) {
     e.serial += 1;
     let serial = e.serial;
     let (tx, rx) = std::sync::mpsc::channel();
-    e.session = Some(Session { tx, url: url.clone() });
+    e.session = Some(Session { tx, url: nav.url.clone() });
+    e.loading = true;
     e.focused = false;
     e.images.clear();
     if let Some(v) = &e.view {
@@ -804,21 +891,34 @@ fn start_session(e: &mut Inner, tab: TabId, url: String, width: f32, dark: bool)
     let spawned = std::thread::Builder::new()
         .name("volant-page".into())
         .stack_size(script::STACK)
-        .spawn(move || run_session(serial, tab, url, width, dark, rx));
+        .spawn(move || run_session(serial, tab, nav, width, dark, rx));
     if spawned.is_err() {
         e.session = None;
+        e.loading = false;
     }
 }
 
 /// The session thread: one page's whole life in Volant's engine.
-fn run_session(serial: u64, tab: TabId, url: String, width: f32, dark: bool, rx: std::sync::mpsc::Receiver<Cmd>) {
+fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool, rx: std::sync::mpsc::Receiver<Cmd>) {
     use std::sync::mpsc::RecvTimeoutError;
     let started = std::time::Instant::now();
     let host = NetHost;
-    let Some((status, _, body)) = script::Host::fetch(&host, "GET", &url, None) else {
-        eprintln!("engine: couldn't load {url}");
+    let mut headers = vec![("Accept".to_string(), "text/html,application/xhtml+xml,*/*;q=0.8".to_string())];
+    if let Some(t) = &nav.content_type {
+        headers.push(("Content-Type".into(), t.clone()));
+    }
+    if let Some(r) = &nav.referrer {
+        script::request_context(&mut headers, r, &nav.method);
+    }
+    let req = script::Request { method: &nav.method, url: &nav.url, headers: &headers, body: nav.body.as_deref() };
+    let Some(reply) = script::Host::request(&host, &req) else {
+        eprintln!("engine: couldn't load {}", nav.url);
+        super::on_main(move || with(move |b| load_failed(b, serial)));
         return;
     };
+    let (status, body) = (reply.status, reply.body);
+    // After redirects, the page is where it ended up.
+    let url = if reply.url.is_empty() { nav.url.clone() } else { reply.url };
     let html = String::from_utf8_lossy(&body).into_owned();
     let host: Rc<dyn script::Host> = Rc::new(NetHost);
     let env = volant_engine::Env { width, dark };
@@ -835,8 +935,8 @@ fn run_session(serial: u64, tab: TabId, url: String, width: f32, dark: bool, rx:
             let text = match sheets.iter().find(|(h, _)| *h == href) {
                 Some((_, t)) => t.clone(),
                 None => {
-                    let t = match script::Host::fetch(&NetHost, "GET", &href, None) {
-                        Some((200..=299, _, b)) => String::from_utf8_lossy(&b).into_owned(),
+                    let t = match script::Host::get(&NetHost, &href) {
+                        Some(r) if r.success() => String::from_utf8_lossy(&r.body).into_owned(),
                         _ => String::new(),
                     };
                     sheets.push((href.clone(), t.clone()));
@@ -861,12 +961,13 @@ fn run_session(serial: u64, tab: TabId, url: String, width: f32, dark: bool, rx:
                 logged += 1;
             }
         }
-        if let Some(next) = rt.take_navigation() {
+        if let Some(mut next) = rt.take_navigation() {
+            next.referrer = Some(rt.state.borrow().url.clone());
             super::on_main(move || {
                 with(move |b| {
                     let current = b.engine.0.try_borrow().map(|e| e.serial == serial).unwrap_or(false);
                     if current && b.tabs.active == Some(tab) {
-                        actions::navigate(b, &next);
+                        open(b, next);
                     }
                 })
             });
@@ -902,14 +1003,38 @@ fn run_session(serial: u64, tab: TabId, url: String, width: f32, dark: bool, rx:
     }
 }
 
+/// The page couldn't be fetched: stop showing it as loading.
+fn load_failed(b: &mut Browser, serial: u64) {
+    if let Ok(mut e) = b.engine.0.try_borrow_mut() {
+        if e.serial == serial {
+            e.loading = false;
+        }
+    }
+    objc2_app_kit::NSBeep();
+    super::ui::update_chrome(b);
+}
+
 /// A snapshot from the session thread.
-fn arrived(b: &Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec<String>, focused: bool) {
+fn arrived(b: &mut Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec<String>, focused: bool) {
+    let visited;
     {
         let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
         if e.serial != serial || e.sticky != Some(tab) {
             return; // an older page
         }
-        let url = e.session.as_ref().map(|s| s.url.clone()).unwrap_or_default();
+        // Where the page really is (after redirects, or a script's pushState).
+        let url = snap.url.clone();
+        if let Some(s) = e.session.as_mut() {
+            s.url = url.clone();
+        }
+        let at = e.at;
+        if let Some(entry) = e.trail.get_mut(at) {
+            if *entry != url {
+                *entry = url.clone();
+            }
+        }
+        e.loading = false;
+        visited = Some((url.clone(), snap.title.clone()));
         // A different page starts at its top.
         let new_page = e.page.as_ref().map(|p| p.url != url).unwrap_or(true);
         if new_page {
@@ -929,6 +1054,27 @@ fn arrived(b: &Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec<Str
         }
     }
     sync(b);
+    // The tab shows the page's address and title, and Volant's history records the visit.
+    let Some((url, title)) = visited else { return };
+    let Some(t) = b.tabs.get_mut(tab) else { return };
+    let changed = t.url != url || (!title.is_empty() && t.title != title);
+    if !changed {
+        super::ui::update_chrome(b);
+        return;
+    }
+    let new_url = t.url != url;
+    t.url = url.clone();
+    if !title.is_empty() {
+        t.title = title.clone();
+    }
+    if new_url {
+        b.history.visit(&url, &title, super::now());
+    } else {
+        b.history.set_title(&url, &title);
+    }
+    super::mark_dirty(b);
+    super::ui::update_row(b, tab);
+    super::ui::update_chrome(b);
 }
 
 /// Downloads a picture (Volant's own HTTP), decodes it, and lays the page out again.

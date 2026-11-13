@@ -291,6 +291,11 @@ pub fn navigate(b: &mut Browser, url: &str) {
         open_tab(b, url, true);
         return;
     };
+    // Simple Page runs this tab: the engine loads it (WebKit stays empty).
+    if super::engine_view::handles(b, id) && url.starts_with("http") {
+        super::engine_view::open(b, volant_engine::script::Navigation::get(url.to_string()));
+        return;
+    }
     if let Some(t) = b.tabs.get_mut(id) {
         t.url = url.to_string();
     }
@@ -317,6 +322,10 @@ pub fn in_reader(b: &Browser, id: TabId) -> bool {
 /// returns to the original page.
 pub fn toggle_reader(b: &mut Browser) {
     let Some(id) = b.tabs.active else { return };
+    if super::engine_view::handles(b, id) {
+        beep(); // Simple Page's WebKit view is empty: nothing to read
+        return;
+    }
     let Some(web) = b.webs.get(&id).map(|w| w.web.clone()) else { return };
     if in_reader(b, id) {
         unsafe { web.goBack() };
@@ -365,18 +374,27 @@ fn active_web(b: &Browser) -> Option<Retained<WKWebView>> {
 }
 
 pub fn back(b: &mut Browser) {
+    if super::engine_view::travel(b, -1) {
+        return;
+    }
     if let Some(w) = active_web(b) {
         unsafe { w.goBack() };
     }
 }
 
 pub fn forward(b: &mut Browser) {
+    if super::engine_view::travel(b, 1) {
+        return;
+    }
     if let Some(w) = active_web(b) {
         unsafe { w.goForward() };
     }
 }
 
 pub fn reload_or_stop(b: &mut Browser) {
+    if super::engine_view::travel(b, 0) {
+        return;
+    }
     if let Some(w) = active_web(b) {
         unsafe {
             if w.isLoading() {
@@ -389,6 +407,9 @@ pub fn reload_or_stop(b: &mut Browser) {
 }
 
 pub fn reload(b: &mut Browser, hard: bool) {
+    if super::engine_view::travel(b, 0) {
+        return;
+    }
     if let Some(w) = active_web(b) {
         unsafe {
             if hard {

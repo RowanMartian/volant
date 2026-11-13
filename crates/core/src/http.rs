@@ -1,9 +1,11 @@
 //! An HTTP/1.1 client, written from scratch: URLs, requests, response framing
 //! (Content-Length, chunked, read-until-close), gzip, redirects, size limits
-//! and an overall deadline. The bytes travel over a [`Transport`]: the app's
+//! and an overall deadline; GET and POST (or any method), with cookies from a
+//! [`cookies::Jar`](crate::cookies::Jar). The bytes travel over a [`Transport`]: the app's
 //! is TLS from macOS's Network framework (encryption stays the system's); the
 //! tests here use plain TCP.
 
+use crate::cookies::{self, Jar};
 use crate::deflate;
 use std::time::{Duration, Instant};
 
@@ -123,11 +125,41 @@ pub struct Options {
     pub deadline: Duration,
     pub max_redirects: u8,
     pub user_agent: String,
+    /// `GET` unless set.
+    pub method: String,
+    /// The request body (a POST form, a fetch() body); its type goes in `headers`.
+    pub body: Option<Vec<u8>>,
+}
+
+/// Where requests get and leave their cookies (the app shares one jar between threads).
+pub trait CookieStore {
+    fn cookie_header(&self, url: &Url) -> String;
+    fn store(&self, url: &Url, set_cookie: &str);
+}
+
+impl CookieStore for std::sync::Mutex<Jar> {
+    fn cookie_header(&self, url: &Url) -> String {
+        self.lock().map(|mut j| j.header(url, cookies::now(), false)).unwrap_or_default()
+    }
+    fn store(&self, url: &Url, set_cookie: &str) {
+        if let Ok(mut j) = self.lock() {
+            j.set(url, set_cookie, cookies::now(), false);
+        }
+    }
+}
+
+impl CookieStore for std::cell::RefCell<Jar> {
+    fn cookie_header(&self, url: &Url) -> String {
+        self.borrow_mut().header(url, cookies::now(), false)
+    }
+    fn store(&self, url: &Url, set_cookie: &str) {
+        self.borrow_mut().set(url, set_cookie, cookies::now(), false);
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { headers: Vec::new(), limit: 32 << 20, deadline: Duration::from_secs(60), max_redirects: 5, user_agent: "Volant".into() }
+        Self { headers: Vec::new(), limit: 32 << 20, deadline: Duration::from_secs(60), max_redirects: 5, user_agent: "Volant".into(), method: "GET".into(), body: None }
     }
 }
 
@@ -154,21 +186,39 @@ impl Response {
     }
 }
 
-/// The request bytes for `url`.
+/// The request bytes for `url` (head and body).
 pub fn request(url: &Url, opts: &Options) -> Result<Vec<u8>, String> {
     let host = if url.default_port() { url.host.clone() } else { format!("{}:{}", url.host, url.port) };
-    let mut r = format!(
-        "GET {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {}\r\nAccept: */*\r\nAccept-Encoding: gzip\r\nConnection: close\r\n",
-        url.target, opts.user_agent
-    );
+    let method = if opts.method.is_empty() { "GET" } else { opts.method.as_str() };
+    if !method.bytes().all(|c| c.is_ascii_alphabetic()) {
+        return Err(format!("bad request method {method:?}"));
+    }
+    let mut r = format!("{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {}\r\n", url.target, opts.user_agent);
+    let has = |name: &str| opts.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
+    if !has("accept") {
+        r.push_str("Accept: */*\r\n");
+    }
+    r.push_str("Accept-Encoding: gzip\r\nConnection: close\r\n");
     for (k, v) in &opts.headers {
-        if k.is_empty() || k.contains([':', '\r', '\n']) || v.contains(['\r', '\n']) {
+        if k.is_empty() || k.contains([':', '\r', '\n', ' ']) || v.contains(['\r', '\n']) {
             return Err(format!("bad request header {k:?}"));
+        }
+        // Set by Volant itself.
+        if ["host", "content-length", "connection", "accept-encoding", "transfer-encoding"].iter().any(|n| k.eq_ignore_ascii_case(n)) {
+            continue;
         }
         r.push_str(&format!("{k}: {v}\r\n"));
     }
+    let body = opts.body.as_deref();
+    if body.is_some() || matches!(method, "POST" | "PUT" | "PATCH") {
+        r.push_str(&format!("Content-Length: {}\r\n", body.map(|b| b.len()).unwrap_or(0)));
+    }
     r.push_str("\r\n");
-    Ok(r.into_bytes())
+    let mut bytes = r.into_bytes();
+    if let Some(b) = body {
+        bytes.extend_from_slice(b);
+    }
+    Ok(bytes)
 }
 
 enum Framing {
@@ -287,7 +337,7 @@ fn exchange<T: Transport>(t: &T, url: &Url, opts: &Options, until: Instant) -> R
         }
     };
     let get = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
-    let mut framing = if status == 204 || status == 304 {
+    let mut framing = if status == 204 || status == 304 || opts.method == "HEAD" {
         Framing::Empty
     } else if get("transfer-encoding").map(|v| v.to_ascii_lowercase().contains("chunked")).unwrap_or(false) {
         Framing::Chunked(Chunks::default())
@@ -348,17 +398,48 @@ fn exchange<T: Transport>(t: &T, url: &Url, opts: &Options, until: Instant) -> R
     Ok(Response { status, headers, body, url: url.as_string() })
 }
 
-/// GETs `url`, following redirects.
+/// GETs `url` (or uses `opts.method`), following redirects.
 pub fn get<T: Transport>(t: &T, url: &str, opts: &Options) -> Result<Response, String> {
+    send(t, url, opts, None)
+}
+
+/// Makes the request in `opts`, following redirects, sending and storing
+/// cookies in `jar` at every step.
+pub fn send<T: Transport>(t: &T, url: &str, opts: &Options, jar: Option<&dyn CookieStore>) -> Result<Response, String> {
     let until = Instant::now() + opts.deadline;
     let mut url = Url::parse(url).ok_or_else(|| format!("not a web address Volant can fetch: {url}"))?;
+    let mut opts = std::borrow::Cow::Borrowed(opts);
     for _ in 0..=opts.max_redirects {
-        let r = exchange(t, &url, opts, until)?;
+        let r = match jar {
+            Some(jar) => {
+                let cookie = jar.cookie_header(&url);
+                let mut o = opts.clone().into_owned();
+                o.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cookie"));
+                if !cookie.is_empty() {
+                    o.headers.push(("Cookie".into(), cookie));
+                }
+                let r = exchange(t, &url, &o, until)?;
+                for (k, v) in &r.headers {
+                    if k == "set-cookie" {
+                        jar.store(&url, v);
+                    }
+                }
+                r
+            }
+            None => exchange(t, &url, &opts, until)?,
+        };
         if matches!(r.status, 301 | 302 | 303 | 307 | 308) {
             if let Some(next) = r.header("location").and_then(|l| url.join(l)) {
                 // Never step down from HTTPS to plain HTTP.
                 if url.https && !next.https {
                     return Err("the server redirected to an insecure address".into());
+                }
+                // After a POST, 301/302/303 fetch the next page with GET (as browsers do).
+                if r.status == 303 && opts.method != "HEAD" || matches!(r.status, 301 | 302) && opts.method == "POST" {
+                    let o = opts.to_mut();
+                    o.method = "GET".into();
+                    o.body = None;
+                    o.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-type"));
                 }
                 url = next;
                 continue;
@@ -413,7 +494,13 @@ mod tests {
                 let (mut s, _) = l.accept().unwrap();
                 let mut req = Vec::new();
                 let mut b = [0u8; 1024];
-                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                let body_len = |req: &[u8]| {
+                    let head = req.windows(4).position(|w| w == b"\r\n\r\n")?;
+                    let h = String::from_utf8_lossy(&req[..head]).to_ascii_lowercase();
+                    let n = h.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                    Some(head + 4 + n)
+                };
+                while body_len(&req).map(|n| req.len() < n).unwrap_or(true) {
                     let n = s.read(&mut b).unwrap();
                     req.extend_from_slice(&b[..n]);
                 }
@@ -483,6 +570,37 @@ mod tests {
         assert_eq!(get(&Tcp, &format!("{base}/close"), &opts).unwrap().body, b"until close");
         let small = Options { limit: 1000, ..opts };
         assert!(get(&Tcp, &format!("{base}/huge"), &small).unwrap_err().contains("bigger"));
+    }
+
+    #[test]
+    fn post_and_cookies() {
+        let (port, seen) = serve(vec![
+            b"HTTP/1.1 303 See Other\r\nLocation: /home\r\nSet-Cookie: sid=42; Path=/; HttpOnly\r\nSet-Cookie: lang=en\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nwelcome".to_vec(),
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /api2\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+        ]);
+        let base = format!("http://127.0.0.1:{port}");
+        let jar = std::cell::RefCell::new(Jar::new());
+        let form = Options {
+            method: "POST".into(),
+            body: Some(b"user=amy&pass=x%26y".to_vec()),
+            headers: vec![("Content-Type".into(), "application/x-www-form-urlencoded".into())],
+            ..Default::default()
+        };
+        let r = send(&Tcp, &format!("{base}/login"), &form, Some(&jar)).unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (200, &b"welcome"[..]));
+        let login = seen.recv().unwrap();
+        assert!(login.starts_with("POST /login HTTP/1.1\r\n") && login.contains("Content-Length: 19\r\n") && login.ends_with("\r\n\r\nuser=amy&pass=x%26y"), "{login}");
+        // 303: the next page is a GET, with the new cookies.
+        let home = seen.recv().unwrap();
+        assert!(home.starts_with("GET /home ") && home.contains("Cookie: sid=42; lang=en\r\n") && !home.contains("Content-Type"), "{home}");
+        // 307 keeps the method and body.
+        let api = Options { method: "PUT".into(), body: Some(b"{}".to_vec()), ..Default::default() };
+        send(&Tcp, &format!("{base}/api"), &api, Some(&jar)).unwrap();
+        assert!(seen.recv().unwrap().starts_with("PUT /api "));
+        let second = seen.recv().unwrap();
+        assert!(second.starts_with("PUT /api2 ") && second.ends_with("{}"));
     }
 
     #[test]

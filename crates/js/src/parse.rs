@@ -1613,8 +1613,8 @@ impl Parser {
                 } else if self.is("(") {
                     self.next_async = is_async;
                     self.next_gen = is_gen;
-                    let name = shorthand.as_ref().map(|n| n.as_str().into());
-                    props.push(Prop::KeyValue(key, Expr::Func(self.func_rest(name)?)));
+                    // A method is named after its key (by the compiler), but doesn't see that name.
+                    props.push(Prop::KeyValue(key, Expr::Func(self.func_rest(None)?)));
                 } else if self.eat(":") {
                     props.push(Prop::KeyValue(key, self.assign()?));
                 } else if let Some(n) = shorthand {

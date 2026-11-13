@@ -16,12 +16,14 @@
 //! * [`store`]: settings and session files in a plain line format.
 //! * [`tabs`]: tab order, pinning, closed-tab memory and sleeping tabs.
 //! * [`json`]: the JSON writer and parser the app needs.
-//! * [`http`]: an HTTP/1.1 client (redirects, chunked, gzip, limits) over any transport.
+//! * [`http`]: an HTTP/1.1 client (GET and POST, redirects, chunked, gzip, limits) over any transport.
+//! * [`cookies`]: the cookie jar (domains, paths, expiry, Secure, HttpOnly), saved as plain lines.
 //! * [`deflate`], [`hash`], [`zip`]: DEFLATE both ways, gzip, SHA-256, CRC-32 and
 //!   zip archives, for updates, downloads and packaging.
 //! * [`macho`]: universal (fat) Mach-O binaries, as `lipo -create` makes them.
 
 
+pub mod cookies;
 pub mod deflate;
 pub mod favicon;
 pub mod hash;

@@ -32,6 +32,7 @@ define_class!(
                 b.session_dirty = true;
                 actions::save_session(b);
             });
+            super::net::save_cookies();
             NSApplicationTerminateReply::TerminateNow
         }
 
@@ -182,6 +183,7 @@ pub fn start_timers(b: &Browser) {
 
 fn housekeeping(b: &mut Browser) {
     actions::save_session(b);
+    super::net::save_cookies();
     actions::sleep_idle(b);
     super::blocking::maybe_update(b);
     super::weather::tick(b);
@@ -469,7 +471,22 @@ pub fn smoke_test(b: &Browser) {
         super::engine_view::type_and_press(b, "Concorde", "Enter");
     }));
     step(72.0, Box::new(move |_b| s15("15-engine-search")));
-    step(72.5, Box::new(move |_b| {
+    // Volant's own history: Back returns to the article, without WebKit loading anything.
+    let rep4 = report.clone();
+    step(72.5, Box::new(move |b| {
+        let url = b.tabs.active.and_then(|id| b.tabs.get(id)).map(|t| t.url.clone()).unwrap_or_default();
+        let cookies = super::net::cookie_jar().and_then(|j| j.lock().ok().map(|j| j.len())).unwrap_or(0);
+        rep4.lock().unwrap().push_str(&format!("simple page after search: {url} ({cookies} cookies)\n"));
+        actions::back(b);
+    }));
+    let rep5 = report.clone();
+    step(77.0, Box::new(move |b| {
+        let id = b.tabs.active;
+        let url = id.and_then(|id| b.tabs.get(id)).map(|t| t.url.clone()).unwrap_or_default();
+        let webkit = id.and_then(|id| b.webs.get(&id)).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string()).unwrap_or_default();
+        rep5.lock().unwrap().push_str(&format!("simple page after Back: {url} (WebKit: {:?})\n", webkit));
+    }));
+    step(78.0, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

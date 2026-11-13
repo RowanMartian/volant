@@ -4,13 +4,20 @@ use crate::{ApproxFonts, NoImages};
 struct FakeHost;
 
 impl Host for FakeHost {
-    fn fetch(&self, method: &str, url: &str, body: Option<&str>) -> Option<(u16, String, Vec<u8>)> {
-        match url {
-            "https://example.com/data.json" => Some((200, "application/json".into(), br#"{"items":["alpha","beta"]}"#.to_vec())),
-            "https://example.com/dir/app.js" => Some((200, "text/javascript".into(), b"document.getElementById('ext').textContent = 'external ran'".to_vec())),
-            "https://example.com/dir/mod/util.js" => Some((200, "text/javascript".into(), b"export const twice = n => n * 2; export default 'util';".to_vec())),
-            "https://cdn.example.com/lib/fmt.js" => Some((200, "text/javascript".into(), b"import u from 'https://example.com/dir/mod/util.js'; export const fmt = s => `[${s}|${u}]`;".to_vec())),
-            "https://example.com/echo" => Some((200, "text/plain".into(), format!("{method} {}", body.unwrap_or("")).into_bytes())),
+    fn request(&self, req: &Request) -> Option<Reply> {
+        let body = req.body.map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+        match req.url {
+            "https://example.com/data.json" => Some(Reply::ok(200, "application/json", br#"{"items":["alpha","beta"]}"#.to_vec())),
+            "https://example.com/dir/app.js" => Some(Reply::ok(200, "text/javascript", b"document.getElementById('ext').textContent = 'external ran'".to_vec())),
+            "https://example.com/dir/mod/util.js" => Some(Reply::ok(200, "text/javascript", b"export const twice = n => n * 2; export default 'util';".to_vec())),
+            "https://cdn.example.com/lib/fmt.js" => Some(Reply::ok(200, "text/javascript", b"import u from 'https://example.com/dir/mod/util.js'; export const fmt = s => `[${s}|${u}]`;".to_vec())),
+            "https://example.com/echo" => Some(Reply::ok(200, "text/plain", format!("{} {body}", req.method).into_bytes())),
+            "https://example.com/headers" => {
+                let h: Vec<String> = req.headers.iter().filter(|(k, _)| k != "Referer" && k != "Origin").map(|(k, v)| format!("{}={v}", k.to_ascii_lowercase())).collect();
+                let mut r = Reply::ok(200, "text/plain", h.join("&").into_bytes());
+                r.headers = vec![("x-answer".into(), "42".into()), ("set-cookie".into(), "hidden=1".into())];
+                Some(r)
+            }
             _ => None,
         }
     }
@@ -125,7 +132,7 @@ fn events_bubble_and_cancel() {
     assert_eq!(rt.take_navigation(), None, "cancelled by preventDefault");
     let go = link(&rt, "link");
     rt.click(go);
-    assert_eq!(rt.take_navigation().as_deref(), Some("https://example.com/next"));
+    assert_eq!(rt.take_navigation().map(|n| n.url).as_deref(), Some("https://example.com/next"));
 }
 
 #[test]
@@ -155,7 +162,7 @@ fn forms_typing_and_submit() {
     rt.click(lang);
     rt.click(q);
     rt.key("Enter");
-    assert_eq!(rt.take_navigation().as_deref(), Some("https://example.com/search?q=volant+r&safe=on&lang=fr"));
+    assert_eq!(rt.take_navigation().map(|n| n.url).as_deref(), Some("https://example.com/search?q=volant+r&safe=on&lang=fr"));
     // The snapshot shows the typed value inside the field.
     let snap = rt.snapshot();
     let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
@@ -256,4 +263,43 @@ fn module_scripts_and_import_maps() {
     );
     assert_eq!(text_of(&rt, "out"), "[42|util]");
     assert_eq!(console(&mut rt), "classic first\nlazy util true");
+}
+
+#[test]
+fn post_forms_cookies_and_request_headers() {
+    let mut rt = page(
+        "<form id=f method=post action=/login><input name=user value='amy lee'><input name=pass value='a&b'>\
+         <button id=go name=via value=button>Sign in</button></form>\
+         <form id=m method=post enctype=multipart/form-data action=/up><input name=note value=hi><button id=up>Up</button></form>\
+         <script>
+           document.cookie = 'theme=dark; path=/';
+           document.cookie = 'gone=1';
+           document.cookie = 'gone=; max-age=0';
+           console.log(document.cookie);
+           fetch('/headers', { method: 'POST', headers: { 'X-Token': 't1' }, body: new URLSearchParams({ a: '1' }) })
+             .then(r => r.text().then(t => console.log(r.status, r.headers.get('x-answer'), r.headers.get('set-cookie'), t)));
+           const x = new XMLHttpRequest(); x.open('GET', '/headers'); x.setRequestHeader('Accept', 'application/json');
+           x.onload = () => console.log('xhr', x.responseText, x.getResponseHeader('X-Answer')); x.send();
+         </script>",
+    );
+    rt.tick();
+    let out = console(&mut rt);
+    assert_eq!(out, "theme=dark\n200 42 null x-token=t1&content-type=application/x-www-form-urlencoded;charset=UTF-8\nxhr accept=application/json 42");
+    let id = |rt: &Runtime, id: &str| {
+        let s = rt.state.borrow();
+        (0..s.dom.nodes.len() as NodeId).find(|&n| s.dom.attr(n, "id") == Some(id)).unwrap()
+    };
+    let go = id(&rt, "go");
+    rt.click(go);
+    let nav = rt.take_navigation().expect("the form submits");
+    assert_eq!((nav.url.as_str(), nav.method.as_str()), ("https://example.com/login", "POST"));
+    assert_eq!(nav.body.as_deref(), Some(&b"user=amy+lee&pass=a%26b&via=button"[..]));
+    assert_eq!(nav.content_type.as_deref(), Some("application/x-www-form-urlencoded"));
+    let up = id(&rt, "up");
+    rt.click(up);
+    let nav = rt.take_navigation().expect("the multipart form submits");
+    let ty = nav.content_type.unwrap();
+    let boundary = ty.strip_prefix("multipart/form-data; boundary=").unwrap();
+    let body = String::from_utf8(nav.body.unwrap()).unwrap();
+    assert_eq!(body, format!("--{boundary}\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhi\r\n--{boundary}--\r\n"));
 }

@@ -542,6 +542,10 @@ fn changed(b: &mut Browser, ptr: usize, key: &str) {
     let Some(id) = tab_of(b, ptr) else { return };
     let active = b.tabs.active == Some(id);
     let web = b.webs[&id].web.clone();
+    // Simple Page runs this tab: WebKit's (empty) page isn't what the tab shows.
+    if matches!(key, "title" | "URL") && super::engine_view::handles(b, id) {
+        return;
+    }
     match key {
         "title" => {
             let title = unsafe { web.title() }.map(|t| t.to_string()).unwrap_or_default();

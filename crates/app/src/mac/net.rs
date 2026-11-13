@@ -3,11 +3,15 @@
 //! redirects, chunked, gzip, limits, deadlines). Underneath, the encrypted
 //! connection comes from macOS's Network framework, so certificate checks and
 //! TLS stay the system's. Call these from background threads: they block.
+//!
+//! Pages Volant runs itself share one cookie jar (volant-core's `cookies`),
+//! kept in `cookies.txt` in Volant's data folder.
 
 use block2::RcBlock;
 use std::ffi::{c_char, c_void, CString};
 use std::sync::mpsc;
 use std::time::Duration;
+use volant_core::cookies::{self, Jar};
 use volant_core::http::{self, Connection, Options, Response, Transport};
 
 /// Network framework and libdispatch objects.
@@ -199,6 +203,44 @@ impl Drop for NwConn {
             dispatch_release(self.queue);
         }
     }
+}
+
+/// The cookie jar for pages Volant loads itself, and where it's saved.
+static COOKIES: std::sync::OnceLock<(std::sync::Mutex<Jar>, std::path::PathBuf)> = std::sync::OnceLock::new();
+
+/// Loads the saved cookies (once, at launch).
+pub fn init_cookies(data: &std::path::Path) {
+    let path = data.join("cookies.txt");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = COOKIES.set((std::sync::Mutex::new(Jar::from_text(&text, cookies::now())), path));
+}
+
+pub fn cookie_jar() -> Option<&'static std::sync::Mutex<Jar>> {
+    COOKIES.get().map(|(j, _)| j)
+}
+
+/// Writes the cookies out if they changed (atomically, readable only by the user).
+pub fn save_cookies() {
+    let Some((jar, path)) = COOKIES.get() else { return };
+    let text = {
+        let Ok(mut j) = jar.lock() else { return };
+        if !j.dirty {
+            return;
+        }
+        j.dirty = false;
+        j.to_text()
+    };
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// A page's request (any method), with the shared cookie jar.
+pub fn send(url: &str, opts: &Options) -> Result<Response, String> {
+    http::send(&NwTransport, url, opts, cookie_jar().map(|j| j as &dyn http::CookieStore))
 }
 
 /// Options with Volant's User-Agent (GitHub's API requires one).

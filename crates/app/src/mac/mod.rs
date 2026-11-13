@@ -40,7 +40,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMMIT: Option<&str> = option_env!("VOLANT_COMMIT");
 
 pub struct Paths {
-    #[allow(dead_code)]
     pub data: PathBuf,
     pub settings: PathBuf,
     pub session: PathBuf,
@@ -198,6 +197,7 @@ pub fn run() {
 /// Called once AppKit has finished launching.
 pub fn start(delegate: Retained<delegate::Delegate>, mtm: MainThreadMarker) {
     let paths = Paths::new();
+    net::init_cookies(&paths.data);
     let settings = Settings::load(&paths.settings);
     let history = History::open(&paths.history);
     let favorites = volant_core::store::Favorites::load(&paths.favorites);

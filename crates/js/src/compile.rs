@@ -968,7 +968,7 @@ impl Compiler {
         }
         let declaring = std::mem::take(&mut self.declaring);
         self.push_fn(cap, f.arrow, f.is_async, f.is_gen, strict, Top::Function);
-        let r = self.func_body(f, uses_args, uses_super, declaring);
+        let r = self.func_body(f, uses_args, uses_super, declaring || method);
         let st = self.fns.pop().expect("a function");
         r?;
         let nparams = f.params.iter().take_while(|p| !matches!(p, Expr::Default(..) | Expr::Rest(_))).count() as u32;
@@ -1038,7 +1038,7 @@ impl Compiler {
                 }
             }
         }
-        // A named function expression sees its own name (unless something shadows it).
+        // A named function expression sees its own name (unless something shadows it); a method doesn't.
         if let (Some(n), false) = (&f.name, declaring) {
             if !f.arrow && self.lookup_here(n).is_none() {
                 let loc = self.declare_in_fn_scope(n, false);
@@ -2240,7 +2240,14 @@ impl Compiler {
                         }
                         Prop::KeyValue(k, v) => {
                             self.expr(k)?;
-                            self.expr(v)?;
+                            match (k, v) {
+                                // `{ a() {} }`, `{ a: function () {} }`: named after the key.
+                                (Expr::Str(name), Expr::Func(f)) if f.name.is_none() => {
+                                    let idx = self.func_with(f, Some(name), false, false)?;
+                                    self.emit(Op::Closure(idx));
+                                }
+                                _ => self.expr(v)?,
+                            }
                             self.emit(Op::InitElem);
                         }
                         Prop::Spread(v) => {
