@@ -1,9 +1,7 @@
-//! The interpreter: values, objects with prototypes, scopes, calls, and the
-//! evaluation of every statement and expression the parser produces. It walks
-//! the syntax tree directly; a step budget stops runaway scripts.
+//! Values, objects with prototypes, conversions, property access and calls:
+//! what the bytecode VM ([`crate::vm`]) and the built-ins share.
 
-use crate::parse::{Expr, Func, Member, Prop, Stmt};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -35,7 +33,8 @@ impl std::fmt::Debug for Value {
 pub type Native = Rc<dyn Fn(&mut Interp, Value, Vec<Value>) -> Res<Value>>;
 
 pub enum Callable {
-    Closure { func: Rc<Func>, scope: Scope, this: Option<Value>, sup: Option<Value> },
+    /// Compiled JavaScript, with the environment it closes over.
+    Closure(crate::vm::Closure),
     Native(Native),
 }
 
@@ -55,6 +54,10 @@ pub enum Kind {
     Promise(Rc<RefCell<crate::promise::PState>>),
     /// `new Proxy(target, handler)`; a revoked proxy's handler is null.
     Proxy(Value, Value),
+    /// A generator object (its suspended frame).
+    Generator(Rc<RefCell<crate::vm::GenState>>),
+    /// The VM's own iterators, for `for of` and spreads over built-in collections.
+    Iter(crate::vm::IterState),
 }
 
 #[derive(Clone)]
@@ -63,33 +66,80 @@ pub enum Slot {
     Accessor(Option<Value>, Option<Value>),
 }
 
+/// An own property: its key, its value (or accessors) and flags.
+pub struct PropEntry {
+    pub key: Rc<str>,
+    pub slot: Slot,
+    flags: u8,
+}
+
+/// Left out of `Object.keys` and `for in` (defineProperty's default).
+const HIDDEN: u8 = 1;
+/// Can't be assigned to (a global `const`, or a frozen property).
+const READONLY: u8 = 2;
+
+/// Objects with more own properties than this keep a hash index of them.
+const INDEX_AT: usize = 12;
+
 pub struct Object {
-    keys: Vec<Rc<str>>,
-    map: HashMap<Rc<str>, Slot>,
+    /// Own properties in insertion order; property lookups remember the
+    /// position they found a name at (an inline cache) and look there first.
+    props: Vec<PropEntry>,
+    index: Option<Box<HashMap<Rc<str>, u32, FxBuild>>>,
     pub proto: Option<Obj>,
     pub kind: Kind,
-    /// Own properties left out of `Object.keys` and `for in` (defineProperty's default).
-    hidden: Option<Box<Vec<Rc<str>>>>,
 }
 
 impl Object {
     pub fn new(proto: Option<Obj>, kind: Kind) -> Self {
-        Object { keys: Vec::new(), map: HashMap::new(), proto, kind, hidden: None }
+        Object { props: Vec::new(), index: None, proto, kind }
+    }
+
+    /// Where the own property `k` is: `hint` first (where it was last time).
+    #[inline]
+    pub fn find(&self, k: &str, hint: u32) -> Option<usize> {
+        if let Some(e) = self.props.get(hint as usize) {
+            if std::ptr::eq(e.key.as_ptr(), k.as_ptr()) || *e.key == *k {
+                return Some(hint as usize);
+            }
+        }
+        match &self.index {
+            Some(ix) => ix.get(k).map(|&i| i as usize),
+            None => self.props.iter().position(|e| *e.key == *k),
+        }
+    }
+    #[inline]
+    pub fn slot_at(&self, i: usize) -> &Slot {
+        &self.props[i].slot
+    }
+    #[inline]
+    pub fn slot_at_mut(&mut self, i: usize) -> &mut Slot {
+        &mut self.props[i].slot
+    }
+    pub fn readonly_at(&self, i: usize) -> bool {
+        self.props[i].flags & READONLY != 0
+    }
+    pub fn set_readonly(&mut self, k: &str, yes: bool) {
+        if let Some(i) = self.find(k, 0) {
+            let f = &mut self.props[i].flags;
+            *f = if yes { *f | READONLY } else { *f & !READONLY };
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.props.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.props.is_empty()
     }
     /// Marks an own property enumerable or not.
     pub fn set_enumerable(&mut self, k: &str, yes: bool) {
-        let hidden = self.hidden.get_or_insert_with(Default::default);
-        let at = hidden.iter().position(|x| &**x == k);
-        match (yes, at) {
-            (true, Some(p)) => {
-                hidden.remove(p);
-            }
-            (false, None) => hidden.push(k.into()),
-            _ => {}
+        if let Some(i) = self.find(k, 0) {
+            let f = &mut self.props[i].flags;
+            *f = if yes { *f & !HIDDEN } else { *f | HIDDEN };
         }
     }
     pub fn is_enumerable(&self, k: &str) -> bool {
-        !self.hidden.as_ref().map(|h| h.iter().any(|x| &**x == k)).unwrap_or(false)
+        self.find(k, 0).map(|i| self.props[i].flags & HIDDEN == 0).unwrap_or(true)
     }
     /// Every own key, enumerable or not (hidden internals excepted).
     pub fn all_keys(&self) -> Vec<Rc<str>> {
@@ -97,35 +147,78 @@ impl Object {
             Kind::Array(a) => (0..a.len()).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
-        out.extend(self.keys.iter().filter(|k| !k.starts_with('\0')).cloned());
+        out.extend(self.props.iter().filter(|e| !e.key.starts_with('\0')).map(|e| e.key.clone()));
         if matches!(self.kind, Kind::Array(_)) {
             out.push("length".into());
         }
         out
     }
     pub fn get_own(&self, k: &str) -> Option<&Slot> {
-        self.map.get(k)
+        self.find(k, 0).map(|i| &self.props[i].slot)
+    }
+    fn push(&mut self, key: Rc<str>, slot: Slot, flags: u8) -> usize {
+        let at = self.props.len();
+        if let Some(ix) = &mut self.index {
+            ix.insert(key.clone(), at as u32);
+        }
+        self.props.push(PropEntry { key, slot, flags });
+        if self.index.is_none() && self.props.len() > INDEX_AT {
+            let mut ix: HashMap<Rc<str>, u32, FxBuild> = HashMap::with_capacity_and_hasher(self.props.len() * 2, FxBuild);
+            for (i, e) in self.props.iter().enumerate() {
+                ix.insert(e.key.clone(), i as u32);
+            }
+            self.index = Some(Box::new(ix));
+        }
+        at
     }
     pub fn set_own(&mut self, k: &str, v: Value) {
-        if let Some(slot) = self.map.get_mut(k) {
-            *slot = Slot::Data(v);
-        } else {
-            let k: Rc<str> = k.into();
-            self.keys.push(k.clone());
-            self.map.insert(k, Slot::Data(v));
+        match self.find(k, 0) {
+            Some(i) => self.props[i].slot = Slot::Data(v),
+            None => {
+                self.push(k.into(), Slot::Data(v), 0);
+            }
+        }
+    }
+    /// Like [`set_own`](Self::set_own) with a key already shared; where it went.
+    pub fn set_own_rc(&mut self, k: &Rc<str>, v: Value, hint: u32) -> usize {
+        match self.find(k, hint) {
+            Some(i) => {
+                self.props[i].slot = Slot::Data(v);
+                i
+            }
+            None => self.push(k.clone(), Slot::Data(v), 0),
+        }
+    }
+    /// A non-enumerable own data property (methods, internals).
+    pub fn set_hidden(&mut self, k: &str, v: Value) {
+        match self.find(k, 0) {
+            Some(i) => {
+                self.props[i].slot = Slot::Data(v);
+                self.props[i].flags |= HIDDEN;
+            }
+            None => {
+                self.push(k.into(), Slot::Data(v), HIDDEN);
+            }
         }
     }
     pub fn set_slot(&mut self, k: &str, s: Slot) {
-        if !self.map.contains_key(k) {
-            self.keys.push(k.into());
+        match self.find(k, 0) {
+            Some(i) => self.props[i].slot = s,
+            None => {
+                self.push(k.into(), s, 0);
+            }
         }
-        self.map.insert(k.into(), s);
     }
     pub fn delete(&mut self, k: &str) -> bool {
-        if self.map.remove(k).is_some() {
-            self.keys.retain(|x| &**x != k);
-            if let Some(h) = &mut self.hidden {
-                h.retain(|x| &**x != k);
+        if let Some(i) = self.find(k, 0) {
+            self.props.remove(i);
+            if let Some(ix) = &mut self.index {
+                ix.remove(k);
+                for v in ix.values_mut() {
+                    if *v as usize > i {
+                        *v -= 1;
+                    }
+                }
             }
         }
         true
@@ -137,42 +230,53 @@ impl Object {
             Kind::Boxed(Value::Str(s)) => (0..s.chars().count()).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
-        match &self.hidden {
-            Some(h) => out.extend(self.keys.iter().filter(|k| !k.starts_with('\0') && !h.contains(k)).cloned()),
-            None => out.extend(self.keys.iter().filter(|k| !k.starts_with('\0')).cloned()),
-        }
+        out.extend(self.props.iter().filter(|e| e.flags & HIDDEN == 0 && !e.key.starts_with('\0')).map(|e| e.key.clone()));
         out
+    }
+    /// The own properties, in order (for copying).
+    pub fn entries(&self) -> impl Iterator<Item = (&Rc<str>, &Slot, bool)> {
+        self.props.iter().map(|e| (&e.key, &e.slot, e.flags & HIDDEN == 0))
+    }
+}
+
+/// A small, fast hash for property names (FxHash).
+#[derive(Clone, Copy, Default)]
+pub struct FxBuild;
+
+pub struct FxHasher(u64);
+
+impl std::hash::BuildHasher for FxBuild {
+    type Hasher = FxHasher;
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher(0)
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        let mut h = self.0;
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+            h = (h.rotate_left(5) ^ w).wrapping_mul(K);
+        }
+        for &b in chunks.remainder() {
+            h = (h.rotate_left(5) ^ b as u64).wrapping_mul(K);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_u8(&mut self, b: u8) {
+        self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn finish(&self) -> u64 {
+        self.0
     }
 }
 
 pub type Res<T> = Result<T, Value>;
-
-pub enum Flow {
-    Normal,
-    Return(Value),
-    Break(Option<Rc<str>>),
-    Continue(Option<Rc<str>>),
-}
-
-/// The hidden property holding a class's instance-field initialiser.
-const FIELDS: &str = "\0fields";
-
-pub struct ScopeData {
-    pub(crate) vars: HashMap<Rc<str>, (Value, bool)>,
-    parent: Option<Scope>,
-    /// `this` (and `arguments`) for a function scope; arrows look outward.
-    this: Option<Value>,
-    /// A module's imported names: (the exporting module's namespace, the name there).
-    pub(crate) imports: Option<Box<HashMap<Rc<str>, (Obj, Rc<str>)>>>,
-    /// The object of a `with` statement: its properties are variables here.
-    with: Option<Obj>,
-}
-
-pub type Scope = Rc<RefCell<ScopeData>>;
-
-pub(crate) fn scope(parent: Option<&Scope>, _func: bool, this: Option<Value>) -> Scope {
-    Rc::new(RefCell::new(ScopeData { vars: HashMap::new(), parent: parent.cloned(), this, imports: None, with: None }))
-}
 
 /// How a number prints in JavaScript.
 pub fn num_to_string(n: f64) -> String {
@@ -200,8 +304,9 @@ pub fn num_to_string(n: f64) -> String {
 }
 
 pub struct Interp {
-    pub global: Scope,
     pub global_obj: Obj,
+    /// The global `let`, `const` and `class` declarations of scripts.
+    pub global_lex: Obj,
     pub object_proto: Obj,
     pub function_proto: Obj,
     pub array_proto: Obj,
@@ -227,12 +332,16 @@ pub struct Interp {
     /// The virtual clock, in ms since the page started.
     pub now: f64,
     pub timer_seq: u32,
-    /// Values yielded by the generators currently running (innermost last).
-    pub gen_stack: Vec<Vec<Value>>,
+    /// Operand stacks to reuse (each run of the VM takes one).
+    pub(crate) stack_pool: Vec<Vec<Value>>,
+    /// JS frames active across all runs (a recursion limit independent of the native stack).
+    pub(crate) frames: u32,
+    /// A generator's frame as it yields (handed back to its `next()`).
+    pub(crate) yielded: Option<crate::vm::Suspended>,
     regex_cache: HashMap<(Rc<str>, Rc<str>), Rc<crate::regex::Regex>>,
-    steps: u64,
+    pub(crate) steps: u64,
     pub max_steps: u64,
-    depth: u32,
+    pub(crate) depth: u32,
     /// How deep JS calls may nest. Each level costs native stack, so callers
     /// that raise it run the interpreter on a thread with a large stack.
     pub max_depth: u32,
@@ -258,8 +367,9 @@ impl Interp {
         let mk = |kind: Kind| Rc::new(RefCell::new(Object::new(Some(object_proto.clone()), kind)));
         let function_proto = mk(Kind::Plain);
         let global_obj = mk(Kind::Plain);
+        let global_lex = Rc::new(RefCell::new(Object::new(None, Kind::Plain)));
         let mut i = Interp {
-            global: scope(None, true, Some(Value::Undefined)),
+            global_lex,
             array_proto: mk(Kind::Array(Vec::new())),
             string_proto: mk(Kind::Plain),
             number_proto: mk(Kind::Plain),
@@ -281,7 +391,9 @@ impl Interp {
             timers: Vec::new(),
             now: 0.0,
             timer_seq: 0,
-            gen_stack: Vec::new(),
+            stack_pool: Vec::new(),
+            frames: 0,
+            yielded: None,
             regex_cache: HashMap::new(),
             steps: 0,
             max_steps: 50_000_000,
@@ -324,6 +436,19 @@ impl Interp {
     pub fn error(&self, name: &str, msg: &str) -> Value {
         let e = self.obj(Kind::Error);
         if let Value::Obj(o) = &e {
+            // RangeError, TypeError, …: their own prototype, so `instanceof` works.
+            if name != "Error" {
+                let proto = match self.global_obj.borrow().get_own(name) {
+                    Some(Slot::Data(Value::Obj(c))) => match c.borrow().get_own("prototype") {
+                        Some(Slot::Data(Value::Obj(p))) => Some(p.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if proto.is_some() {
+                    o.borrow_mut().proto = proto;
+                }
+            }
             let mut o = o.borrow_mut();
             o.set_own("name", Value::Str(name.into()));
             o.set_own("message", Value::Str(msg.into()));
@@ -390,7 +515,9 @@ impl Interp {
 
     /// ToPrimitive, preferring strings (`valueOf` for numbers first when `number`).
     pub fn to_primitive(&mut self, v: &Value, number: bool) -> Res<Value> {
-        let Value::Obj(o) = v else { return Ok(v.clone()) };
+        let Value::Obj(o) = v else {
+            return Ok(v.clone());
+        };
         if let Kind::Boxed(p) = &o.borrow().kind {
             return Ok(p.clone());
         }
@@ -502,19 +629,25 @@ impl Interp {
     }
 
     pub fn get(&mut self, v: &Value, k: &str) -> Res<Value> {
+        self.get_hint(v, k, None)
+    }
+
+    /// A property read; `ic` remembers where the name was found, to look there first next time.
+    pub(crate) fn get_hint(&mut self, v: &Value, k: &str, ic: Option<&Cell<u32>>) -> Res<Value> {
         match v {
-            Value::Undefined | Value::Null => return self.throw("TypeError", &format!("can't read '{k}' of {}", if matches!(v, Value::Null) { "null" } else { "undefined" })),
+            Value::Undefined | Value::Null => return self.throw("TypeError", &format!("can't read '{}' of {}", show_key(k), if matches!(v, Value::Null) { "null" } else { "undefined" })),
             Value::Str(s) => {
                 if k == "length" {
-                    return Ok(Value::Num(s.encode_utf16().count() as f64));
+                    return Ok(Value::Num(utf16_len(s) as f64));
                 }
-                if let Ok(i) = k.parse::<usize>() {
-                    return Ok(s.chars().nth(i).map(|c| Value::Str(c.to_string().into())).unwrap_or(Value::Undefined));
+                if let Some(i) = index_of(k) {
+                    return Ok(string_at(s, i));
                 }
             }
             Value::Obj(o) => {
                 let b = o.borrow();
                 match &b.kind {
+                    Kind::Plain | Kind::Function(_) | Kind::Error => {}
                     Kind::Proxy(t, h) => {
                         let (t, h) = (t.clone(), h.clone());
                         drop(b);
@@ -524,39 +657,57 @@ impl Interp {
                         if k == "length" {
                             return Ok(Value::Num(a.len() as f64));
                         }
-                        if let Ok(i) = k.parse::<usize>() {
+                        if let Some(i) = index_of(k) {
                             return Ok(a.get(i).cloned().unwrap_or(Value::Undefined));
                         }
                     }
                     Kind::Map(m) if k == "size" => return Ok(Value::Num(m.len() as f64)),
                     Kind::Set(s) if k == "size" => return Ok(Value::Num(s.len() as f64)),
-                    Kind::Boxed(Value::Str(s)) if k == "length" => return Ok(Value::Num(s.encode_utf16().count() as f64)),
+                    Kind::Boxed(Value::Str(s)) if k == "length" => return Ok(Value::Num(utf16_len(s) as f64)),
                     _ => {}
                 }
             }
             _ => {}
         }
-        let mut cur = self.proto_of(v);
+        let hint = ic.map(|c| c.get()).unwrap_or(0);
         // A primitive's own "properties" start at its prototype.
+        let mut cur = self.proto_of(v);
+        let mut first = true;
         let mut steps = 0;
         while let Some(o) = cur {
-            steps += 1;
-            if steps > 1000 {
-                break;
-            }
-            let slot = o.borrow().get_own(k).cloned();
-            match slot {
-                Some(Slot::Data(val)) => return Ok(val),
-                Some(Slot::Accessor(getter, _)) => {
-                    return match getter {
-                        Some(g) => self.call(&g, v.clone(), vec![]),
-                        None => Ok(Value::Undefined),
+            let slot = {
+                let b = o.borrow();
+                match b.find(k, hint) {
+                    Some(i) => {
+                        if let Some(c) = ic {
+                            c.set(i as u32);
+                        }
+                        match b.slot_at(i) {
+                            Slot::Data(val) => return Ok(val.clone()),
+                            Slot::Accessor(g, _) => Some(g.clone()),
+                        }
                     }
+                    None => None,
                 }
-                None => {}
+            };
+            if let Some(getter) = slot {
+                return match getter {
+                    Some(g) => self.call(&g, v.clone(), vec![]),
+                    None => Ok(Value::Undefined),
+                };
+            }
+            if first {
+                first = false;
+                if let Some(val) = crate::vm::lazy_function_prop(self, &o, k) {
+                    return Ok(val);
+                }
             }
             if k == "__proto__" {
                 return Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null));
+            }
+            steps += 1;
+            if steps > 1000 {
+                break;
             }
             cur = o.borrow().proto.clone();
         }
@@ -564,34 +715,58 @@ impl Interp {
     }
 
     pub fn set(&mut self, v: &Value, k: &str, val: Value) -> Res<()> {
+        self.set_hint(v, k, val, None)
+    }
+
+    pub(crate) fn set_hint(&mut self, v: &Value, k: &str, val: Value, ic: Option<&Cell<u32>>) -> Res<()> {
         let Value::Obj(o) = v else {
             if matches!(v, Value::Undefined | Value::Null) {
-                return self.throw("TypeError", &format!("can't set '{k}' of {v:?}"));
+                return self.throw("TypeError", &format!("can't set '{}' of {v:?}", show_key(k)));
             }
             return Ok(()); // setting on a primitive does nothing
         };
-        if let Some((t, h)) = Self::proxy_parts(v) {
-            return self.proxy_set(t, h, k, val, v);
-        }
         {
             let mut b = o.borrow_mut();
-            if let Kind::Array(a) = &mut b.kind {
-                if k == "length" {
-                    let n = match &val {
-                        Value::Num(n) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
-                        _ => return Err(Value::Str("RangeError: invalid array length".into())),
-                    };
-                    a.resize(n, Value::Undefined);
-                    return Ok(());
+            match &mut b.kind {
+                Kind::Plain | Kind::Function(_) | Kind::Error => {}
+                Kind::Proxy(..) => {
+                    drop(b);
+                    let (t, h) = Self::proxy_parts(v).expect("a proxy");
+                    return self.proxy_set(t, h, k, val, v);
                 }
-                if let Ok(i) = k.parse::<usize>() {
-                    if i < 10_000_000 {
-                        if i >= a.len() {
-                            a.resize(i + 1, Value::Undefined);
-                        }
-                        a[i] = val;
+                Kind::Array(a) => {
+                    if k == "length" {
+                        let n = match &val {
+                            Value::Num(n) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
+                            _ => {
+                                drop(b);
+                                return self.throw("RangeError", "invalid array length");
+                            }
+                        };
+                        a.resize(n, Value::Undefined);
                         return Ok(());
                     }
+                    if let Some(i) = index_of(k) {
+                        if i < 10_000_000 {
+                            if i >= a.len() {
+                                a.resize(i + 1, Value::Undefined);
+                            }
+                            a[i] = val;
+                            return Ok(());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // An own data property: just replace it.
+            let hint = ic.map(|c| c.get()).unwrap_or(0);
+            if let Some(i) = b.find(k, hint) {
+                if let Some(c) = ic {
+                    c.set(i as u32);
+                }
+                if let Slot::Data(d) = b.slot_at_mut(i) {
+                    *d = val;
+                    return Ok(());
                 }
             }
         }
@@ -603,19 +778,25 @@ impl Interp {
             }
             return Ok(());
         }
-        // A setter anywhere up the chain runs; otherwise it's an own data property.
+        // A setter anywhere up the chain runs; otherwise it's a new own data property.
         let mut cur = Some(o.clone());
         while let Some(c) = cur {
-            let slot = c.borrow().get_own(k).cloned();
-            if let Some(Slot::Accessor(_, setter)) = slot {
-                if let Some(s) = setter {
+            let setter = match c.borrow().get_own(k) {
+                Some(Slot::Accessor(_, s)) => Some(s.clone()),
+                _ => None,
+            };
+            if let Some(s) = setter {
+                if let Some(s) = s {
                     self.call(&s, v.clone(), vec![val])?;
                 }
                 return Ok(());
             }
             cur = c.borrow().proto.clone();
         }
-        o.borrow_mut().set_own(k, val);
+        let i = o.borrow_mut().set_own_rc(&Rc::from(k), val, 0);
+        if let Some(c) = ic {
+            c.set(i as u32);
+        }
         Ok(())
     }
 
@@ -636,14 +817,6 @@ impl Interp {
     }
 
     // ------------------------------------------------------------ running
-
-    fn tick(&mut self) -> Res<()> {
-        self.steps += 1;
-        if self.steps > self.max_steps {
-            return self.throw("RangeError", "the script ran too long and was stopped");
-        }
-        Ok(())
-    }
 
     /// Runs a whole script in the global scope; returns the last expression statement's value.
     /// Starts a fresh step budget (for each script and each event a page handles).
@@ -673,23 +846,15 @@ impl Interp {
         Ok(o)
     }
 
+    /// Runs a classic script; its completion value (the last expression statement's).
     pub fn run(&mut self, src: &str) -> Result<Value, String> {
         let prog = crate::parse::parse(src).map_err(|e| format!("SyntaxError: {e}"))?;
-        let g = self.global.clone();
-        self.hoist(&prog, &g, true);
-        let mut last = Value::Undefined;
-        for s in &prog {
-            match s {
-                Stmt::Expr(e) => last = self.eval(e, &g).map_err(|v| self.describe(&v))?,
-                s => match self.exec(s, &g) {
-                    Ok(_) => {}
-                    Err(v) => return Err(self.describe(&v)),
-                },
-            }
-        }
+        let code = crate::compile::Compiler::script(&prog).map_err(|e| format!("SyntaxError: {e}"))?;
+        let this = Value::Obj(self.global_obj.clone());
+        let r = self.run_code(code, this);
         // Promise reactions run as soon as the script ends; timers wait for the caller's event loop.
         self.run_microtasks();
-        Ok(last)
+        r.map_err(|v| self.describe(&v))
     }
 
     /// "TypeError: message" for an exception value.
@@ -702,235 +867,6 @@ impl Interp {
             }
         }
         format!("Uncaught {}", self.to_str(v).map(|s| s.to_string()).unwrap_or_else(|_| "exception".into()))
-    }
-
-    /// Declares `var`s and functions before a body runs (hoisting).
-    pub(crate) fn hoist(&mut self, body: &[Stmt], sc: &Scope, func_scope: bool) {
-        for s in body {
-            let s = match s {
-                Stmt::Export(e) => match &**e {
-                    crate::parse::Export::Decl(d, _) => d,
-                    _ => continue,
-                },
-                s => s,
-            };
-            match s {
-                Stmt::Func(f) => {
-                    let fv = self.closure(f, sc);
-                    if let Some(n) = &f.name {
-                        sc.borrow_mut().vars.insert(n.clone(), (fv, true));
-                    }
-                }
-                _ if func_scope => self.hoist_vars(s, sc),
-                _ => {}
-            }
-        }
-    }
-
-    fn hoist_vars(&mut self, s: &Stmt, sc: &Scope) {
-        let declare = |p: &Expr| {
-            let mut names = Vec::new();
-            pattern_names(p, &mut names);
-            for n in names {
-                sc.borrow_mut().vars.entry(n).or_insert((Value::Undefined, true));
-            }
-        };
-        match s {
-            Stmt::Var("var", decls) => decls.iter().for_each(|(p, _)| declare(p)),
-            Stmt::ForIn("var", p, ..) => declare(p),
-            Stmt::If(_, a, b) => {
-                self.hoist_vars(a, sc);
-                if let Some(b) = b {
-                    self.hoist_vars(b, sc);
-                }
-            }
-            Stmt::Block(b) => b.iter().for_each(|s| self.hoist_vars(s, sc)),
-            Stmt::For(i, _, _, body) => {
-                if let Some(i) = i {
-                    self.hoist_vars(i, sc);
-                }
-                self.hoist_vars(body, sc);
-            }
-            Stmt::ForIn(_, _, _, _, body) | Stmt::While(_, body) | Stmt::DoWhile(body, _) | Stmt::Labeled(_, body) | Stmt::With(_, body) => self.hoist_vars(body, sc),
-            Stmt::Try(a, c, f) => {
-                a.iter().for_each(|s| self.hoist_vars(s, sc));
-                if let Some((_, c)) = c {
-                    c.iter().for_each(|s| self.hoist_vars(s, sc));
-                }
-                if let Some(f) = f {
-                    f.iter().for_each(|s| self.hoist_vars(s, sc));
-                }
-            }
-            Stmt::Switch(_, cases) => cases.iter().for_each(|(_, b)| b.iter().for_each(|s| self.hoist_vars(s, sc))),
-            _ => {}
-        }
-    }
-
-    pub(crate) fn closure(&self, f: &Rc<Func>, sc: &Scope) -> Value {
-        let this = if f.arrow { Some(self.lookup_this(sc)) } else { None };
-        let fv = self.obj(Kind::Function(Callable::Closure { func: f.clone(), scope: sc.clone(), this, sup: None }));
-        if let Value::Obj(o) = &fv {
-            let mut b = o.borrow_mut();
-            b.set_own("name", Value::Str(f.name.clone().unwrap_or_else(|| "".into())));
-            b.set_own("length", Value::Num(f.params.iter().filter(|p| !matches!(p, Expr::Default(..) | Expr::Rest(_))).count() as f64));
-            if !f.arrow {
-                // Every ordinary function can be a constructor.
-                let proto = Rc::new(RefCell::new(Object::new(Some(self.object_proto.clone()), Kind::Plain)));
-                proto.borrow_mut().set_own("constructor", fv.clone());
-                proto.borrow_mut().set_enumerable("constructor", false);
-                b.set_own("prototype", Value::Obj(proto));
-            }
-        }
-        fv
-    }
-
-    fn lookup_this(&self, sc: &Scope) -> Value {
-        let mut cur = Some(sc.clone());
-        while let Some(s) = cur {
-            if let Some(t) = &s.borrow().this {
-                return t.clone();
-            }
-            cur = s.borrow().parent.clone();
-        }
-        Value::Undefined
-    }
-
-    pub(crate) fn lookup(&mut self, sc: &Scope, name: &str) -> Res<Value> {
-        let mut cur = Some(sc.clone());
-        while let Some(s) = cur {
-            if let Some((v, _)) = s.borrow().vars.get(name) {
-                return Ok(v.clone());
-            }
-            let imported = s.borrow().imports.as_ref().and_then(|m| m.get(name).cloned());
-            if let Some((ns, k)) = imported {
-                return self.get(&Value::Obj(ns), &k);
-            }
-            let with = s.borrow().with.clone();
-            if let Some(w) = with {
-                let w = Value::Obj(w);
-                if self.has(&w, name)? {
-                    return self.get(&w, name);
-                }
-            }
-            cur = s.borrow().parent.clone();
-        }
-        // Then the global object (properties set as `window.x = ...`).
-        let g = Value::Obj(self.global_obj.clone());
-        if self.global_obj.borrow().get_own(name).is_some() {
-            return self.get(&g, name);
-        }
-        self.throw("ReferenceError", &format!("{name} is not defined"))
-    }
-
-    fn assign_var(&mut self, sc: &Scope, name: &str, v: Value) -> Res<()> {
-        let mut cur = Some(sc.clone());
-        while let Some(s) = cur {
-            if let Some(slot) = s.borrow_mut().vars.get_mut(name) {
-                if !slot.1 {
-                    return self.throw("TypeError", &format!("assignment to constant '{name}'"));
-                }
-                slot.0 = v;
-                return Ok(());
-            }
-            if s.borrow().imports.as_ref().map(|m| m.contains_key(name)).unwrap_or(false) {
-                return self.throw("TypeError", &format!("assignment to imported binding '{name}'"));
-            }
-            let with = s.borrow().with.clone();
-            if let Some(w) = with {
-                let w = Value::Obj(w);
-                if self.has(&w, name)? {
-                    return self.set(&w, name, v);
-                }
-            }
-            cur = s.borrow().parent.clone();
-        }
-        // Undeclared: becomes a global (sloppy mode).
-        self.global_obj.borrow_mut().set_own(name, v);
-        Ok(())
-    }
-
-    fn declare(&mut self, sc: &Scope, kind: &str, pat: &Expr, v: Value) -> Res<()> {
-        match pat {
-            Expr::Ident(n) => {
-                if kind == "var" {
-                    // var lives in the function scope (already hoisted there).
-                    return self.assign_var(sc, n, v);
-                }
-                sc.borrow_mut().vars.insert(n.clone(), (v, kind != "const"));
-                Ok(())
-            }
-            _ => self.destructure(sc, Some(kind), pat, v),
-        }
-    }
-
-    /// Binds (or assigns, when `kind` is None) a pattern to a value.
-    fn destructure(&mut self, sc: &Scope, kind: Option<&str>, pat: &Expr, v: Value) -> Res<()> {
-        match pat {
-            Expr::Ident(_) => match kind {
-                Some(k) => self.declare(sc, k, pat, v),
-                None => self.assign_to(sc, pat, v),
-            },
-            Expr::Member(..) => self.assign_to(sc, pat, v),
-            Expr::Default(t, d) => {
-                let v = if matches!(v, Value::Undefined) { self.eval(d, sc)? } else { v };
-                self.destructure(sc, kind, t, v)
-            }
-            Expr::ArrayPat(items) => {
-                let list = self.iterate(&v)?;
-                for (i, it) in items.iter().enumerate() {
-                    match it {
-                        None => {}
-                        Some(Expr::Rest(t)) => {
-                            let rest = self.array(list.get(i..).map(|s| s.to_vec()).unwrap_or_default());
-                            self.destructure(sc, kind, t, rest)?;
-                        }
-                        Some(p) => self.destructure(sc, kind, p, list.get(i).cloned().unwrap_or(Value::Undefined))?,
-                    }
-                }
-                Ok(())
-            }
-            Expr::ObjectPat(props) => {
-                if matches!(v, Value::Undefined | Value::Null) {
-                    return self.throw("TypeError", "can't destructure undefined or null");
-                }
-                let mut used = Vec::new();
-                for (k, p) in props {
-                    if let Expr::Rest(t) = p {
-                        let rest = self.obj(Kind::Plain);
-                        if let (Value::Obj(src), Value::Obj(dst)) = (&v, &rest) {
-                            let keys = src.borrow().own_keys();
-                            for key in keys.into_iter().filter(|k| !used.contains(k)) {
-                                let val = self.get(&v, &key)?;
-                                dst.borrow_mut().set_own(&key, val);
-                            }
-                        }
-                        self.destructure(sc, kind, t, rest)?;
-                        continue;
-                    }
-                    let kv = self.eval(k, sc)?;
-                    let key = self.key(&kv)?;
-                    used.push(key.clone());
-                    let val = self.get(&v, &key)?;
-                    self.destructure(sc, kind, p, val)?;
-                }
-                Ok(())
-            }
-            _ => self.throw("SyntaxError", "invalid destructuring target"),
-        }
-    }
-
-    fn assign_to(&mut self, sc: &Scope, target: &Expr, v: Value) -> Res<()> {
-        match target {
-            Expr::Ident(n) => self.assign_var(sc, n, v),
-            Expr::Member(o, k, _) => {
-                let obj = self.eval(o, sc)?;
-                let kv = self.eval(k, sc)?;
-                let key = self.key(&kv)?;
-                self.set(&obj, &key, v)
-            }
-            Expr::ArrayPat(_) | Expr::ObjectPat(_) => self.destructure(sc, None, target, v),
-            _ => self.throw("SyntaxError", "invalid assignment target"),
-        }
     }
 
     /// The values of something iterable (arrays, strings, Map, Set, array-likes).
@@ -994,113 +930,43 @@ impl Interp {
         self.depth += 1;
         if self.depth > self.max_depth {
             self.depth -= 1;
-            // Name the functions going round, to make the loop findable.
-            let mut names: Vec<String> = Vec::new();
-            for (n, line) in self.call_names.iter().rev().take(12) {
-                names.push(format!("{}:{line}", n.as_deref().unwrap_or("function")));
-            }
-            return self.throw("RangeError", &format!("too much recursion (in {})", names.join(" ← ")));
+            return Err(self.recursion_error());
         }
         let r = self.call_inner(f, this, args);
         self.depth -= 1;
         r
     }
 
-    fn call_inner(&mut self, f: &Value, this: Value, args: Vec<Value>) -> Res<Value> {
-        let Value::Obj(o) = f else { return self.throw("TypeError", &format!("{f:?} is not a function")) };
-        if let Some((target, handler)) = Self::proxy_parts(f) {
-            let trap = self.get(&handler, "apply")?;
-            if !Self::is_callable(&trap) {
-                return self.call(&target, this, args);
-            }
-            let list = self.array(args);
-            return self.call(&trap, handler, vec![target, this, list]);
+    /// "too much recursion", naming the functions going round (to make the loop findable).
+    pub(crate) fn recursion_error(&self) -> Value {
+        let mut names: Vec<String> = Vec::new();
+        for (n, line) in self.call_names.iter().rev().take(12) {
+            names.push(format!("{}:{line}", n.as_deref().unwrap_or("function")));
         }
-        let callable = match &o.borrow().kind {
-            Kind::Function(Callable::Native(n)) => Ok(n.clone()),
-            Kind::Function(Callable::Closure { func, scope, this: lexical, sup }) => Err((func.clone(), scope.clone(), lexical.clone(), sup.clone())),
+        self.error("RangeError", &format!("too much recursion (in {})", names.join(" ← ")))
+    }
+
+    fn call_inner(&mut self, f: &Value, this: Value, args: Vec<Value>) -> Res<Value> {
+        let Value::Obj(o) = f else {
+            return self.throw("TypeError", &format!("{f:?} is not a function"));
+        };
+        let native = match &o.borrow().kind {
+            Kind::Function(Callable::Native(n)) => Some(n.clone()),
+            Kind::Function(Callable::Closure(_)) => None,
+            Kind::Proxy(..) => {
+                let (target, handler) = Self::proxy_parts(f).expect("a proxy");
+                let trap = self.get(&handler, "apply")?;
+                if !Self::is_callable(&trap) {
+                    return self.call(&target, this, args);
+                }
+                let list = self.array(args);
+                return self.call(&trap, handler, vec![target, this, list]);
+            }
             _ => return self.throw("TypeError", "not a function"),
         };
-        match callable {
-            Ok(native) => native(self, this, args),
-            Err((func, _, _, _)) if func.is_gen => Ok(self.make_generator(f.clone(), this, args)),
-            Err((func, _, _, _)) if func.is_async => {
-                let r = self.call_body(f, this, args);
-                let (p, _) = self.new_promise();
-                match r {
-                    Ok(v) => self.resolve_promise(&p, v),
-                    Err(e) => self.reject_promise(&p, e),
-                }
-                Ok(p)
-            }
-            Err(_) => self.call_body(f, this, args),
-        }
-    }
-
-    /// Runs a closure's body (without the async / generator wrapping).
-    pub(crate) fn call_body(&mut self, f: &Value, this: Value, args: Vec<Value>) -> Res<Value> {
-        let Value::Obj(o) = f else { return self.throw("TypeError", "not a function") };
-        let callable = match &o.borrow().kind {
-            Kind::Function(Callable::Closure { func, scope, this: lexical, sup }) => Some((func.clone(), scope.clone(), lexical.clone(), sup.clone())),
-            _ => None,
-        };
-        match callable {
-            None => self.throw("TypeError", "not a function"),
-            Some((func, parent, lexical, sup)) => {
-                self.call_names.push((func.name.clone(), func.line));
-                let r = self.call_closure(f, o, func, parent, lexical, sup, this, args);
-                self.call_names.pop();
-                r
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn call_closure(&mut self, f: &Value, o: &Obj, func: Rc<Func>, parent: Scope, lexical: Option<Value>, sup: Option<Value>, this: Value, args: Vec<Value>) -> Res<Value> {
-        {
-            {
-                let this_v = if func.arrow { lexical } else { Some(this) };
-                let sc = scope(Some(&parent), true, if func.arrow { None } else { this_v.clone() });
-                if !func.arrow {
-                    let arguments = self.array(args.clone());
-                    sc.borrow_mut().vars.insert("arguments".into(), (arguments, true));
-                }
-                let fields = o.borrow().get_own(FIELDS).and_then(|s| if let Slot::Data(v) = s { Some(v.clone()) } else { None });
-                let derived = sup.is_some();
-                if let Some(s) = sup {
-                    sc.borrow_mut().vars.insert("super".into(), (s, false));
-                    sc.borrow_mut().vars.insert(FIELDS.into(), (fields.clone().unwrap_or(Value::Undefined), false));
-                }
-                if let (Some(init), false) = (&fields, derived) {
-                    self.call(init, this_v.clone().unwrap_or(Value::Undefined), vec![])?;
-                }
-                if let Some(name) = &func.name {
-                    if !sc.borrow().vars.contains_key(name) {
-                        sc.borrow_mut().vars.insert(name.clone(), (f.clone(), true));
-                    }
-                }
-                for (i, p) in func.params.iter().enumerate() {
-                    match p {
-                        Expr::Rest(t) => {
-                            let rest = self.array(args.get(i..).map(|s| s.to_vec()).unwrap_or_default());
-                            self.destructure(&sc, Some("let"), t, rest)?;
-                        }
-                        p => {
-                            let v = args.get(i).cloned().unwrap_or(Value::Undefined);
-                            self.destructure(&sc, Some("let"), p, v)?;
-                        }
-                    }
-                }
-                self.hoist(&func.body, &sc, true);
-                for s in &func.body {
-                    match self.exec(s, &sc)? {
-                        Flow::Return(v) => return Ok(v),
-                        Flow::Normal => {}
-                        _ => break,
-                    }
-                }
-                Ok(Value::Undefined)
-            }
+        match native {
+            Some(n) => n(self, this, args),
+            None => self.call_closure(f, this, args, false),
         }
     }
 
@@ -1125,17 +991,28 @@ impl Interp {
             }
             return self.call(f, marker, args);
         }
+        let obj = self.new_this(f)?;
+        self.depth += 1;
+        if self.depth > self.max_depth {
+            self.depth -= 1;
+            return Err(self.recursion_error());
+        }
+        let r = self.call_closure(f, obj, args, true);
+        self.depth -= 1;
+        r
+    }
+
+    /// The object `new f()` starts with: f.prototype's child (an Error if it inherits from Error).
+    pub(crate) fn new_this(&mut self, f: &Value) -> Res<Value> {
         let proto = match self.get(f, "prototype")? {
             Value::Obj(p) => p,
             _ => self.object_proto.clone(),
         };
         let kind = if self.inherits_error(&proto) { Kind::Error } else { Kind::Plain };
-        let obj = Value::Obj(Rc::new(RefCell::new(Object::new(Some(proto), kind))));
-        let r = self.call(f, obj.clone(), args)?;
-        Ok(if matches!(r, Value::Obj(_)) { r } else { obj })
+        Ok(Value::Obj(Rc::new(RefCell::new(Object::new(Some(proto), kind)))))
     }
 
-    fn inherits_error(&self, p: &Obj) -> bool {
+    pub(crate) fn inherits_error(&self, p: &Obj) -> bool {
         let mut cur = Some(p.clone());
         while let Some(c) = cur {
             if Rc::ptr_eq(&c, &self.error_proto) {
@@ -1159,7 +1036,9 @@ impl Interp {
             }
         }
         let Value::Obj(o) = v else { return Ok(false) };
-        let Value::Obj(p) = self.get(f, "prototype")? else { return Ok(false) };
+        let Value::Obj(p) = self.get(f, "prototype")? else {
+            return Ok(false);
+        };
         let mut cur = o.borrow().proto.clone();
         while let Some(c) = cur {
             if Rc::ptr_eq(&c, &p) {
@@ -1169,809 +1048,46 @@ impl Interp {
         }
         Ok(false)
     }
+}
 
-    // ------------------------------------------------------------ statements
-
-    fn block(&mut self, body: &[Stmt], sc: &Scope) -> Res<Flow> {
-        let inner = scope(Some(sc), false, None);
-        self.hoist(body, &inner, false);
-        for s in body {
-            let f = self.exec(s, &inner)?;
-            if !matches!(f, Flow::Normal) {
-                return Ok(f);
-            }
-        }
-        Ok(Flow::Normal)
+/// A property key as an array index, if it is one.
+#[inline]
+pub fn index_of(k: &str) -> Option<usize> {
+    let b = k.as_bytes();
+    if b.is_empty() || b.len() > 10 || (b[0] == b'0' && b.len() > 1) || !b.iter().all(|c| c.is_ascii_digit()) {
+        return None;
     }
+    k.parse().ok()
+}
 
-    /// Runs a loop body; tells the loop whether to stop (and what to return).
-    fn loop_body(&mut self, body: &Stmt, sc: &Scope, label: Option<&Rc<str>>) -> Res<Option<Flow>> {
-        match self.exec(body, sc)? {
-            Flow::Normal => Ok(None),
-            Flow::Continue(None) => Ok(None),
-            Flow::Continue(Some(l)) if Some(&l) == label => Ok(None),
-            Flow::Break(None) => Ok(Some(Flow::Normal)),
-            Flow::Break(Some(l)) if Some(&l) == label => Ok(Some(Flow::Normal)),
-            other => Ok(Some(other)),
-        }
-    }
-
-    pub fn exec(&mut self, s: &Stmt, sc: &Scope) -> Res<Flow> {
-        self.exec_labeled(s, sc, None)
-    }
-
-    fn exec_labeled(&mut self, s: &Stmt, sc: &Scope, label: Option<&Rc<str>>) -> Res<Flow> {
-        self.tick()?;
-        Ok(match s {
-            Stmt::Expr(e) => {
-                self.eval(e, sc)?;
-                Flow::Normal
-            }
-            Stmt::Var(kind, decls) => {
-                for (p, init) in decls {
-                    let v = match init {
-                        Some(e) => {
-                            let v = self.eval(e, sc)?;
-                            // `const f = function () {}` names the function.
-                            if let (Expr::Ident(n), Value::Obj(o)) = (p, &v) {
-                                if matches!(init, Some(Expr::Func(f)) if f.name.is_none()) {
-                                    o.borrow_mut().set_own("name", Value::Str(n.clone()));
-                                }
-                            }
-                            v
-                        }
-                        None if *kind == "var" => continue,
-                        None => Value::Undefined,
-                    };
-                    self.declare(sc, kind, p, v)?;
-                }
-                Flow::Normal
-            }
-            Stmt::Func(_) | Stmt::Empty | Stmt::Import(..) => Flow::Normal,
-            Stmt::Export(e) => match &**e {
-                crate::parse::Export::Decl(d, _) => self.exec(d, sc)?,
-                crate::parse::Export::Default(e) => {
-                    let v = self.eval(e, sc)?;
-                    if let (Expr::Func(f), Value::Obj(o)) = (e, &v) {
-                        if f.name.is_none() {
-                            o.borrow_mut().set_own("name", Value::Str("default".into()));
-                        }
-                    }
-                    sc.borrow_mut().vars.insert("default".into(), (v, false));
-                    Flow::Normal
-                }
-                _ => Flow::Normal,
-            },
-            Stmt::Return(e) => Flow::Return(match e {
-                Some(e) => self.eval(e, sc)?,
-                None => Value::Undefined,
-            }),
-            Stmt::If(c, a, b) => {
-                let cv = self.eval(c, sc)?;
-                if Self::truthy(&cv) {
-                    self.exec(a, sc)?
-                } else if let Some(b) = b {
-                    self.exec(b, sc)?
-                } else {
-                    Flow::Normal
-                }
-            }
-            Stmt::Block(b) => self.block(b, sc)?,
-            Stmt::For(init, test, update, body) => {
-                let lsc = scope(Some(sc), false, None);
-                if let Some(i) = init {
-                    self.exec(i, &lsc)?;
-                }
-                loop {
-                    self.tick()?;
-                    if let Some(t) = test {
-                        let tv = self.eval(t, &lsc)?;
-                        if !Self::truthy(&tv) {
-                            break;
-                        }
-                    }
-                    // Each iteration gets its own copy of the loop variables (closures capture it).
-                    let iter = scope(Some(sc), false, None);
-                    iter.borrow_mut().vars = lsc.borrow().vars.clone();
-                    if let Some(stop) = self.loop_body(body, &iter, label)? {
-                        return Ok(stop);
-                    }
-                    lsc.borrow_mut().vars = iter.borrow().vars.clone();
-                    if let Some(u) = update {
-                        self.eval(u, &lsc)?;
-                    }
-                }
-                Flow::Normal
-            }
-            Stmt::ForIn(kind, pat, of, iter, body) => {
-                let it = self.eval(iter, sc)?;
-                let items: Vec<Value> = if *of {
-                    self.iterate(&it)?
-                } else {
-                    match &it {
-                        Value::Obj(_) if Self::proxy_parts(&it).is_some() => self.keys_of(&it)?.into_iter().map(Value::Str).collect(),
-                        Value::Obj(o) => {
-                            // Own keys, then inherited enumerable ones (not built-in prototypes).
-                            let mut keys = o.borrow().own_keys();
-                            let mut cur = o.borrow().proto.clone();
-                            while let Some(p) = cur {
-                                if [&self.object_proto, &self.array_proto, &self.function_proto].iter().any(|b| Rc::ptr_eq(b, &p)) {
-                                    break;
-                                }
-                                for k in p.borrow().own_keys() {
-                                    if !keys.contains(&k) {
-                                        keys.push(k);
-                                    }
-                                }
-                                cur = p.borrow().proto.clone();
-                            }
-                            keys.into_iter().map(Value::Str).collect()
-                        }
-                        Value::Str(s) => (0..s.chars().count()).map(|i| Value::Str(i.to_string().into())).collect(),
-                        _ => Vec::new(),
-                    }
-                };
-                for v in items {
-                    self.tick()?;
-                    let isc = scope(Some(sc), false, None);
-                    if kind.is_empty() {
-                        self.assign_to(&isc, pat, v)?;
-                    } else {
-                        self.declare(&isc, kind, pat, v)?;
-                    }
-                    if let Some(stop) = self.loop_body(body, &isc, label)? {
-                        return Ok(stop);
-                    }
-                }
-                Flow::Normal
-            }
-            Stmt::While(c, body) => {
-                loop {
-                    let cv = self.eval(c, sc)?;
-                    if !Self::truthy(&cv) {
-                        break;
-                    }
-                    if let Some(stop) = self.loop_body(body, sc, label)? {
-                        return Ok(stop);
-                    }
-                }
-                Flow::Normal
-            }
-            Stmt::DoWhile(body, c) => {
-                loop {
-                    if let Some(stop) = self.loop_body(body, sc, label)? {
-                        return Ok(stop);
-                    }
-                    let cv = self.eval(c, sc)?;
-                    if !Self::truthy(&cv) {
-                        break;
-                    }
-                }
-                Flow::Normal
-            }
-            Stmt::Break(l) => Flow::Break(l.clone()),
-            Stmt::Continue(l) => Flow::Continue(l.clone()),
-            Stmt::Throw(e) => return Err(self.eval(e, sc)?),
-            Stmt::Try(body, catch, finally) => {
-                let r = self.block(body, sc);
-                let r = match (r, catch) {
-                    (Err(exc), Some((param, cbody))) => {
-                        if self.steps > self.max_steps {
-                            Err(exc) // the step budget can't be caught
-                        } else {
-                            let csc = scope(Some(sc), false, None);
-                            if let Some(p) = param {
-                                self.destructure(&csc, Some("let"), p, exc)?;
-                            }
-                            self.block(cbody, &csc)
-                        }
-                    }
-                    (r, _) => r,
-                };
-                if let Some(f) = finally {
-                    let ff = self.block(f, sc)?;
-                    if !matches!(ff, Flow::Normal) {
-                        return Ok(ff);
-                    }
-                }
-                r?
-            }
-            Stmt::Switch(d, cases) => {
-                let dv = self.eval(d, sc)?;
-                let ssc = scope(Some(sc), false, None);
-                let mut start = None;
-                for (i, (t, _)) in cases.iter().enumerate() {
-                    if let Some(t) = t {
-                        let tv = self.eval(t, &ssc)?;
-                        if Self::strict_eq(&dv, &tv) {
-                            start = Some(i);
-                            break;
-                        }
-                    }
-                }
-                let start = start.or_else(|| cases.iter().position(|(t, _)| t.is_none()));
-                if let Some(start) = start {
-                    for (_, body) in &cases[start..] {
-                        for s in body {
-                            match self.exec(s, &ssc)? {
-                                Flow::Normal => {}
-                                Flow::Break(None) => return Ok(Flow::Normal),
-                                other => return Ok(other),
-                            }
-                        }
-                    }
-                }
-                Flow::Normal
-            }
-            Stmt::With(o, body) => {
-                let ov = self.eval(o, sc)?;
-                let Value::Obj(w) = ov else { return self.throw("TypeError", "with needs an object") };
-                let wsc = scope(Some(sc), false, None);
-                wsc.borrow_mut().with = Some(w);
-                self.exec(body, &wsc)?
-            }
-            Stmt::Labeled(l, body) => match self.exec_labeled(body, sc, Some(l))? {
-                Flow::Break(Some(b)) if &b == l => Flow::Normal,
-                other => other,
-            },
-            Stmt::Class(name, sup, members) => {
-                let c = self.class(Some(name.clone()), sup.as_ref(), members, sc)?;
-                sc.borrow_mut().vars.insert(name.clone(), (c, true));
-                Flow::Normal
-            }
-        })
-    }
-
-    fn class(&mut self, name: Option<Rc<str>>, sup: Option<&Expr>, members: &[(Expr, Member, bool)], sc: &Scope) -> Res<Value> {
-        let parent = match sup {
-            Some(e) => Some(self.eval(e, sc)?),
-            None => None,
-        };
-        let ctor_func = members.iter().find_map(|(k, m, st)| match m {
-            Member::Method(f) if !st && matches!(k, Expr::Str(n) if &**n == "constructor") => Some(f.clone()),
-            _ => None,
-        });
-        let ctor_func = ctor_func.unwrap_or_else(|| {
-            // The default constructor passes its arguments up to the parent's.
-            let body = if parent.is_some() {
-                vec![Stmt::Expr(Expr::Call(Box::new(Expr::Ident("super".into())), vec![Expr::Spread(Box::new(Expr::Ident("arguments".into())))], false))]
-            } else {
-                vec![]
-            };
-            Rc::new(Func { name: name.clone(), params: vec![], body, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 })
-        });
-        let ctor = self.closure(&ctor_func, sc);
-        let proto = match self.get(&ctor, "prototype")? {
-            Value::Obj(p) => p,
-            _ => return self.throw("TypeError", "class without prototype"),
-        };
-        if let Some(n) = &name {
-            self.set(&ctor, "name", Value::Str(n.clone()))?;
-        }
-        if let Some(p) = &parent {
-            if let Value::Obj(pp) = self.get(p, "prototype")? {
-                proto.borrow_mut().proto = Some(pp);
-            }
-            if let (Value::Obj(c), Value::Obj(po)) = (&ctor, p) {
-                c.borrow_mut().proto = Some(po.clone());
-            }
-        }
-        let set_super = |v: &Value, s: Option<Value>| {
-            if let Value::Obj(o) = v {
-                if let Kind::Function(Callable::Closure { sup, .. }) = &mut o.borrow_mut().kind {
-                    *sup = s;
-                }
-            }
-        };
-        set_super(&ctor, parent.clone());
-        let mut fields = Vec::new();
-        let mut statics = Vec::new();
-        for (k, member, is_static) in members {
-            if !is_static && matches!(k, Expr::Str(n) if &**n == "constructor") {
-                continue;
-            }
-            let kv = self.eval(k, sc)?;
-            let key = self.key(&kv)?;
-            let target = if *is_static {
-                match &ctor {
-                    Value::Obj(c) => c.clone(),
-                    _ => unreachable!(),
-                }
-            } else {
-                proto.clone()
-            };
-            match member {
-                Member::Method(f) => {
-                    let m = self.closure(f, sc);
-                    set_super(&m, parent.clone());
-                    target.borrow_mut().set_own(&key, m);
-                    target.borrow_mut().set_enumerable(&key, false);
-                }
-                Member::Get(f) | Member::Set(f) => {
-                    let m = self.closure(f, sc);
-                    set_super(&m, parent.clone());
-                    let old = target.borrow().get_own(&key).cloned();
-                    let (mut g, mut st) = match old {
-                        Some(Slot::Accessor(g, s)) => (g, s),
-                        _ => (None, None),
-                    };
-                    if matches!(member, Member::Get(_)) {
-                        g = Some(m);
-                    } else {
-                        st = Some(m);
-                    }
-                    target.borrow_mut().set_slot(&key, Slot::Accessor(g, st));
-                    target.borrow_mut().set_enumerable(&key, false);
-                }
-                Member::StaticBlock(body) => statics.push(Stmt::Block(body.clone())),
-                Member::Field(init) => {
-                    let value = init.clone().unwrap_or(Expr::Undefined);
-                    let assign = Stmt::Expr(Expr::Assign("=", Box::new(Expr::Member(Box::new(Expr::This), Box::new(Expr::Str(key)), false)), Box::new(value)));
-                    if *is_static {
-                        statics.push(assign);
-                    } else {
-                        fields.push(assign);
-                    }
-                }
-            }
-        }
-        // Instance fields run as a hidden initialiser: before the constructor
-        // body in a base class, right after super() in a derived one.
-        if !fields.is_empty() {
-            let init = Rc::new(Func { name: None, params: vec![], body: fields, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 });
-            let f = self.closure(&init, sc);
-            set_super(&f, parent.clone());
-            if let Value::Obj(c) = &ctor {
-                c.borrow_mut().set_own(FIELDS, f);
-            }
-        }
-        if let Some(n) = &name {
-            // Static initialisers can refer to the class by name.
-            sc.borrow_mut().vars.insert(n.clone(), (ctor.clone(), true));
-        }
-        if !statics.is_empty() {
-            let init = Rc::new(Func { name: None, params: vec![], body: statics, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 });
-            let f = self.closure(&init, sc);
-            self.call(&f, ctor.clone(), vec![])?;
-        }
-        Ok(ctor)
-    }
-
-    // ------------------------------------------------------------ expressions
-
-    fn args(&mut self, list: &[Expr], sc: &Scope) -> Res<Vec<Value>> {
-        let mut out = Vec::with_capacity(list.len());
-        for a in list {
-            if let Expr::Spread(e) = a {
-                let v = self.eval(e, sc)?;
-                out.extend(self.iterate(&v)?);
-            } else {
-                out.push(self.eval(a, sc)?);
-            }
-        }
-        Ok(out)
-    }
-
-    pub fn eval(&mut self, e: &Expr, sc: &Scope) -> Res<Value> {
-        self.tick()?;
-        Ok(match e {
-            Expr::Num(n) => Value::Num(*n),
-            Expr::Str(s) => Value::Str(s.clone()),
-            Expr::Bool(b) => Value::Bool(*b),
-            Expr::Null => Value::Null,
-            Expr::Undefined => Value::Undefined,
-            Expr::Template(strs, exprs) => {
-                let mut out = String::new();
-                for (i, s) in strs.iter().enumerate() {
-                    out.push_str(s);
-                    if let Some(e) = exprs.get(i) {
-                        let v = self.eval(e, sc)?;
-                        out.push_str(&self.to_str(&v)?);
-                    }
-                }
-                Value::Str(out.into())
-            }
-            Expr::Ident(n) => self.lookup(sc, n)?,
-            Expr::This => self.lookup_this(sc),
-            Expr::Array(items) => {
-                let v = self.args(items, sc)?;
-                self.array(v)
-            }
-            Expr::Object(props) => {
-                let o = self.obj(Kind::Plain);
-                let Value::Obj(oo) = &o else { unreachable!() };
-                for p in props {
-                    match p {
-                        Prop::KeyValue(k, v) => {
-                            let kv = self.eval(k, sc)?;
-                            let key = self.key(&kv)?;
-                            let val = self.eval(v, sc)?;
-                            if let (Expr::Func(f), Value::Obj(fo)) = (v, &val) {
-                                if f.name.is_none() {
-                                    fo.borrow_mut().set_own("name", Value::Str(key.clone()));
-                                }
-                            }
-                            if &*key == "__proto__" && matches!(k, Expr::Str(_)) {
-                                self.set(&o, "__proto__", val)?;
-                            } else {
-                                oo.borrow_mut().set_own(&key, val);
-                            }
-                        }
-                        Prop::Spread(e) => {
-                            let v = self.eval(e, sc)?;
-                            if let Value::Obj(src) = &v {
-                                let keys = src.borrow().own_keys();
-                                for key in keys {
-                                    let val = self.get(&v, &key)?;
-                                    oo.borrow_mut().set_own(&key, val);
-                                }
-                            }
-                        }
-                        Prop::Getter(k, f) | Prop::Setter(k, f) => {
-                            let kv = self.eval(k, sc)?;
-                            let key = self.key(&kv)?;
-                            let fv = self.closure(f, sc);
-                            let existing = oo.borrow().get_own(&key).cloned();
-                            let (mut g, mut s) = match existing {
-                                Some(Slot::Accessor(g, s)) => (g, s),
-                                _ => (None, None),
-                            };
-                            if matches!(p, Prop::Getter(..)) {
-                                g = Some(fv);
-                            } else {
-                                s = Some(fv);
-                            }
-                            oo.borrow_mut().set_slot(&key, Slot::Accessor(g, s));
-                        }
-                    }
-                }
-                o
-            }
-            Expr::Func(f) => self.closure(f, sc),
-            Expr::Regex(body, flags) => self.regexp(body, flags)?,
-            Expr::Import(spec) => {
-                let v = self.eval(spec, sc)?;
-                let spec = self.to_str(&v)?;
-                self.dynamic_import(&spec, sc)
-            }
-            Expr::ImportMeta => self.import_meta(sc),
-            Expr::Await(e) => {
-                let v = self.eval(e, sc)?;
-                self.await_value(v)?
-            }
-            Expr::Yield(arg, delegate) => {
-                let v = match arg {
-                    Some(e) => self.eval(e, sc)?,
-                    None => Value::Undefined,
-                };
-                let items = if *delegate { self.iterate(&v)? } else { vec![v] };
-                let Some(buf) = self.gen_stack.last_mut() else { return self.throw("SyntaxError", "yield outside a generator") };
-                buf.extend(items);
-                if buf.len() > crate::promise::MAX_YIELDS {
-                    // An endless generator: stop it here (generators run ahead of their consumer).
-                    return Err(Value::Str(crate::promise::GEN_STOP.into()));
-                }
-                Value::Undefined
-            }
-            Expr::Unary(op, x) => {
-                if *op == "typeof" {
-                    // typeof an undeclared name is "undefined", not an error.
-                    if let Expr::Ident(n) = &**x {
-                        return Ok(Value::Str(match self.lookup(sc, n) {
-                            Ok(v) => Self::typeof_(&v),
-                            Err(_) => "undefined",
-                        }
-                        .into()));
-                    }
-                    let v = self.eval(x, sc)?;
-                    return Ok(Value::Str(Self::typeof_(&v).into()));
-                }
-                if *op == "delete" {
-                    if let Expr::Member(o, k, _) = &**x {
-                        let ov = self.eval(o, sc)?;
-                        let kv = self.eval(k, sc)?;
-                        let key = self.key(&kv)?;
-                        return Ok(Value::Bool(self.delete_property(&ov, &key)?));
-                    }
-                    return Ok(Value::Bool(true));
-                }
-                let v = self.eval(x, sc)?;
-                match *op {
-                    "!" => Value::Bool(!Self::truthy(&v)),
-                    "-" => Value::Num(-self.to_number(&v)?),
-                    "+" => Value::Num(self.to_number(&v)?),
-                    "~" => Value::Num(!(to_i32(self.to_number(&v)?)) as f64),
-                    "void" => Value::Undefined,
-                    _ => return self.throw("SyntaxError", "unknown operator"),
-                }
-            }
-            Expr::Update(op, prefix, target) => {
-                if let Some((obj, key)) = self.member_ref(target, sc)? {
-                    let old = self.get(&obj, &key)?;
-                    let n = self.to_number(&old)?;
-                    let new = if *op == "++" { n + 1.0 } else { n - 1.0 };
-                    self.set(&obj, &key, Value::Num(new))?;
-                    return Ok(Value::Num(if *prefix { new } else { n }));
-                }
-                let old = self.eval(target, sc)?;
-                let n = self.to_number(&old)?;
-                let new = if *op == "++" { n + 1.0 } else { n - 1.0 };
-                self.assign_to(sc, target, Value::Num(new))?;
-                Value::Num(if *prefix { new } else { n })
-            }
-            Expr::Binary(op, a, b) => {
-                let av = self.eval(a, sc)?;
-                let bv = self.eval(b, sc)?;
-                self.binary(op, &av, &bv)?
-            }
-            Expr::Logical(op, a, b) => {
-                let av = self.eval(a, sc)?;
-                let take_left = match *op {
-                    "&&" => !Self::truthy(&av),
-                    "||" => Self::truthy(&av),
-                    _ => !matches!(av, Value::Undefined | Value::Null),
-                };
-                if take_left {
-                    av
-                } else {
-                    self.eval(b, sc)?
-                }
-            }
-            Expr::Assign(op, target, value) => {
-                // `o.k = v`: the object and key are evaluated before the value.
-                if let Some((obj, key)) = self.member_ref(target, sc)? {
-                    let v = match *op {
-                        "=" => self.eval(value, sc)?,
-                        "&&=" | "||=" | "??=" => {
-                            let cur = self.get(&obj, &key)?;
-                            let keep = match *op {
-                                "&&=" => !Self::truthy(&cur),
-                                "||=" => Self::truthy(&cur),
-                                _ => !matches!(cur, Value::Undefined | Value::Null),
-                            };
-                            if keep {
-                                return Ok(cur);
-                            }
-                            self.eval(value, sc)?
-                        }
-                        _ => {
-                            let cur = self.get(&obj, &key)?;
-                            let rv = self.eval(value, sc)?;
-                            self.binary(&op[..op.len() - 1], &cur, &rv)?
-                        }
-                    };
-                    self.set(&obj, &key, v.clone())?;
-                    return Ok(v);
-                }
-                if *op == "=" {
-                    let v = self.eval(value, sc)?;
-                    if let (Expr::Ident(n), Expr::Func(f), Value::Obj(o)) = (&**target, &**value, &v) {
-                        if f.name.is_none() {
-                            o.borrow_mut().set_own("name", Value::Str(n.clone()));
-                        }
-                    }
-                    self.assign_to(sc, target, v.clone())?;
-                    return Ok(v);
-                }
-                let cur = self.eval(target, sc)?;
-                let v = match *op {
-                    "&&=" | "||=" | "??=" => {
-                        let keep = match *op {
-                            "&&=" => !Self::truthy(&cur),
-                            "||=" => Self::truthy(&cur),
-                            _ => !matches!(cur, Value::Undefined | Value::Null),
-                        };
-                        if keep {
-                            return Ok(cur);
-                        }
-                        self.eval(value, sc)?
-                    }
-                    _ => {
-                        let rv = self.eval(value, sc)?;
-                        let bop = &op[..op.len() - 1];
-                        self.binary(bop, &cur, &rv)?
-                    }
-                };
-                self.assign_to(sc, target, v.clone())?;
-                v
-            }
-            Expr::Cond(c, a, b) => {
-                let cv = self.eval(c, sc)?;
-                if Self::truthy(&cv) {
-                    self.eval(a, sc)?
-                } else {
-                    self.eval(b, sc)?
-                }
-            }
-            Expr::Member(o, k, optional) => {
-                if let Expr::Ident(n) = &**o {
-                    if &**n == "super" {
-                        // super.method: from the parent class's prototype.
-                        let parent = self.lookup(sc, "super")?;
-                        let pp = self.get(&parent, "prototype")?;
-                        let kv = self.eval(k, sc)?;
-                        let key = self.key(&kv)?;
-                        return self.get(&pp, &key);
-                    }
-                }
-                let ov = self.eval(o, sc)?;
-                if *optional && matches!(ov, Value::Undefined | Value::Null) {
-                    return Ok(Value::Undefined);
-                }
-                let kv = self.eval(k, sc)?;
-                let key = self.key(&kv)?;
-                self.get(&ov, &key)?
-            }
-            Expr::Call(callee, args, optional) => {
-                // super(...) runs the parent constructor on this object.
-                if let Expr::Ident(n) = &**callee {
-                    if &**n == "super" {
-                        let parent = self.lookup(sc, "super")?;
-                        let this = self.lookup_this(sc);
-                        let a = self.args(args, sc)?;
-                        let is_native = matches!(&parent, Value::Obj(o) if matches!(o.borrow().kind, Kind::Function(Callable::Native(_))));
-                        if is_native {
-                            // A built-in parent (Error): copy what it makes onto this.
-                            let made = self.construct(&parent, a)?;
-                            if let (Value::Obj(src), Value::Obj(dst)) = (&made, &this) {
-                                let keys = src.borrow().own_keys();
-                                for k in keys {
-                                    let v = self.get(&made, &k)?;
-                                    dst.borrow_mut().set_own(&k, v);
-                                }
-                            }
-                        } else {
-                            self.call(&parent, this.clone(), a)?;
-                        }
-                        let init = self.lookup(sc, FIELDS)?;
-                        if Self::is_callable(&init) {
-                            self.call(&init, this, vec![])?;
-                        }
-                        return Ok(Value::Undefined);
-                    }
-                }
-                let (f, this) = match &**callee {
-                    Expr::Member(o, k, opt_member) => {
-                        let this = if matches!(&**o, Expr::Ident(n) if &**n == "super") { self.lookup_this(sc) } else { self.eval(o, sc)? };
-                        if *opt_member && matches!(this, Value::Undefined | Value::Null) {
-                            return Ok(Value::Undefined);
-                        }
-                        let f = if matches!(&**o, Expr::Ident(n) if &**n == "super") {
-                            self.eval(callee, sc)?
-                        } else {
-                            let kv = self.eval(k, sc)?;
-                            let key = self.key(&kv)?;
-                            let f = self.get(&this, &key)?;
-                            if !Self::is_callable(&f) && !*optional {
-                                return self.throw("TypeError", &format!("{} is not a function", describe_callee(callee)));
-                            }
-                            f
-                        };
-                        (f, this)
-                    }
-                    other => (self.eval(other, sc)?, Value::Undefined),
-                };
-                if *optional && matches!(f, Value::Undefined | Value::Null) {
-                    return Ok(Value::Undefined);
-                }
-                if !Self::is_callable(&f) {
-                    return self.throw("TypeError", &format!("{} is not a function", describe_callee(callee)));
-                }
-                let a = self.args(args, sc)?;
-                self.call(&f, this, a)?
-            }
-            Expr::New(callee, args) => {
-                let f = self.eval(callee, sc)?;
-                let a = self.args(args, sc)?;
-                if !Self::is_callable(&f) {
-                    return self.throw("TypeError", &format!("{} is not a constructor", describe_callee(callee)));
-                }
-                self.construct(&f, a)?
-            }
-            Expr::Seq(list) => {
-                let mut last = Value::Undefined;
-                for e in list {
-                    last = self.eval(e, sc)?;
-                }
-                last
-            }
-            Expr::Spread(_) | Expr::ArrayPat(_) | Expr::ObjectPat(_) | Expr::Default(..) | Expr::Rest(_) => {
-                return self.throw("SyntaxError", "unexpected pattern");
-            }
-        })
-    }
-
-    /// For a member expression (not `super.x`): its object and key, evaluated.
-    fn member_ref(&mut self, target: &Expr, sc: &Scope) -> Res<Option<(Value, Rc<str>)>> {
-        let Expr::Member(o, k, _) = target else { return Ok(None) };
-        if matches!(&**o, Expr::Ident(n) if &**n == "super") {
-            return Ok(None);
-        }
-        let obj = self.eval(o, sc)?;
-        let kv = self.eval(k, sc)?;
-        let key = self.key(&kv)?;
-        Ok(Some((obj, key)))
-    }
-
-    pub fn binary(&mut self, op: &str, a: &Value, b: &Value) -> Res<Value> {
-        Ok(match op {
-            "+" => {
-                let (pa, pb) = (self.to_primitive(a, false)?, self.to_primitive(b, false)?);
-                if matches!(pa, Value::Str(_)) || matches!(pb, Value::Str(_)) {
-                    let mut s = self.to_str(&pa)?.to_string();
-                    s.push_str(&self.to_str(&pb)?);
-                    Value::Str(s.into())
-                } else {
-                    Value::Num(self.to_number(&pa)? + self.to_number(&pb)?)
-                }
-            }
-            "-" | "*" | "/" | "%" | "**" => {
-                let (x, y) = (self.to_number(a)?, self.to_number(b)?);
-                Value::Num(match op {
-                    "-" => x - y,
-                    "*" => x * y,
-                    "/" => x / y,
-                    "%" => x % y,
-                    _ => x.powf(y),
-                })
-            }
-            "&" | "|" | "^" | "<<" | ">>" | ">>>" => {
-                let (x, y) = (self.to_number(a)?, self.to_number(b)?);
-                let (xi, yi) = (to_i32(x), to_i32(y) as u32 & 31);
-                Value::Num(match op {
-                    "&" => (xi & to_i32(y)) as f64,
-                    "|" => (xi | to_i32(y)) as f64,
-                    "^" => (xi ^ to_i32(y)) as f64,
-                    "<<" => xi.wrapping_shl(yi) as f64,
-                    ">>" => xi.wrapping_shr(yi) as f64,
-                    _ => (xi as u32).wrapping_shr(yi) as f64,
-                })
-            }
-            "==" => Value::Bool(self.loose_eq(a, b)?),
-            "!=" => Value::Bool(!self.loose_eq(a, b)?),
-            "===" => Value::Bool(Self::strict_eq(a, b)),
-            "!==" => Value::Bool(!Self::strict_eq(a, b)),
-            "<" | ">" | "<=" | ">=" => {
-                let (pa, pb) = (self.to_primitive(a, true)?, self.to_primitive(b, true)?);
-                let ord = if let (Value::Str(x), Value::Str(y)) = (&pa, &pb) {
-                    Some(x.cmp(y))
-                } else {
-                    let (x, y) = (self.to_number(&pa)?, self.to_number(&pb)?);
-                    x.partial_cmp(&y)
-                };
-                Value::Bool(match ord {
-                    None => false,
-                    Some(o) => match op {
-                        "<" => o.is_lt(),
-                        ">" => o.is_gt(),
-                        "<=" => o.is_le(),
-                        _ => o.is_ge(),
-                    },
-                })
-            }
-            "instanceof" => Value::Bool(self.instance_of(a, b)?),
-            "in" => {
-                if !matches!(b, Value::Obj(_)) {
-                    return self.throw("TypeError", "'in' needs an object");
-                }
-                let k = self.key(a)?;
-                Value::Bool(self.has(b, &k)?)
-            }
-            _ => return self.throw("SyntaxError", &format!("unknown operator {op}")),
-        })
+/// How a key reads in an error message (symbols without their marker).
+fn show_key(k: &str) -> String {
+    match k.strip_prefix("\0@") {
+        Some(s) => format!("Symbol({})", s.split_once(':').map(|x| x.1).unwrap_or(s)),
+        None => k.to_string(),
     }
 }
 
-fn describe_callee(e: &Expr) -> String {
-    match e {
-        Expr::Ident(n) => n.to_string(),
-        Expr::Member(o, k, _) => match &**k {
-            Expr::Str(s) => format!("{}.{s}", describe_callee(o)),
-            _ => format!("{}[...]", describe_callee(o)),
-        },
-        Expr::This => "this".into(),
-        _ => "expression".into(),
+/// A string's length in UTF-16 code units (what JavaScript counts).
+#[inline]
+pub fn utf16_len(s: &str) -> usize {
+    if s.is_ascii() {
+        s.len()
+    } else {
+        s.encode_utf16().count()
     }
+}
+
+/// The character at index i (ASCII strings index directly).
+#[inline]
+pub fn string_at(s: &str, i: usize) -> Value {
+    if s.is_ascii() {
+        return match s.as_bytes().get(i) {
+            Some(_) => Value::Str(s[i..i + 1].into()),
+            None => Value::Undefined,
+        };
+    }
+    s.chars().nth(i).map(|c| Value::Str(c.to_string().into())).unwrap_or(Value::Undefined)
 }
 
 pub fn to_i32(n: f64) -> i32 {
@@ -1996,5 +1112,3 @@ pub fn str_to_number(s: &str) -> f64 {
         _ => t.parse().unwrap_or(f64::NAN),
     }
 }
-
-use crate::parse::pattern_names;

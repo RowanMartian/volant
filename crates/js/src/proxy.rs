@@ -154,7 +154,7 @@ pub fn install(i: &mut Interp) {
         Ok(p)
     });
     let revocable = i.native(|i, _this, a| {
-        let ctor = i.lookup(&i.global.clone(), "Proxy")?;
+        let ctor = i.get(&Value::Obj(i.global_obj.clone()), "Proxy")?;
         let p = i.construct(&ctor, a)?;
         let pc = p.clone();
         let revoke = i.native(move |_i, _t, _a| {

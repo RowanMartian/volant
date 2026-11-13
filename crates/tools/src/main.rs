@@ -37,6 +37,21 @@ impl volant_engine::script::Host for CurlHost {
         if !url.starts_with("http") {
             return None;
         }
+        // VOLANT_CACHE=dir replays GETs from (and records them into) dir, so a
+        // page's scripts can be timed without the network.
+        let cache = std::env::var("VOLANT_CACHE").ok().filter(|_| method == "GET").map(|dir| {
+            let digest = hash::sha256(url.as_bytes());
+            let name: String = digest.iter().take(10).map(|b| format!("{b:02x}")).collect();
+            format!("{dir}/{name}")
+        });
+        if let Some(c) = &cache {
+            if let Ok(b) = std::fs::read(c) {
+                let nl = b.iter().position(|&x| x == b'\n')?;
+                let head = String::from_utf8_lossy(&b[..nl]).to_string();
+                let (code, ty) = head.split_once(' ').unwrap_or((&head, ""));
+                return Some((code.parse().ok()?, ty.to_string(), b[nl + 1..].to_vec()));
+            }
+        }
         let mut cmd = std::process::Command::new("curl");
         cmd.args(["-sL", "--max-time", "20", "-X", method, "-w", "\n%{http_code} %{content_type}", url]);
         if let Some(b) = body {
@@ -53,6 +68,11 @@ impl volant_engine::script::Host for CurlHost {
             let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
             let _ = std::fs::write(format!("{dir}/{n:03}.txt"), &body);
             eprintln!("fetched {n:03}: {url}");
+        }
+        if let Some(c) = &cache {
+            let mut rec = format!("{code} {ty}\n").into_bytes();
+            rec.extend_from_slice(&body);
+            let _ = std::fs::write(c, rec);
         }
         Some((code.parse().ok()?, ty.to_string(), body))
     }

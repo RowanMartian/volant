@@ -431,3 +431,34 @@ fn define_property() {
             Object.getOwnPropertyDescriptor(o, 'hidden').enumerable, o.propertyIsEnumerable('a'))";
     assert_eq!(out(src), "5 proto 0 1 2 a,hidden 0 false false");
 }
+
+#[test]
+fn bytecode_vm_semantics() {
+    // Generators receive values through next(v), and return/throw resume them.
+    let src = "function* g() { const a = yield 1; try { yield a * 2 } finally { console.log('fin') } }
+        const it = g(); const r = [it.next().value, it.next(21).value, it.return(9).value, it.next().done];
+        console.log(r.join());";
+    assert_eq!(out(src), "fin\n1,42,9,true");
+    // Closures in loops capture a fresh binding per iteration.
+    assert_eq!(out("const fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); console.log(fs.map(f => f()).join())"), "0,1,2");
+    // Deep (non-native) recursion doesn't overflow the Rust stack.
+    assert_eq!(out("function d(n) { return n ? 1 + d(n - 1) : 0 } console.log(d(5000))"), "5000");
+    // Runaway recursion is a catchable RangeError.
+    assert_eq!(out("function f() { return f() } try { f() } catch (e) { console.log(e instanceof RangeError) }"), "true");
+    // Sloppy-mode `this` is the global object; strict mode keeps undefined.
+    assert_eq!(out("function s() { return this === globalThis } function t() { 'use strict'; return this } console.log(s(), t())"), "true undefined");
+    // typeof on an undeclared global doesn't throw.
+    assert_eq!(out("console.log(typeof nope, typeof nope === 'undefined')"), "undefined true");
+    // Lazy function properties behave like eager ones.
+    assert_eq!(out("function foo(a, b) {} foo.prototype.x = 1; console.log(foo.name, foo.length, new foo().x, Object.keys(foo).length)"), "foo 2 1 0");
+}
+
+#[test]
+fn async_ordering() {
+    let src = "const log = [];
+        async function a() { log.push('a1'); await null; log.push('a2'); await null; log.push('a3') }
+        Promise.resolve().then(() => log.push('p1')).then(() => log.push('p2'));
+        a(); log.push('sync');
+        setTimeout(() => console.log(log.join()), 0);";
+    assert_eq!(out(src), "a1,sync,p1,a2,p2,a3");
+}

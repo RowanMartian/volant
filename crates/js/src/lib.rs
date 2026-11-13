@@ -2,9 +2,13 @@
 //! built up chunk by chunk, like its web engine.
 //!
 //! * [`parse`]: the lexer (with automatic semicolon insertion) and parser.
-//! * [`interp`]: a tree-walking interpreter: closures, prototypes, `this`,
-//!   `new`, classes with `extends`/`super`, destructuring, spread and rest,
-//!   exceptions, labelled loops, getters and setters, and a step budget.
+//! * [`compile`]: the compiler from syntax trees to bytecode, resolving every
+//!   variable to a frame slot or a captured environment slot once.
+//! * [`vm`]: the bytecode VM: frames without native recursion, inline caches
+//!   for property lookups, exceptions, and generators and async functions
+//!   that really suspend.
+//! * [`interp`]: values, objects with prototypes, conversions, property
+//!   access and calls, shared by the VM and the built-ins.
 //! * [`builtins`]: Object, Function, Array, String, Number, Boolean, Math,
 //!   JSON, the Error types, Map, Set, Date, console and timers.
 //!
@@ -15,6 +19,7 @@
 //! The DOM lives with the web engine (volant-engine's `script` module).
 
 pub mod builtins;
+pub mod compile;
 pub mod interp;
 pub mod module;
 pub mod parse;
@@ -22,6 +27,7 @@ pub mod promise;
 pub mod proxy;
 pub mod regex;
 pub mod regexp;
+pub mod vm;
 
 pub use interp::{Interp, Value};
 

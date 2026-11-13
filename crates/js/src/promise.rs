@@ -2,16 +2,11 @@
 //! queue), `async`/`await`, timers on a virtual clock, generators, iterators
 //! and Symbols.
 //!
-//! `await` is implemented by running the event loop until the awaited
-//! promise settles (a nested loop), so an async function finishes in one go
-//! when what it waits for can finish: promise chains, timers, and the host's
-//! fetches, which complete synchronously. A promise that can never settle
-//! (waiting for a click, say) makes the `await` throw instead of hanging.
-//!
-//! Generators run ahead of their consumer: the body runs to completion on the
-//! first `next()`, buffering what it yields (at most [`MAX_YIELDS`], which
-//! stops an endless generator), and `next()` hands the values out. Values
-//! sent in through `next(x)` aren't seen by the body.
+//! An async function suspends at each `await` (see [`crate::vm`]) and
+//! resumes from a reaction to the awaited promise; a generator suspends at
+//! each `yield` until its next `next()`. Only an `await` where suspending
+//! isn't possible (inside an async generator) runs the event loop in place
+//! until the promise settles.
 //!
 //! Symbols are strings starting with `"\0@"`: hidden from property listings,
 //! reported as "symbol" by typeof, unique per call to `Symbol()`.
@@ -21,8 +16,6 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub const SYM_ITERATOR: &str = "\0@iterator";
-pub const MAX_YIELDS: usize = 100_000;
-pub const GEN_STOP: &str = "\0generator stopped";
 
 pub enum PState {
     Pending(Vec<Reaction>),
@@ -310,40 +303,6 @@ impl Interp {
             }
         }
     }
-
-    pub fn make_generator(&mut self, f: Value, this: Value, args: Vec<Value>) -> Value {
-        let start = self.native(move |i, _t, _a| i.call_body(&f, this.clone(), args.clone()));
-        let g = self.obj(Kind::Plain);
-        if let Value::Obj(o) = &g {
-            let mut b = o.borrow_mut();
-            b.proto = Some(self.generator_proto.clone());
-            b.set_own("\0start", start);
-        }
-        g
-    }
-
-    /// Runs a generator's body (once), buffering what it yields.
-    fn start_generator(&mut self, o: &Obj) -> Res<()> {
-        let Some(start) = hidden(o, "\0start") else { return Ok(()) };
-        o.borrow_mut().delete("\0start");
-        self.gen_stack.push(Vec::new());
-        let r = self.call(&start, Value::Undefined, vec![]);
-        let buf = self.gen_stack.pop().unwrap_or_default();
-        let ret = match r {
-            Ok(v) => v,
-            Err(Value::Str(s)) if &*s == GEN_STOP => Value::Undefined,
-            Err(e) => {
-                o.borrow_mut().set_own("\0err", e);
-                Value::Undefined
-            }
-        };
-        let items = self.array(buf);
-        let mut b = o.borrow_mut();
-        b.set_own("\0items", items);
-        b.set_own("\0i", Value::Num(0.0));
-        b.set_own("\0ret", ret);
-        Ok(())
-    }
 }
 
 fn this_obj(i: &Interp, t: &Value) -> Res<Obj> {
@@ -365,7 +324,7 @@ fn global(i: &Interp, name: &str, v: Value) {
     i.global_obj.borrow_mut().set_own(name, v);
 }
 
-/// The next value of an iterator made by make_iter (or a generator after it started).
+/// The next value of an iterator made by make_iter.
 fn next_item(i: &mut Interp, o: &Obj) -> Res<Value> {
     let (Some(Value::Obj(items)), Some(Value::Num(at))) = (hidden(o, "\0items"), hidden(o, "\0i")) else {
         return Ok(result(i, Value::Undefined, true));
@@ -380,15 +339,17 @@ fn next_item(i: &mut Interp, o: &Obj) -> Res<Value> {
             o.borrow_mut().set_own("\0i", Value::Num((at + 1) as f64));
             Ok(result(i, v, false))
         }
-        None => {
-            if let Some(e) = hidden(o, "\0err") {
-                o.borrow_mut().delete("\0err");
-                return Err(e);
-            }
-            let ret = hidden(o, "\0ret").unwrap_or(Value::Undefined);
-            o.borrow_mut().set_own("\0ret", Value::Undefined);
-            Ok(result(i, ret, true))
-        }
+        None => Ok(result(i, Value::Undefined, true)),
+    }
+}
+
+fn is_async_gen(g: &Value) -> bool {
+    match g {
+        Value::Obj(o) => match &o.borrow().kind {
+            Kind::Generator(st) => st.borrow().is_async(),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -430,25 +391,37 @@ pub fn install(i: &mut Interp) {
     });
     let gp = i.generator_proto.clone();
     gp.borrow_mut().proto = Some(ip.clone());
-    def(i, &gp, "next", |i, t, _a| {
-        let o = this_obj(i, &t)?;
-        i.start_generator(&o)?;
-        next_item(i, &o)
-    });
-    def(i, &gp, "return", |i, t, a| {
-        let o = this_obj(i, &t)?;
-        o.borrow_mut().delete("\0start");
-        o.borrow_mut().set_own("\0items", i.array(Vec::new()));
-        o.borrow_mut().set_own("\0i", Value::Num(0.0));
-        Ok(result(i, arg(&a, 0), true))
-    });
-    def(i, &gp, "throw", |i, t, a| {
-        let o = this_obj(i, &t)?;
-        o.borrow_mut().delete("\0start");
-        o.borrow_mut().set_own("\0items", i.array(Vec::new()));
-        o.borrow_mut().set_own("\0i", Value::Num(0.0));
-        Err(arg(&a, 0))
-    });
+    // An async generator's methods return promises of what the sync steps give.
+    for (name, kind) in [("next", 0u8), ("throw", 1), ("return", 2)] {
+        def(i, &gp, name, move |i, t, a| {
+            let r = i.gen_resume(&t, kind, arg(&a, 0));
+            if !is_async_gen(&t) {
+                return r;
+            }
+            let (p, _) = i.new_promise();
+            match r {
+                Ok(v) => {
+                    // The value itself may be a promise (an awaited one): settle with it.
+                    let done = i.get(&v, "done")?;
+                    let value = i.get(&v, "value")?;
+                    let settled = i.promise_resolve(value);
+                    let wrap = i.native(move |i, _t, a| {
+                        let r = i.obj(Kind::Plain);
+                        if let Value::Obj(o) = &r {
+                            o.borrow_mut().set_own("value", arg(&a, 0));
+                            o.borrow_mut().set_own("done", done.clone());
+                        }
+                        Ok(r)
+                    });
+                    let d = i.then_promise(&settled, wrap, Value::Undefined);
+                    i.resolve_promise(&p, d);
+                }
+                Err(e) => i.reject_promise(&p, e),
+            }
+            Ok(p)
+        });
+    }
+    def(i, &gp, "\0@asyncIterator", |_i, t, _a| Ok(t));
     // Built-in collections hand out iterators.
     let ap = i.array_proto.clone();
     let array_values = i.native(|i, t, _a| {
