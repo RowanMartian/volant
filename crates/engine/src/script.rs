@@ -72,6 +72,137 @@ pub trait Host {
     }
 }
 
+/// One recorded canvas operation (see the context in `prelude.js`).
+fn decode_canvas_op(v: &Value) -> Option<crate::canvas::Op> {
+    use crate::canvas::{color, font, Align, Op};
+    let Value::Obj(o) = v else { return None };
+    let o = o.borrow();
+    let Kind::Array(a) = &o.kind else { return None };
+    let num = |k: usize| match a.get(k) {
+        Some(Value::Num(n)) if n.is_finite() => *n as f32,
+        _ => 0.0,
+    };
+    let text = |k: usize| match a.get(k) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => String::new(),
+    };
+    let points = |v: &[Value]| -> Vec<(f32, f32)> {
+        v.chunks(2).filter_map(|p| match p {
+            [Value::Num(x), Value::Num(y)] if x.is_finite() && y.is_finite() => Some((*x as f32, *y as f32)),
+            _ => None,
+        }).collect()
+    };
+    match text(0).as_str() {
+        "p" => {
+            let alpha = num(4);
+            let paint = |k: usize| match a.get(k) {
+                Some(Value::Str(s)) => color(s, alpha),
+                _ => None,
+            };
+            let (fill, stroke) = (paint(1), paint(2));
+            let Some(Value::Obj(list)) = a.get(5) else { return None };
+            let list = list.borrow();
+            let Kind::Array(subs) = &list.kind else { return None };
+            let mut subpaths = Vec::new();
+            for sp in subs {
+                let Value::Obj(sp) = sp else { continue };
+                let sp = sp.borrow();
+                let Kind::Array(v) = &sp.kind else { continue };
+                let closed = matches!(v.first(), Some(Value::Bool(true)));
+                let pts = points(v.get(1..).unwrap_or(&[]));
+                if pts.len() >= 2 {
+                    subpaths.push((closed, pts));
+                }
+            }
+            (!subpaths.is_empty() && (fill.is_some() || stroke.is_some())).then(|| Op::Path { subpaths, fill, stroke, line_width: num(3).max(0.1) })
+        }
+        "c" => Some(Op::Clear { points: points(a.get(1..).unwrap_or(&[])) }),
+        "t" => {
+            let (size, bold, serif, mono) = font(&text(4));
+            let size = size * num(9).max(0.01);
+            let color = color(&text(5), num(8))?;
+            let align = match text(6).as_str() {
+                "center" => Align::Center,
+                "right" | "end" => Align::Right,
+                _ => Align::Left,
+            };
+            // Baselines other than the alphabetic one, moved to it.
+            let y = num(2)
+                + match text(7).as_str() {
+                    "top" | "hanging" => size * 0.8,
+                    "middle" => size * 0.32,
+                    "bottom" | "ideographic" => -size * 0.2,
+                    _ => 0.0,
+                };
+            Some(Op::Text { x: num(1), y, text: text(3), size, bold, serif, mono, color, align })
+        }
+        "i" => Some(Op::Image { src: text(1), x: num(2), y: num(3), w: num(4), h: num(5), alpha: num(6) }),
+        _ => None,
+    }
+}
+
+/// The element a `#fragment` points at: the one with that id, else an `<a name>`.
+pub fn anchor_target(dom: &Dom, frag: &str) -> Option<NodeId> {
+    let all = descendants(dom, ROOT);
+    all.iter().copied().find(|&n| dom.attr(n, "id") == Some(frag)).or_else(|| all.iter().copied().find(|&n| dom.tag(n) == Some("a") && dom.attr(n, "name") == Some(frag)))
+}
+
+/// `%XX` escapes decoded (as in a URL's fragment).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Where a `#fragment` is on a laid-out snapshot: the top of its target's first box.
+pub fn anchor_y(snap: &Snapshot, page: &crate::Page, frag: &str) -> Option<f32> {
+    let frag = percent_decode(frag);
+    if frag.is_empty() || frag == "top" {
+        return Some(0.0);
+    }
+    let t = anchor_target(&snap.dom, &frag)?;
+    let inside: std::collections::HashSet<NodeId> = descendants(&snap.dom, t).into_iter().chain([t]).collect();
+    page.hits.iter().filter(|h| inside.contains(&h.node)).map(|h| h.y).fold(None, |m: Option<f32>, y| Some(m.map_or(y, |m| m.min(y))))
+}
+
+/// One line of a `<select>`'s menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuItem {
+    pub label: String,
+    pub disabled: bool,
+    pub selected: bool,
+    /// An `<optgroup>`'s label, not an option.
+    pub header: bool,
+}
+
+/// An element and its ancestors (up to the document).
+fn element_chain(dom: &Dom, mut n: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    loop {
+        if dom.tag(n).is_some() {
+            out.push(n);
+        }
+        let p = dom.parent(n);
+        if p == n || n == ROOT {
+            break;
+        }
+        n = p;
+    }
+    out
+}
+
 /// No network: every request fails.
 pub struct NoHost;
 
@@ -137,6 +268,18 @@ pub struct State {
     datasets: HashMap<NodeId, Value>,
     handlers: HashMap<(NodeId, String), Value>,
     pub focus: Option<NodeId>,
+    /// Where the caret is in the focused field (characters from the start).
+    pub caret: usize,
+    /// The element under the pointer.
+    pub hover: Option<NodeId>,
+    /// The `:hover` selectors of the page's style sheets, and what they were read from.
+    hover_rules: Option<(usize, Rc<Vec<css::Selector>>)>,
+    /// A `<select>` that was clicked: the app shows its menu.
+    menu: Option<NodeId>,
+    /// Decoded canvas drawings, by canvas: (the JS list they came from, its length, the drawing).
+    canvases: HashMap<NodeId, (usize, usize, std::sync::Arc<crate::canvas::Canvas>)>,
+    /// The page moved to a `#fragment` (a link, `location.hash`): scroll there.
+    pub scroll_to_anchor: bool,
     pub navigate: Option<Navigation>,
     /// Cookies when the host keeps none (tests, previews).
     cookies: volant_core::cookies::Jar,
@@ -1191,6 +1334,7 @@ fn form_urlencode(pairs: &[(String, String)]) -> String {
 fn activate(i: &mut Interp, st: &S, target: NodeId) {
     enum Act {
         Link(String),
+        Hash(String),
         Script(String),
         Toggle(NodeId, bool),
         Submit(NodeId, NodeId),
@@ -1214,8 +1358,12 @@ fn activate(i: &mut Interp, st: &S, target: NodeId) {
                     let href = dom.attr(n, "href").unwrap_or("");
                     match href.trim().strip_prefix("javascript:") {
                         Some(code) => Act::Script(code.to_string()),
-                        None if href.trim().starts_with('#') => Act::None,
-                        None => Act::Link(resolve_url(&s.url, href)),
+                        None => {
+                            let abs = resolve_url(&s.url, href);
+                            // Another place on this page: no new page, just the address and a scroll.
+                            let same_doc = abs.split('#').next() == s.url.split('#').next() && href.contains('#');
+                            if same_doc { Act::Hash(abs) } else { Act::Link(abs) }
+                        }
                     }
                 }
                 "summary" => dom.parent(n).ne(&n).then(|| Act::Details(dom.parent(n))).unwrap_or(Act::None),
@@ -1242,6 +1390,19 @@ fn activate(i: &mut Interp, st: &S, target: NodeId) {
     };
     match act {
         Act::Link(url) => st.borrow_mut().navigate = Some(Navigation::get(url)),
+        Act::Hash(url) => {
+            let changed = {
+                let mut s = st.borrow_mut();
+                let changed = s.url != url;
+                s.url = url;
+                s.generation += 1; // the app scrolls to the target
+                s.scroll_to_anchor = true;
+                changed
+            };
+            if changed {
+                fire(i, st, WINDOW, "hashchange", false);
+            }
+        }
         Act::Script(code) => {
             let code = code.replace("%20", " ");
             if let Err(e) = i.run(&code) {
@@ -1285,23 +1446,11 @@ fn activate(i: &mut Interp, st: &S, target: NodeId) {
             }
         }
         Act::Select(n) => {
-            // A click steps to the next option (there's no drop-down menu yet).
-            {
-                let mut s = st.borrow_mut();
-                let options: Vec<NodeId> = descendants(&s.dom, n).into_iter().filter(|&o| s.dom.tag(o) == Some("option") && s.dom.attr(o, "disabled").is_none()).collect();
-                if !options.is_empty() {
-                    let cur = crate::forms::selected_option(&s.dom, n).and_then(|c| options.iter().position(|&o| o == c)).unwrap_or(0);
-                    let next = options[(cur + 1) % options.len()];
-                    for &o in &options {
-                        remove_attr(&mut s.dom, o, "selected");
-                    }
-                    set_attr(&mut s.dom, next, "selected", "");
-                    s.generation += 1;
-                }
-            }
+            // The app shows the options as a menu (see `Runtime::take_menu`).
             focus(i, st, Some(n));
-            fire(i, st, n, "input", true);
-            fire(i, st, n, "change", true);
+            if st.borrow().dom.attr(n, "disabled").is_none() {
+                st.borrow_mut().menu = Some(n);
+            }
         }
         Act::Details(d) => {
             let mut s = st.borrow_mut();
@@ -1325,7 +1474,12 @@ fn focus(i: &mut Interp, st: &S, n: Option<NodeId>) {
         fire(i, st, o, "blur", false);
         fire(i, st, o, "focusout", true);
     }
-    st.borrow_mut().focus = n;
+    {
+        let mut s = st.borrow_mut();
+        s.focus = n;
+        s.caret = n.map(|f| field_value(&s.dom, f).chars().count()).unwrap_or(0);
+        s.generation += 1; // the caret and :focus styles move
+    }
     if let Some(n) = n {
         fire(i, st, n, "focus", false);
         fire(i, st, n, "focusin", true);
@@ -2029,11 +2183,28 @@ fn install(i: &mut Interp, st: &S) {
             st,
             &element,
             prop,
-            move |_i, st, id| Ok(Value::Num(st.borrow().dom.attr(id, attr).and_then(|v| v.trim().parse().ok()).unwrap_or(default))),
+            move |_i, st, id| {
+                let s = st.borrow();
+                // A canvas is 300 x 150 unless told otherwise.
+                let default = match (s.dom.tag(id), attr) {
+                    (Some("canvas"), "width") => 300.0,
+                    (Some("canvas"), "height") => 150.0,
+                    _ => default,
+                };
+                Ok(Value::Num(s.dom.attr(id, attr).and_then(|v| v.trim().parse().ok()).unwrap_or(default)))
+            },
             move |i, st, id, v| {
                 let n = i.to_number(&v)?;
                 set_attr(&mut st.borrow_mut().dom, id, attr, &volant_js::interp::num_to_string(n));
                 changed(st);
+                // Resizing a canvas clears it.
+                if matches!(attr, "width" | "height") && st.borrow().dom.tag(id) == Some("canvas") {
+                    let w = wrap(i, st, id);
+                    if let Ok(ctx @ Value::Obj(_)) = i.get(&w, "__ctx") {
+                        let reset = i.get(&ctx, "_reset")?;
+                        i.call(&reset, ctx, vec![])?;
+                    }
+                }
                 Ok(())
             },
         );
@@ -2401,7 +2572,39 @@ fn install(i: &mut Interp, st: &S) {
     method(i, st, &element, "reportValidity", |_i, _st, _id, _a| Ok(Value::Bool(true)));
     method(i, st, &element, "setCustomValidity", |_i, _st, _id, _a| Ok(Value::Undefined));
     method(i, st, &element, "select", |_i, _st, _id, _a| Ok(Value::Undefined));
-    method(i, st, &element, "setSelectionRange", |_i, _st, _id, _a| Ok(Value::Undefined));
+    method(i, st, &element, "setSelectionRange", |i, st, id, a| {
+        let end = i.to_number(&arg(&a, 1))?;
+        let mut s = st.borrow_mut();
+        if s.focus == Some(id) && end.is_finite() {
+            let len = field_value(&s.dom, id).chars().count();
+            s.caret = (end.max(0.0) as usize).min(len);
+            s.generation += 1;
+        }
+        Ok(Value::Undefined)
+    });
+    for name in ["selectionStart", "selectionEnd"] {
+        accessor(
+            i,
+            st,
+            &element,
+            name,
+            |_i, st, id| {
+                let s = st.borrow();
+                let len = field_value(&s.dom, id).chars().count();
+                Ok(Value::Num(if s.focus == Some(id) { s.caret.min(len) } else { len } as f64))
+            },
+            |i, st, id, v| {
+                let n = i.to_number(&v)?;
+                let mut s = st.borrow_mut();
+                if s.focus == Some(id) && n.is_finite() {
+                    let len = field_value(&s.dom, id).chars().count();
+                    s.caret = (n.max(0.0) as usize).min(len);
+                    s.generation += 1;
+                }
+                Ok(())
+            },
+        );
+    }
     method(i, st, &element, "click", |i, st, id, _a| {
         let ev = make_event(i, st, "click", true, true);
         if dispatch(i, st, id, &ev) {
@@ -2492,7 +2695,6 @@ fn install(i: &mut Interp, st: &S) {
     for prop in ["naturalWidth", "naturalHeight"] {
         getter(i, st, &element, prop, |_i, _st, _id| Ok(Value::Num(0.0)));
     }
-    method(i, st, &element, "getContext", |_i, _st, _id, _a| Ok(Value::Null));
     for name in ["play", "load"] {
         method(i, st, &element, name, |i, _st, _id, _a| Ok(i.promise_resolve(Value::Undefined)));
     }
@@ -2717,6 +2919,16 @@ fn install(i: &mut Interp, st: &S) {
         Ok(Value::Bool(css::media_applies(&q, &env)))
     });
     hook(i, "__media", f);
+    let f = i.native(move |i, _t, a| {
+        // __measure(text, font): a canvas's measureText width
+        let text = i.to_str(&arg(&a, 0))?.to_string();
+        let spec = i.to_str(&arg(&a, 1))?.to_string();
+        let (size, bold, serif, mono) = crate::canvas::font(&spec);
+        let family = if mono { style::Family::Mono } else if serif { style::Family::Serif } else { style::Family::Sans };
+        let font = crate::Font { family, size, weight: if bold { 700 } else { 400 }, italic: false };
+        Ok(Value::Num(crate::Fonts::width(&crate::ApproxFonts, &text, &font) as f64))
+    });
+    hook(i, "__measure", f);
     let st2 = st.clone();
     let f = i.native(move |i, _t, a| {
         let u = i.to_str(&arg(&a, 0))?;
@@ -2735,6 +2947,8 @@ fn install(i: &mut Interp, st: &S) {
         let same_doc = abs.split('#').next() == s.url.split('#').next() && abs.contains('#');
         if same_doc {
             s.url = abs;
+            s.generation += 1;
+            s.scroll_to_anchor = true;
         } else {
             s.navigate = Some(Navigation::get(abs));
         }
@@ -2836,6 +3050,8 @@ fn computed(st: &S, id: NodeId, prop: &str) -> String {
 /// What the app lays out: the document as it is now, in document order.
 pub struct Snapshot {
     pub dom: Dom,
+    /// What's drawn on each `<canvas>`, by the `src` layout gives its box.
+    pub canvases: HashMap<String, std::sync::Arc<crate::canvas::Canvas>>,
     /// For each node of `dom`, the runtime's node (to send clicks back).
     pub map: Vec<NodeId>,
     pub title: String,
@@ -2869,6 +3085,12 @@ impl Runtime {
             focus: None,
             navigate: None,
             cookies: volant_core::cookies::Jar::new(),
+            caret: 0,
+            hover: None,
+            hover_rules: None,
+            menu: None,
+            canvases: HashMap::new(),
+            scroll_to_anchor: false,
             current_script: None,
             ran: std::collections::HashSet::new(),
             loader: Rc::new(PageLoader { host: host.clone(), imports: RefCell::new(Vec::new()) }),
@@ -3000,8 +3222,11 @@ impl Runtime {
             }
             {
                 let mut s = self.state.borrow_mut();
-                let v = field_value(&s.dom, f);
-                set_field_value(&mut s.dom, f, &format!("{v}{c}"));
+                let mut v: Vec<char> = field_value(&s.dom, f).chars().collect();
+                let at = s.caret.min(v.len());
+                v.insert(at, c);
+                set_field_value(&mut s.dom, f, &v.into_iter().collect::<String>());
+                s.caret = at + 1;
                 s.generation += 1;
             }
             let ev = make_event(i, &self.state, "input", true, false);
@@ -3015,7 +3240,7 @@ impl Runtime {
         self.settle(50.0);
     }
 
-    /// A special key: "Backspace", "Enter", "Tab" or "Escape".
+    /// A special key: "Backspace", "Delete", "Enter", "Tab", "Escape", the arrows, "Home" or "End".
     pub fn key(&mut self, key: &str) {
         self.interp.reset_steps(BUDGET);
         let target = {
@@ -3031,22 +3256,67 @@ impl Runtime {
             "Backspace" => 8.0,
             "Tab" => 9.0,
             "Escape" => 27.0,
+            "ArrowLeft" => 37.0,
+            "ArrowUp" => 38.0,
+            "ArrowRight" => 39.0,
+            "ArrowDown" => 40.0,
+            "Delete" => 46.0,
+            "Home" => 36.0,
+            "End" => 35.0,
             _ => 0.0,
         }));
         if dispatch(i, &self.state, target, &ev) {
             let field = self.state.borrow().focus.filter(|&f| is_text_field(&self.state.borrow().dom, f));
             match (key, field) {
-                ("Backspace", Some(f)) => {
-                    {
+                ("Backspace" | "Delete", Some(f)) => {
+                    let changed = {
                         let mut s = self.state.borrow_mut();
-                        let mut v = field_value(&s.dom, f);
-                        v.pop();
-                        set_field_value(&mut s.dom, f, &v);
-                        s.generation += 1;
+                        let mut v: Vec<char> = field_value(&s.dom, f).chars().collect();
+                        let at = s.caret.min(v.len());
+                        let gone = if key == "Backspace" { at.checked_sub(1) } else { (at < v.len()).then_some(at) };
+                        if let Some(k) = gone {
+                            v.remove(k);
+                            set_field_value(&mut s.dom, f, &v.into_iter().collect::<String>());
+                            s.caret = k;
+                            s.generation += 1;
+                        }
+                        gone.is_some()
+                    };
+                    if changed {
+                        let ev = make_event(i, &self.state, "input", true, false);
+                        let _ = i.set(&ev, "inputType", str_val(if key == "Backspace" { "deleteContentBackward" } else { "deleteContentForward" }));
+                        dispatch(i, &self.state, f, &ev);
                     }
-                    let ev = make_event(i, &self.state, "input", true, false);
-                    let _ = i.set(&ev, "inputType", str_val("deleteContentBackward"));
-                    dispatch(i, &self.state, f, &ev);
+                }
+                ("ArrowLeft" | "ArrowRight" | "Home" | "End" | "ArrowUp" | "ArrowDown", Some(f)) => {
+                    let mut s = self.state.borrow_mut();
+                    let v: Vec<char> = field_value(&s.dom, f).chars().collect();
+                    let at = s.caret.min(v.len());
+                    // Up and Down move a line in a textarea (to its start or end in a single-line field).
+                    let line_start = v[..at].iter().rposition(|&c| c == '\n').map(|p| p + 1).unwrap_or(0);
+                    let line_end = v[at..].iter().position(|&c| c == '\n').map(|p| at + p).unwrap_or(v.len());
+                    s.caret = match key {
+                        "ArrowLeft" => at.saturating_sub(1),
+                        "ArrowRight" => (at + 1).min(v.len()),
+                        "Home" => line_start,
+                        "End" => line_end,
+                        "ArrowUp" => match line_start.checked_sub(1) {
+                            Some(prev_end) => {
+                                let prev_start = v[..prev_end].iter().rposition(|&c| c == '\n').map(|p| p + 1).unwrap_or(0);
+                                (prev_start + (at - line_start)).min(prev_end)
+                            }
+                            None => 0,
+                        },
+                        _ => match v[line_end..].first() {
+                            Some('\n') => {
+                                let next_start = line_end + 1;
+                                let next_end = v[next_start..].iter().position(|&c| c == '\n').map(|p| next_start + p).unwrap_or(v.len());
+                                (next_start + (at - line_start)).min(next_end)
+                            }
+                            _ => v.len(),
+                        },
+                    };
+                    s.generation += 1;
                 }
                 ("Enter", Some(f)) => {
                     let (is_area, form) = {
@@ -3056,8 +3326,11 @@ impl Runtime {
                     if is_area {
                         {
                             let mut s = self.state.borrow_mut();
-                            let v = field_value(&s.dom, f);
-                            set_field_value(&mut s.dom, f, &format!("{v}\n"));
+                            let mut v: Vec<char> = field_value(&s.dom, f).chars().collect();
+                            let at = s.caret.min(v.len());
+                            v.insert(at, '\n');
+                            set_field_value(&mut s.dom, f, &v.into_iter().collect::<String>());
+                            s.caret = at + 1;
                             s.generation += 1;
                         }
                         fire(i, &self.state, f, "input", true);
@@ -3087,6 +3360,187 @@ impl Runtime {
         self.settle(50.0);
     }
 
+    /// A `<select>` the person clicked, once, with its options for a menu.
+    pub fn take_menu(&mut self) -> Option<(NodeId, Vec<MenuItem>)> {
+        let n = self.state.borrow_mut().menu.take()?;
+        let s = self.state.borrow();
+        let chosen = crate::forms::selected_option(&s.dom, n);
+        let mut items = Vec::new();
+        fn walk(dom: &Dom, id: NodeId, chosen: Option<NodeId>, group_off: bool, out: &mut Vec<MenuItem>) {
+            for &c in dom.children(id) {
+                match dom.tag(c) {
+                    Some("option") => out.push(MenuItem {
+                        label: dom.attr(c, "label").map(str::to_string).unwrap_or_else(|| dom.text(c).split_whitespace().collect::<Vec<_>>().join(" ")),
+                        disabled: group_off || dom.attr(c, "disabled").is_some(),
+                        selected: Some(c) == chosen,
+                        header: false,
+                    }),
+                    Some("optgroup") => {
+                        out.push(MenuItem { label: dom.attr(c, "label").unwrap_or("").to_string(), disabled: true, selected: false, header: true });
+                        walk(dom, c, chosen, group_off || dom.attr(c, "disabled").is_some(), out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        walk(&s.dom, n, chosen, false, &mut items);
+        Some((n, items))
+    }
+
+    /// The person picked the `index`th option (counting options only, not group headers).
+    pub fn choose(&mut self, select: NodeId, index: usize) {
+        self.interp.reset_steps(BUDGET);
+        let changed = {
+            let mut s = self.state.borrow_mut();
+            if s.dom.tag(select) != Some("select") {
+                return;
+            }
+            let options: Vec<NodeId> = descendants(&s.dom, select).into_iter().filter(|&o| s.dom.tag(o) == Some("option")).collect();
+            let Some(&pick) = options.get(index) else { return };
+            if s.dom.attr(pick, "disabled").is_some() {
+                return;
+            }
+            let before = crate::forms::selected_option(&s.dom, select);
+            for &o in &options {
+                remove_attr(&mut s.dom, o, "selected");
+            }
+            set_attr(&mut s.dom, pick, "selected", "");
+            s.generation += 1;
+            before != Some(pick)
+        };
+        if changed {
+            fire(&mut self.interp, &self.state, select, "input", true);
+            fire(&mut self.interp, &self.state, select, "change", true);
+        }
+        self.settle(50.0);
+    }
+
+    /// The pointer is over `node` (or has left the page): fires mouseover/out
+    /// and enter/leave, and tells whether a `:hover` style changed (so the page
+    /// needs laying out again).
+    pub fn hover(&mut self, node: Option<NodeId>) -> bool {
+        let node = {
+            let s = self.state.borrow();
+            node.filter(|&n| (n as usize) < s.dom.nodes.len()).map(|n| if matches!(s.dom.nodes[n as usize].data, Data::Text(_)) { s.dom.parent(n) } else { n })
+        };
+        let old = self.state.borrow().hover;
+        if old == node {
+            return false;
+        }
+        self.interp.reset_steps(BUDGET);
+        let (old_chain, new_chain) = {
+            let s = self.state.borrow();
+            (old.map(|n| element_chain(&s.dom, n)).unwrap_or_default(), node.map(|n| element_chain(&s.dom, n)).unwrap_or_default())
+        };
+        let i = &mut self.interp;
+        if let Some(o) = old.filter(|&o| connected(&self.state.borrow().dom, o)) {
+            for ty in ["pointerout", "mouseout"] {
+                fire(i, &self.state, o, ty, true);
+            }
+            for &n in old_chain.iter().filter(|n| !new_chain.contains(n)) {
+                fire(i, &self.state, n, "mouseleave", false);
+            }
+        }
+        self.state.borrow_mut().hover = node;
+        if let Some(n) = node {
+            for ty in ["pointerover", "mouseover"] {
+                fire(i, &self.state, n, ty, true);
+            }
+            for &x in new_chain.iter().rev().filter(|x| !old_chain.contains(x)) {
+                fire(i, &self.state, x, "mouseenter", false);
+            }
+        }
+        let matters = self.hover_matters(&old_chain, &new_chain);
+        if matters {
+            self.state.borrow_mut().generation += 1;
+        }
+        self.settle(20.0);
+        matters
+    }
+
+    /// Would moving the hover from `old` to `new` change what any `:hover` rule matches?
+    fn hover_matters(&mut self, old: &[NodeId], new: &[NodeId]) -> bool {
+        let rules = {
+            let mut s = self.state.borrow_mut();
+            let mut all = crate::style_sheets(&s.dom);
+            all.extend(s.sheets.iter().cloned());
+            let key = all.iter().map(|t| t.len()).sum::<usize>() ^ (all.len() << 48);
+            match &s.hover_rules {
+                Some((k, r)) if *k == key => r.clone(),
+                _ => {
+                    let r = Rc::new(style::hover_selectors(&all, &s.env));
+                    s.hover_rules = Some((key, r.clone()));
+                    r
+                }
+            }
+        };
+        if rules.is_empty() {
+            return false;
+        }
+        let changed: Vec<NodeId> = old.iter().filter(|n| !new.contains(n)).chain(new.iter().filter(|n| !old.contains(n))).copied().collect();
+        let mut s = self.state.borrow_mut();
+        let dom = &mut s.dom;
+        // A :hover rule can only change for the elements that changed state and what's inside them.
+        let mut affected: Vec<NodeId> = Vec::new();
+        for &c in &changed {
+            affected.push(c);
+            affected.extend(descendants(dom, c).into_iter().filter(|&n| dom.tag(n).is_some()));
+            if affected.len() > 20_000 {
+                return true;
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        affected.retain(|n| seen.insert(*n));
+        let matched = |dom: &Dom| -> Vec<bool> { affected.iter().flat_map(|&n| rules.iter().map(move |r| (n, r))).map(|(n, r)| style::matches(dom, n, r)).collect() };
+        let mark = |dom: &mut Dom, chain: &[NodeId], on: bool| {
+            for &n in chain {
+                if on {
+                    set_attr(dom, n, css::STATE_HOVER, "");
+                } else {
+                    remove_attr(dom, n, css::STATE_HOVER);
+                }
+            }
+        };
+        mark(dom, old, true);
+        let before = matched(dom);
+        mark(dom, old, false);
+        mark(dom, new, true);
+        let after = matched(dom);
+        mark(dom, new, false);
+        before != after
+    }
+
+    /// What a `<canvas>` has drawn (None if it has no 2D context yet).
+    fn canvas(&mut self, node: NodeId) -> Option<std::sync::Arc<crate::canvas::Canvas>> {
+        let wrapper = self.state.borrow().wrappers.get(&node).cloned()?;
+        let i = &mut self.interp;
+        let ctx = i.get(&wrapper, "__ctx").ok().filter(|v| matches!(v, Value::Obj(_)))?;
+        let Ok(Value::Obj(list)) = i.get(&ctx, "_ops") else { return None };
+        let (w, h) = {
+            let s = self.state.borrow();
+            let px = |k: &str, d: f32| s.dom.attr(node, k).and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| *v > 0.0).unwrap_or(d);
+            (px("width", 300.0), px("height", 150.0))
+        };
+        let ops: Vec<Value> = match &list.borrow().kind {
+            Kind::Array(a) => a.clone(),
+            _ => return None,
+        };
+        let key = (Rc::as_ptr(&list) as usize, ops.len());
+        if let Some((p, n, c)) = self.state.borrow().canvases.get(&node) {
+            if (*p, *n) == key && c.width == w && c.height == h {
+                return Some(c.clone());
+            }
+        }
+        let c = std::sync::Arc::new(crate::canvas::Canvas { width: w, height: h, ops: ops.iter().filter_map(decode_canvas_op).collect() });
+        self.state.borrow_mut().canvases.insert(node, (key.0, key.1, c.clone()));
+        Some(c)
+    }
+
+    /// Whether the page moved to a `#fragment` since the last call (so the app scrolls to it).
+    pub fn take_anchor_scroll(&mut self) -> bool {
+        std::mem::take(&mut self.state.borrow_mut().scroll_to_anchor)
+    }
+
     /// Where the page asked to go (a link, a form, `location.href = …`), once.
     pub fn take_navigation(&mut self) -> Option<Navigation> {
         self.state.borrow_mut().navigate.take()
@@ -3113,10 +3567,42 @@ impl Runtime {
         let s = self.state.borrow();
         let mut dom = Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }] };
         let mut map = vec![ROOT];
-        fn copy(src: &Dom, sid: NodeId, dst: &mut Dom, parent: NodeId, map: &mut Vec<NodeId>) {
-            let data = match &src.nodes[sid as usize].data {
+        // Interaction states, marked on the copy for `:hover`, `:focus`, `:focus-within` and `:target`.
+        let mut marks: HashMap<NodeId, Vec<&'static str>> = HashMap::new();
+        if let Some(h) = s.hover.filter(|&h| connected(&s.dom, h)) {
+            for n in element_chain(&s.dom, h) {
+                marks.entry(n).or_default().push(css::STATE_HOVER);
+            }
+        }
+        if let Some(f) = s.focus.filter(|&f| connected(&s.dom, f)) {
+            marks.entry(f).or_default().push(css::STATE_FOCUS);
+            for n in element_chain(&s.dom, f) {
+                marks.entry(n).or_default().push(css::STATE_FOCUS_WITHIN);
+            }
+        }
+        if let Some(frag) = s.url.split_once('#').map(|(_, f)| percent_decode(f)).filter(|f| !f.is_empty()) {
+            if let Some(t) = anchor_target(&s.dom, &frag) {
+                marks.entry(t).or_default().push(css::STATE_TARGET);
+            }
+        }
+        struct Copy<'a> {
+            src: &'a Dom,
+            marks: &'a HashMap<NodeId, Vec<&'static str>>,
+            focus: Option<NodeId>,
+            focus_copy: Option<NodeId>,
+            /// (copy, original) for each canvas.
+            canvases: Vec<(NodeId, NodeId)>,
+        }
+        fn copy(c: &mut Copy, sid: NodeId, dst: &mut Dom, parent: NodeId, map: &mut Vec<NodeId>) {
+            let data = match &c.src.nodes[sid as usize].data {
                 Data::Element { name, .. } if name.starts_with('#') => return,
-                Data::Element { name, attrs } => Data::Element { name: name.clone(), attrs: attrs.clone() },
+                Data::Element { name, attrs } => {
+                    let mut attrs = attrs.clone();
+                    if let Some(m) = c.marks.get(&sid) {
+                        attrs.extend(m.iter().map(|k| (k.to_string().into(), String::new().into())));
+                    }
+                    Data::Element { name: name.clone(), attrs }
+                }
                 Data::Text(t) => Data::Text(t.clone()),
                 Data::Document => return,
             };
@@ -3124,15 +3610,26 @@ impl Runtime {
             dst.nodes.push(Node { parent, children: Vec::new(), data });
             dst.nodes[parent as usize].children.push(id);
             map.push(sid);
-            for &c in src.children(sid) {
-                copy(src, c, dst, id, map);
+            if c.focus == Some(sid) {
+                c.focus_copy = Some(id);
+            }
+            if c.src.tag(sid) == Some("canvas") {
+                c.canvases.push((id, sid));
+            }
+            for &k in c.src.children(sid) {
+                copy(c, k, dst, id, map);
             }
         }
+        let mut cp = Copy { src: &s.dom, marks: &marks, focus: s.focus, focus_copy: None, canvases: Vec::new() };
         for &c in s.dom.children(ROOT) {
-            copy(&s.dom, c, &mut dom, ROOT, &mut map);
+            copy(&mut cp, c, &mut dom, ROOT, &mut map);
         }
+        let caret = match (cp.focus_copy, s.focus) {
+            (Some(copy), Some(f)) if is_text_field(&s.dom, f) => Some((copy, s.caret.min(field_value(&s.dom, f).chars().count()))),
+            _ => None,
+        };
         let before = dom.nodes.len();
-        crate::forms::prepare(&mut dom);
+        crate::forms::prepare_with(&mut dom, caret);
         // What form controls added maps to the control.
         for k in before..dom.nodes.len() {
             let mut p = dom.nodes[k].parent as usize;
@@ -3142,7 +3639,15 @@ impl Runtime {
             map.push(map[p]);
         }
         let title = dom.find("title").map(|t| dom.text(t).split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
-        Snapshot { dom, map, title, url: s.url.clone(), generation: s.generation }
+        let (url, generation, canvas_nodes) = (s.url.clone(), s.generation, cp.canvases);
+        drop(s);
+        let mut canvases = HashMap::new();
+        for (copy, orig) in canvas_nodes {
+            if let Some(c) = self.canvas(orig) {
+                canvases.insert(crate::canvas::src_for(copy), c);
+            }
+        }
+        Snapshot { dom, canvases, map, title, url, generation }
     }
 }
 

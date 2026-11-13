@@ -337,6 +337,7 @@ input[type=checkbox], input[type=radio] { min-width: 0; width: 13px; height: 13p
 input[type=radio] { border-radius: 50% }
 input[type=checkbox][checked], input[type=radio][checked] { background: #0a66d8; border-color: #0a66d8; color: #fff }
 .-volant-placeholder { color: #757575 }
+.-volant-caret { display: inline-block; width: 1.5px; height: 1.1em; margin-right: -1.5px; vertical-align: text-bottom; background: #0a66d8 }
 input[type=range] { min-width: 120px; height: 4px; padding: 0; background: #ddd; border: 0; margin: 8px 0 }
 progress, meter { display: inline-block; width: 160px; height: 8px; background: #ddd; border-radius: 4px }
 sup { vertical-align: super }
@@ -1430,6 +1431,10 @@ fn matches_compound(dom: &Dom, id: NodeId, c: &Compound) -> bool {
             }
             Pseudo::Not(list) => !list.iter().any(|c| matches_compound(dom, id, c)),
             Pseudo::Never => false,
+            Pseudo::Hover => attr(attrs, css::STATE_HOVER).is_some(),
+            Pseudo::Focus => attr(attrs, css::STATE_FOCUS).is_some(),
+            Pseudo::FocusWithin => attr(attrs, css::STATE_FOCUS_WITHIN).is_some(),
+            Pseudo::Target => attr(attrs, css::STATE_TARGET).is_some(),
             Pseudo::Checked => attr(attrs, "checked").is_some() || attr(attrs, "selected").is_some(),
             Pseudo::Disabled => attr(attrs, "disabled").is_some(),
             Pseudo::Enabled => attr(attrs, "disabled").is_none(),
@@ -1519,6 +1524,30 @@ fn bucket(sel: &css::Selector) -> (u8, String) {
 
 /// (origin, order, rule, selector)
 type Entry = (u8, usize, usize, usize);
+
+/// The selectors in these sheets (and the UA's) that depend on `:hover`,
+/// so a page knows when the pointer moving needs a new layout.
+pub fn hover_selectors(author_css: &[String], env: &Env) -> Vec<css::Selector> {
+    fn has(c: &Compound) -> bool {
+        c.pseudos.iter().any(|p| match p {
+            Pseudo::Hover => true,
+            Pseudo::Not(list) => list.iter().any(has),
+            _ => false,
+        })
+    }
+    let mut out = Vec::new();
+    for text in std::iter::once(UA).chain(author_css.iter().map(String::as_str)) {
+        if !text.contains(":hover") {
+            continue;
+        }
+        for r in css::parse_stylesheet(text) {
+            if r.media.iter().all(|m| css::media_applies(m, env)) {
+                out.extend(r.selectors.into_iter().filter(|s| s.parts.iter().any(|(c, _)| has(c))));
+            }
+        }
+    }
+    out
+}
 
 pub fn compute(dom: &Dom, author_css: &[String], env: &Env) -> Styled {
     // Origin 0: user agent; 1: author sheets (in order), then inline styles.

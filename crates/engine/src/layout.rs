@@ -184,6 +184,10 @@ fn needs_box(s: &Style) -> bool {
 
 impl Builder<'_> {
     fn img(&self, id: NodeId) -> Img {
+        if self.dom.tag(id) == Some("canvas") {
+            // A canvas is a picture of what the page drew (300 x 150 unless sized).
+            return Img { src: crate::canvas::src_for(id), attr_w: px_attr(self.dom, id, "width").or(Some(300.0)), attr_h: px_attr(self.dom, id, "height").or(Some(150.0)) };
+        }
         Img { src: self.dom.attr(id, "src").unwrap_or("").to_string(), attr_w: px_attr(self.dom, id, "width"), attr_h: px_attr(self.dom, id, "height") }
     }
 
@@ -255,7 +259,7 @@ impl Builder<'_> {
     }
 
     fn block(&mut self, id: NodeId, ordinal: usize) -> BlockBox {
-        if self.dom.tag(id) == Some("img") {
+        if matches!(self.dom.tag(id), Some("img" | "canvas")) {
             return BlockBox { node: id, ordinal, kind: BoxKind::Image(self.img(id)), children: Vec::new(), abs: Vec::new() };
         }
         match self.styles[id as usize].display {
@@ -360,7 +364,7 @@ impl Builder<'_> {
                     run.push(Inline::Float(Box::new(b)));
                     return;
                 }
-                if tag == Some("img") && matches!(s.display, Display::Inline | Display::InlineBlock) {
+                if matches!(tag, Some("img" | "canvas")) && matches!(s.display, Display::Inline | Display::InlineBlock) {
                     run.push(Inline::Image { node: id, img: self.img(id), link });
                     return;
                 }
@@ -567,7 +571,7 @@ impl<'r> Ctx<'_> {
     /// intrinsic size, keeping the aspect ratio; `max-width` scales it down.
     fn replaced_size(&self, node: NodeId, img: &Img, cb_w: f32) -> Option<(f32, f32)> {
         let s = &self.styles[node as usize];
-        let intrinsic = if img.src.is_empty() { None } else { self.images.size(&img.src) };
+        let intrinsic = if img.src.is_empty() || img.src.starts_with("canvas:") { None } else { self.images.size(&img.src) };
         let ratio = intrinsic.filter(|(w, _)| *w > 0.0).map(|(w, h)| h / w).or_else(|| Some(img.attr_h? / img.attr_w?));
         let mut w = match s.width {
             Len::Px(v) => Some(v),

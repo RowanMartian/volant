@@ -16,6 +16,7 @@
 //! Reader and for Simple Page, which loads, runs and draws pages with nothing
 //! but Volant; ordinary browsing stays on WebKit for now.
 
+pub mod canvas;
 pub mod css;
 pub mod fonts;
 pub mod forms;

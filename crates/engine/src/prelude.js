@@ -656,4 +656,141 @@
   g.BigInt = g.BigInt || (n => Math.trunc(Number(n)))
   g.Proxy = g.Proxy || function (target) { return target }
   g.SharedArrayBuffer = undefined
+
+  // ---------------------------------------------------------------- canvas
+  // A 2D context records what's drawn as a display list (transformed, curves
+  // made into short lines); Volant draws the list into the canvas's box.
+  const MAX_OPS = 20000
+  class CanvasGradient { constructor() { this._stops = [] } addColorStop(o, c) { this._stops.push([o, String(c)]) } }
+  class CanvasPattern { setTransform() {} }
+  const paint = v => (v instanceof CanvasGradient ? (v._stops.length ? v._stops[0][1] : 'transparent') : v instanceof CanvasPattern ? '#888' : String(v))
+  class CanvasRenderingContext2D {
+    constructor(canvas) { this.canvas = canvas; this._reset() }
+    _reset() {
+      this._ops = []; this._stack = []; this._m = [1, 0, 0, 1, 0, 0]; this._path = []; this._sub = null
+      this.fillStyle = '#000'; this.strokeStyle = '#000'; this.lineWidth = 1; this.globalAlpha = 1
+      this.font = '10px sans-serif'; this.textAlign = 'start'; this.textBaseline = 'alphabetic'
+      this.lineCap = 'butt'; this.lineJoin = 'miter'; this.miterLimit = 10; this.globalCompositeOperation = 'source-over'
+      this.shadowBlur = 0; this.shadowColor = 'transparent'; this.shadowOffsetX = 0; this.shadowOffsetY = 0
+      this.imageSmoothingEnabled = true; this.direction = 'inherit'; this.filter = 'none'; this._dash = []
+    }
+    _push(op) { if (this._ops.length < MAX_OPS) this._ops.push(op) }
+    _pt(x, y) { const m = this._m; return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]] }
+    _scale() { const m = this._m; return Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1 }
+    // state
+    save() { this._stack.push([this._m.slice(), this.fillStyle, this.strokeStyle, this.lineWidth, this.globalAlpha, this.font, this.textAlign, this.textBaseline]) }
+    restore() { const s = this._stack.pop(); if (s) [this._m, this.fillStyle, this.strokeStyle, this.lineWidth, this.globalAlpha, this.font, this.textAlign, this.textBaseline] = s }
+    reset() { this._reset() }
+    // transforms
+    transform(a, b, c, d, e, f) { const m = this._m; this._m = [m[0] * a + m[2] * b, m[1] * a + m[3] * b, m[0] * c + m[2] * d, m[1] * c + m[3] * d, m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5]] }
+    setTransform(a, b, c, d, e, f) { if (typeof a === 'object' && a) { ({ a, b, c, d, e, f } = a) } this._m = a === undefined ? [1, 0, 0, 1, 0, 0] : [a, b, c, d, e, f] }
+    resetTransform() { this._m = [1, 0, 0, 1, 0, 0] }
+    getTransform() { const [a, b, c, d, e, f] = this._m; return { a, b, c, d, e, f, is2D: true, isIdentity: a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0 } }
+    translate(x, y) { this.transform(1, 0, 0, 1, x, y) }
+    scale(x, y) { this.transform(x, 0, 0, y, 0, 0) }
+    rotate(r) { const c = Math.cos(r), s = Math.sin(r); this.transform(c, s, -s, c, 0, 0) }
+    // paths
+    beginPath() { this._path = []; this._sub = null }
+    _start(x, y) { this._sub = [false, ...this._pt(x, y)]; this._path.push(this._sub); this._last = [x, y] }
+    moveTo(x, y) { this._start(+x, +y) }
+    lineTo(x, y) { x = +x; y = +y; if (!this._sub) this._start(x, y); else { this._sub.push(...this._pt(x, y)); this._last = [x, y] } }
+    closePath() { if (this._sub) { this._sub[0] = true; const [x, y] = this._sub.length > 2 ? [this._sub[1], this._sub[2]] : [0, 0]; this._sub = null; this._closedAt = [x, y] } }
+    rect(x, y, w, h) { this.moveTo(x, y); this.lineTo(x + w, y); this.lineTo(x + w, y + h); this.lineTo(x, y + h); this.closePath() }
+    roundRect(x, y, w, h, r) {
+      r = Math.min(Math.abs(Array.isArray(r) ? r[0] || 0 : +r || 0), Math.abs(w) / 2, Math.abs(h) / 2)
+      if (!r) return this.rect(x, y, w, h)
+      this.moveTo(x + r, y); this.arc(x + w - r, y + r, r, -Math.PI / 2, 0); this.arc(x + w - r, y + h - r, r, 0, Math.PI / 2)
+      this.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI); this.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5); this.closePath()
+    }
+    arc(x, y, r, a0, a1, ccw) { this.ellipse(x, y, r, r, 0, a0, a1, ccw) }
+    ellipse(x, y, rx, ry, rot, a0, a1, ccw) {
+      let sweep = a1 - a0
+      if (!ccw && sweep < 0) sweep = sweep % (2 * Math.PI) + 2 * Math.PI
+      if (ccw && sweep > 0) sweep = sweep % (2 * Math.PI) - 2 * Math.PI
+      if (Math.abs(a1 - a0) >= 2 * Math.PI) sweep = ccw ? -2 * Math.PI : 2 * Math.PI
+      const n = Math.max(8, Math.min(128, Math.ceil(Math.abs(sweep) * Math.max(rx, ry) * this._scale() / 3)))
+      const cr = Math.cos(rot || 0), sr = Math.sin(rot || 0)
+      for (let k = 0; k <= n; k++) {
+        const t = a0 + sweep * k / n, ex = rx * Math.cos(t), ey = ry * Math.sin(t)
+        const px = x + ex * cr - ey * sr, py = y + ex * sr + ey * cr
+        if (k === 0 && !this._sub) this._start(px, py); else this.lineTo(px, py)
+      }
+    }
+    arcTo(x1, y1, x2, y2) { this.lineTo(x1, y1); this.lineTo(x2, y2) }
+    quadraticCurveTo(cx, cy, x, y) {
+      const [x0, y0] = this._last || [cx, cy]
+      for (let k = 1; k <= 16; k++) { const t = k / 16, u = 1 - t; this.lineTo(u * u * x0 + 2 * u * t * cx + t * t * x, u * u * y0 + 2 * u * t * cy + t * t * y) }
+    }
+    bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+      const [x0, y0] = this._last || [c1x, c1y]
+      for (let k = 1; k <= 20; k++) {
+        const t = k / 20, u = 1 - t
+        this.lineTo(u * u * u * x0 + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t * t * t * x, u * u * u * y0 + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t * t * t * y)
+      }
+    }
+    _draw(fill, stroke) {
+      const subs = this._path.filter(s => s.length >= 5).map(s => s.slice())
+      if (subs.length) this._push(['p', fill ? paint(this.fillStyle) : null, stroke ? paint(this.strokeStyle) : null, this.lineWidth * this._scale(), this.globalAlpha, subs])
+    }
+    fill() { this._draw(true, false) }
+    stroke() { this._draw(false, true) }
+    clip() {}
+    isPointInPath() { return false }
+    isPointInStroke() { return false }
+    // rectangles
+    _rectPath(x, y, w, h) { const a = this._pt(x, y), b = this._pt(x + w, y), c = this._pt(x + w, y + h), d = this._pt(x, y + h); return [[true, ...a, ...b, ...c, ...d]] }
+    fillRect(x, y, w, h) { this._push(['p', paint(this.fillStyle), null, 0, this.globalAlpha, this._rectPath(x, y, w, h)]) }
+    strokeRect(x, y, w, h) { this._push(['p', null, paint(this.strokeStyle), this.lineWidth * this._scale(), this.globalAlpha, this._rectPath(x, y, w, h)]) }
+    clearRect(x, y, w, h) {
+      const cw = this.canvas.width, ch = this.canvas.height, [x0, y0] = this._pt(x, y), [x1, y1] = this._pt(x + w, y + h)
+      // Clearing it all starts the list again; a smaller clear paints the page's background.
+      if (Math.min(x0, x1) <= 0 && Math.min(y0, y1) <= 0 && Math.max(x0, x1) >= cw && Math.max(y0, y1) >= ch) this._ops = []
+      else this._push(['c', ...this._rectPath(x, y, w, h)[0].slice(1)])
+    }
+    // text
+    _text(t, x, y, fill) {
+      const [px, py] = this._pt(x, y)
+      this._push(['t', px, py, String(t), this.font, paint(fill ? this.fillStyle : this.strokeStyle), this.textAlign, this.textBaseline, this.globalAlpha, this._scale()])
+    }
+    fillText(t, x, y) { this._text(t, x, y, true) }
+    strokeText(t, x, y) { this._text(t, x, y, false) }
+    measureText(t) {
+      const w = __measure(String(t), this.font), size = parseFloat((/(\d+(?:\.\d+)?)px/.exec(this.font) || [0, 10])[1])
+      return { width: w, actualBoundingBoxLeft: 0, actualBoundingBoxRight: w, actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2, fontBoundingBoxAscent: size * 0.9, fontBoundingBoxDescent: size * 0.25 }
+    }
+    // images
+    drawImage(img, ...a) {
+      const src = img && (img.currentSrc || img.src || (img.getAttribute && img.getAttribute('src')))
+      if (!src) return
+      let [dx, dy, dw, dh] = a.length >= 8 ? a.slice(4) : a
+      if (dw === undefined) { dw = img.naturalWidth || img.width || 0; dh = img.naturalHeight || img.height || 0 }
+      const [x0, y0] = this._pt(dx, dy), [x1, y1] = this._pt(dx + dw, dy + dh)
+      this._push(['i', String(src), Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0), this.globalAlpha])
+    }
+    // pixels (not kept: Volant draws vectors)
+    createImageData(w, h) { if (typeof w === 'object') ({ width: w, height: h } = w); return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) } }
+    getImageData(x, y, w, h) { return this.createImageData(w, h) }
+    putImageData() {}
+    createLinearGradient() { return new CanvasGradient() }
+    createRadialGradient() { return new CanvasGradient() }
+    createConicGradient() { return new CanvasGradient() }
+    createPattern() { return new CanvasPattern() }
+    setLineDash(d) { this._dash = Array.isArray(d) ? d.slice() : [] }
+    getLineDash() { return this._dash.slice() }
+    drawFocusIfNeeded() {}
+  }
+  g.CanvasRenderingContext2D = CanvasRenderingContext2D
+  g.CanvasGradient = CanvasGradient
+  g.CanvasPattern = CanvasPattern
+  g.Path2D = class Path2D { constructor() { this._calls = [] } }
+  {
+    const EP = Object.getPrototypeOf(document.createElement('canvas'))
+    EP.getContext = function (type) {
+      if (this.tagName !== 'CANVAS' || String(type).toLowerCase() !== '2d') return null
+      return this.__ctx || (this.__ctx = new CanvasRenderingContext2D(this))
+    }
+    EP.toDataURL = function () { return 'data:,' }
+    EP.toBlob = function (cb) { setTimeout(() => cb && cb(new g.Blob([], { type: 'image/png' })), 0) }
+    EP.transferControlToOffscreen = function () { return null }
+  }
 })(window)

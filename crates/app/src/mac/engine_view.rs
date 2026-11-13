@@ -62,6 +62,8 @@ struct Inner {
     at: usize,
     /// A page is being fetched (for the reload/stop button).
     loading: bool,
+    /// A `#fragment` to scroll to once the page is laid out.
+    pending_anchor: Option<String>,
     serial: u64,
     /// The page has a text field focused (typing goes to it).
     focused: bool,
@@ -89,6 +91,10 @@ use volant_engine::script::{self, Navigation, Snapshot};
 /// What the view sends the session thread.
 enum Cmd {
     Click(u32),
+    /// The pointer is over this node (or off the page).
+    Hover(Option<u32>),
+    /// A `<select>`'s menu: the option picked (by index among its options).
+    Choose(u32, usize),
     Type(String),
     Key(&'static str),
     Width(f32, bool),
@@ -153,6 +159,9 @@ struct MacImages<'a> {
 
 impl Images for MacImages<'_> {
     fn size(&self, src: &str) -> Option<(f32, f32)> {
+        if src.starts_with("canvas:") {
+            return None; // drawn by the page, sized by its attributes
+        }
         match self.known.get(src) {
             Some(ImageState::Ready(w, h)) => Some((*w, *h)),
             Some(_) => None,
@@ -269,6 +278,12 @@ pub struct EngineIvars {
     /// Clicks and typing go to a live page's scripts.
     live: Cell<bool>,
     focused: Cell<bool>,
+    /// What each `<canvas>` drew, by its box's `src`.
+    canvases: RefCell<HashMap<String, std::sync::Arc<volant_engine::canvas::Canvas>>>,
+    /// The page node under the pointer, last sent to the page.
+    hovered: Cell<Option<u32>>,
+    /// The `<select>` whose menu is open, and how its menu lines map to options.
+    menu_for: Cell<Option<u32>>,
 }
 
 define_class!(
@@ -292,7 +307,7 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, dirty: NSRect) {
             if let Some(page) = self.ivars().page.borrow().as_ref() {
-                paint(page, dirty, &self.ivars().images.borrow(), &self.ivars().hits.borrow(), &self.ivars().sel_areas.borrow());
+                paint(page, dirty, &self.ivars().images.borrow(), &self.ivars().canvases.borrow(), &self.ivars().hits.borrow(), &self.ivars().sel_areas.borrow());
             }
         }
 
@@ -396,6 +411,9 @@ define_class!(
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> objc2::runtime::Bool {
             // Copy only when something is selected.
+            if item.action() == Some(objc2::sel!(chooseOption:)) {
+                return objc2::runtime::Bool::new(item.tag() >= 0);
+            }
             let ok = item.action() != Some(objc2::sel!(copy:)) || self.ivars().sel.get().map(|(a, b)| a != b).unwrap_or(false);
             objc2::runtime::Bool::new(ok)
         }
@@ -411,6 +429,13 @@ define_class!(
                     "\r" | "\u{3}" => Some(Cmd::Key("Enter")),
                     "\t" => Some(Cmd::Key("Tab")),
                     "\u{1b}" => Some(Cmd::Key("Escape")),
+                    "\u{f702}" => Some(Cmd::Key("ArrowLeft")),
+                    "\u{f703}" => Some(Cmd::Key("ArrowRight")),
+                    "\u{f700}" => Some(Cmd::Key("ArrowUp")),
+                    "\u{f701}" => Some(Cmd::Key("ArrowDown")),
+                    "\u{f729}" => Some(Cmd::Key("Home")),
+                    "\u{f72b}" => Some(Cmd::Key("End")),
+                    "\u{f728}" => Some(Cmd::Key("Delete")),
                     c if !c.is_empty() && c.chars().all(|ch| !ch.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&ch)) => Some(Cmd::Type(c.to_string())),
                     _ => None,
                 };
@@ -421,6 +446,37 @@ define_class!(
             }
             if !self.scroll_key(e) {
                 let _: () = unsafe { msg_send![super(self), keyDown: e] };
+            }
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, e: &NSEvent) {
+            if !self.ivars().live.get() {
+                return;
+            }
+            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let node = self.ivars().page.borrow().as_ref().and_then(|page| page.hit(p.x as f32, p.y as f32));
+            let target = node.and_then(|n| self.ivars().map.borrow().get(n as usize).copied());
+            if target != self.ivars().hovered.get() {
+                self.ivars().hovered.set(target);
+                with(move |b| send(b, Cmd::Hover(target)));
+            }
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _e: &NSEvent) {
+            if self.ivars().live.get() && self.ivars().hovered.get().is_some() {
+                self.ivars().hovered.set(None);
+                with(move |b| send(b, Cmd::Hover(None)));
+            }
+        }
+
+        /// A line of a `<select>`'s menu was picked; its tag is the option's index.
+        #[unsafe(method(chooseOption:))]
+        fn choose_option(&self, item: &NSMenuItem) {
+            if let Some(select) = self.ivars().menu_for.take() {
+                let index = item.tag().max(0) as usize;
+                with(move |b| send(b, Cmd::Choose(select, index)));
             }
         }
 
@@ -451,8 +507,16 @@ impl EngineView {
             map: RefCell::new(Vec::new()),
             live: Cell::new(false),
             focused: Cell::new(false),
+            canvases: RefCell::new(HashMap::new()),
+            hovered: Cell::new(None),
+            menu_for: Cell::new(None),
         });
-        unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 100.0, 100.0)] }
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 100.0, 100.0)] };
+        // Pointer movement, for :hover and mouseover.
+        let opts = objc2_app_kit::NSTrackingAreaOptions::MouseMoved | objc2_app_kit::NSTrackingAreaOptions::MouseEnteredAndExited | objc2_app_kit::NSTrackingAreaOptions::ActiveInKeyWindow | objc2_app_kit::NSTrackingAreaOptions::InVisibleRect;
+        let area = unsafe { objc2_app_kit::NSTrackingArea::initWithRect_options_owner_userInfo(objc2_app_kit::NSTrackingArea::alloc(), rect(0.0, 0.0, 0.0, 0.0), opts, Some(&this as &AnyObject), None) };
+        this.addTrackingArea(&area);
+        this
     }
 }
 
@@ -512,7 +576,7 @@ fn rounded(r: NSRect, radius: f64) -> Retained<NSBezierPath> {
 }
 
 /// Draws the part of the page inside `dirty`.
-fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>, hits: &(Vec<NSRect>, usize), selection: &[NSRect]) {
+fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>, canvases: &HashMap<String, std::sync::Arc<volant_engine::canvas::Canvas>>, hits: &(Vec<NSRect>, usize), selection: &[NSRect]) {
     ns_color(page.background).setFill();
     NSBezierPath::fillRect(dirty);
     for item in &page.items {
@@ -541,6 +605,13 @@ fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>
                 let r = rect(*x as f64, *y as f64, *w as f64, *h as f64);
                 NSGraphicsContext::saveGraphicsState_class();
                 rounded(r, *radius as f64).addClip();
+                if src.starts_with("canvas:") {
+                    if let Some(c) = canvases.get(src) {
+                        paint_canvas(c, r, page.background, images);
+                    }
+                    NSGraphicsContext::restoreGraphicsState_class();
+                    continue;
+                }
                 match images.get(src) {
                     Some(img) => unsafe {
                         img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(r, NSRect::ZERO, NSCompositingOperation::SourceOver, 1.0, true, None);
@@ -580,6 +651,75 @@ fn paint(page: &Page, dirty: NSRect, images: &HashMap<String, Retained<NSImage>>
             let (red, green, blue, a) = if i == hits.1 { (1.0, 0.6, 0.0, 0.55) } else { (1.0, 0.85, 0.0, 0.35) };
             NSColor::colorWithSRGBRed_green_blue_alpha(red, green, blue, a).setFill();
             rounded(*r, 3.0).fill();
+        }
+    }
+}
+
+/// Draws a `<canvas>`'s display list into its box, scaled from canvas pixels.
+fn paint_canvas(c: &volant_engine::canvas::Canvas, r: NSRect, background: volant_engine::Color, images: &HashMap<String, Retained<NSImage>>) {
+    use volant_engine::canvas::{Align, Op};
+    let (sx, sy) = (r.size.width / c.width.max(1.0) as f64, r.size.height / c.height.max(1.0) as f64);
+    let at = |(x, y): (f32, f32)| NSPoint::new(r.origin.x + x as f64 * sx, r.origin.y + y as f64 * sy);
+    let polygon = |pts: &[(f32, f32)], closed: bool, path: &NSBezierPath| {
+        let mut it = pts.iter();
+        if let Some(&p) = it.next() {
+            path.moveToPoint(at(p));
+            for &q in it {
+                path.lineToPoint(at(q));
+            }
+            if closed {
+                path.closePath();
+            }
+        }
+    };
+    for op in &c.ops {
+        match op {
+            Op::Path { subpaths, fill, stroke, line_width } => {
+                let path = NSBezierPath::bezierPath();
+                for (closed, pts) in subpaths {
+                    polygon(pts, *closed || fill.is_some(), &path);
+                }
+                if let Some(f) = fill {
+                    ns_color(*f).setFill();
+                    path.fill();
+                }
+                if let Some(s) = stroke {
+                    let stroked = NSBezierPath::bezierPath();
+                    for (closed, pts) in subpaths {
+                        polygon(pts, *closed, &stroked);
+                    }
+                    stroked.setLineWidth(*line_width as f64 * sx.min(sy));
+                    ns_color(*s).setStroke();
+                    stroked.stroke();
+                }
+            }
+            Op::Clear { points } => {
+                let path = NSBezierPath::bezierPath();
+                polygon(points, true, &path);
+                ns_color(background).setFill();
+                path.fill();
+            }
+            Op::Text { x, y, text, size, bold, serif, mono, color, align } => {
+                let family = if *mono { volant_engine::Family::Mono } else if *serif { volant_engine::Family::Serif } else { volant_engine::Family::Sans };
+                let font = Font { family, size: (*size as f64 * sy) as f32, weight: if *bold { 700 } else { 400 }, italic: false };
+                let f = ns_font(&font);
+                let s = attributed(text, &f, Some(&ns_color(*color)), false, false);
+                let w = s.size().width;
+                let p = at((*x, *y));
+                let dx = match align {
+                    Align::Left => 0.0,
+                    Align::Center => w / 2.0,
+                    Align::Right => w,
+                };
+                s.drawAtPoint(NSPoint::new(p.x - dx, p.y - f.ascender()));
+            }
+            Op::Image { src, x, y, w, h, alpha } => {
+                if let Some(img) = images.get(src) {
+                    let p = at((*x, *y));
+                    let dst = rect(p.x, p.y, *w as f64 * sx, *h as f64 * sy);
+                    unsafe { img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(dst, NSRect::ZERO, NSCompositingOperation::SourceOver, *alpha as f64, true, None) };
+                }
+            }
         }
     }
 }
@@ -660,6 +800,7 @@ pub fn sync(b: &Browser) {
         let env = volant_engine::Env { width: width as f32, dark };
         let (page, base) = if let Some(p) = &e.page {
             *view.ivars().map.borrow_mut() = p.snap.map.clone();
+            *view.ivars().canvases.borrow_mut() = p.snap.canvases.clone();
             (script::render_snapshot(&p.snap, &p.sheets, env, &MacFonts, &images), p.snap.url.clone())
         } else {
             let Some(a) = e.article.as_ref() else { return };
@@ -672,6 +813,16 @@ pub fn sync(b: &Browser) {
         if simple {
             if let Some(s) = &e.session {
                 let _ = s.tx.send(Cmd::Width(width as f32, dark));
+            }
+        }
+        // Pictures a <canvas> drew with drawImage load like any other.
+        if let Some(p) = &e.page {
+            for c in p.snap.canvases.values() {
+                for op in &c.ops {
+                    if let volant_engine::canvas::Op::Image { src, .. } = op {
+                        let _ = images.size(src);
+                    }
+                }
             }
         }
         let wanted = images.wanted.into_inner();
@@ -707,6 +858,15 @@ pub fn sync(b: &Browser) {
         view.set_selection(None);
         view.setFrameSize(NSSize::new(width as f64, height));
         view.setNeedsDisplay(true);
+        // A #fragment: scroll its target to the top.
+        if let (Some(frag), Some(p), Some(laid)) = (e.pending_anchor.take(), e.page.as_ref(), view.ivars().page.borrow().as_ref()) {
+            if let Some(y) = script::anchor_y(&p.snap, laid, &frag) {
+                let clip = scroll.contentView();
+                let max = (height - clip.bounds().size.height).max(0.0);
+                clip.scrollToPoint(NSPoint::new(0.0, (y as f64 - 8.0).clamp(0.0, max)));
+                scroll.reflectScrolledClipView(&clip);
+            }
+        }
         if let Some(w) = view.window() {
             w.invalidateCursorRectsForView(&view);
         }
@@ -946,7 +1106,8 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
             texts.push(if media.is_empty() || media == "all" { text } else { format!("@media {media} {{\n{text}\n}}") });
         }
         let focused = rt.focused().is_some();
-        super::on_main(move || with(move |b| arrived(b, serial, tab, snap, texts, focused)));
+        let anchor = rt.take_anchor_scroll();
+        super::on_main(move || with(move |b| arrived(b, serial, tab, snap, texts, focused, anchor)));
     };
     // First paint: the page as served, before its scripts.
     publish(&mut rt, &mut sheets);
@@ -975,6 +1136,10 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
         let wait = if rt.has_timers() { 150 } else { 1000 };
         match rx.recv_timeout(std::time::Duration::from_millis(wait)) {
             Ok(Cmd::Click(n)) => rt.click(n),
+            Ok(Cmd::Hover(n)) => {
+                rt.hover(n);
+            }
+            Ok(Cmd::Choose(select, index)) => rt.choose(select, index),
             Ok(Cmd::Type(t)) => rt.type_text(&t),
             Ok(Cmd::Key(k)) => rt.key(k),
             Ok(Cmd::Width(w, d)) => {
@@ -1000,7 +1165,70 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
             shown = rt.generation();
             publish(&mut rt, &mut sheets);
         }
+        // A click or key opened a `<select>`: its menu is native.
+        if let Some((select, items)) = rt.take_menu() {
+            super::on_main(move || with(move |b| show_menu(b, serial, select, items)));
+        }
     }
+}
+
+/// A `<select>` was clicked: its options as a native menu, under the control.
+fn show_menu(b: &mut Browser, serial: u64, select: u32, items: Vec<script::MenuItem>) {
+    let Ok(e) = b.engine.0.try_borrow() else { return };
+    if e.serial != serial {
+        return;
+    }
+    let Some(view) = e.view.clone() else { return };
+    drop(e);
+    let mtm = b.mtm;
+    // Where the control is drawn: its box among the laid-out page's hits.
+    let place = {
+        let map = view.ivars().map.borrow();
+        let page = view.ivars().page.borrow();
+        page.as_ref().and_then(|page| {
+            page.hits
+                .iter()
+                .filter(|h| map.get(h.node as usize) == Some(&select))
+                .max_by(|a, b| (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|h| (h.x as f64, (h.y + h.h) as f64, h.w as f64))
+        })
+    };
+    let Some((x, y, w)) = place else { return };
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(true);
+    let mut index = 0isize;
+    let mut chosen = None;
+    for it in &items {
+        let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(&it.label), Some(objc2::sel!(chooseOption:)), &ns("")) };
+        if it.header {
+            item.setTag(-1);
+            item.setEnabled(false);
+        } else {
+            item.setTag(if it.disabled { -1 - index } else { index });
+            unsafe { item.setTarget(Some(&view)) };
+            if it.disabled {
+                item.setEnabled(false);
+            } else {
+                item.setIndentationLevel(if items.iter().any(|m| m.header) { 1 } else { 0 });
+            }
+            if it.selected {
+                item.setState(objc2_app_kit::NSControlStateValueOn);
+                chosen = Some(item.clone());
+            }
+            index += 1;
+        }
+        menu.addItem(&item);
+    }
+    menu.setMinimumWidth(w);
+    view.ivars().menu_for.set(Some(select));
+    // The menu blocks until it closes, so it opens outside the browser state;
+    // a pick arrives through chooseOption:.
+    super::later(move || {
+        menu.popUpMenuPositioningItem_atLocation_inView(chosen.as_deref(), NSPoint::new(x, y), Some(&view));
+        if view.ivars().menu_for.get() == Some(select) {
+            view.ivars().menu_for.set(None);
+        }
+    });
 }
 
 /// The page couldn't be fetched: stop showing it as loading.
@@ -1015,7 +1243,7 @@ fn load_failed(b: &mut Browser, serial: u64) {
 }
 
 /// A snapshot from the session thread.
-fn arrived(b: &mut Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec<String>, focused: bool) {
+fn arrived(b: &mut Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec<String>, focused: bool, anchor: bool) {
     let visited;
     {
         let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
@@ -1035,8 +1263,13 @@ fn arrived(b: &mut Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec
         }
         e.loading = false;
         visited = Some((url.clone(), snap.title.clone()));
-        // A different page starts at its top.
-        let new_page = e.page.as_ref().map(|p| p.url != url).unwrap_or(true);
+        // A different page starts at its top (or at its #fragment); a #link on the page scrolls there.
+        let base = |u: &str| u.split('#').next().unwrap_or(u).to_string();
+        let new_page = e.page.as_ref().map(|p| base(&p.url) != base(&url)).unwrap_or(true);
+        let fragment = url.split_once('#').map(|(_, f)| f.to_string());
+        if anchor || (new_page && fragment.is_some()) {
+            e.pending_anchor = Some(fragment.clone().unwrap_or_default());
+        }
         if new_page {
             if let Some(scroll) = &e.scroll {
                 let clip = scroll.contentView();

@@ -68,8 +68,14 @@ pub enum Pseudo {
     Nth(i32, i32, bool, bool),
     /// `:not(...)`: matches when none of these compounds do.
     Not(Vec<Compound>),
-    /// A state a drawn page is never in (`:hover`, `:focus`, `:visited`...).
+    /// A state a drawn page is never in (`:active`, `:visited`, …).
     Never,
+    /// `:hover`, `:focus` (and `:focus-visible`), `:focus-within`, `:target`:
+    /// the snapshot marks these elements (see [`STATE_HOVER`] and friends).
+    Hover,
+    Focus,
+    FocusWithin,
+    Target,
     /// `:checked`, `:disabled`, `:enabled`, from the element's attributes.
     Checked,
     Disabled,
@@ -83,6 +89,14 @@ pub enum Pseudo {
     /// `:empty`: no element children and no text.
     Empty,
 }
+
+/// Hidden attributes a page snapshot puts on elements in an interaction
+/// state (scripts never see them): the hovered element and its ancestors,
+/// the focused element and its ancestors, and the `#fragment`'s target.
+pub const STATE_HOVER: &str = "\0hover";
+pub const STATE_FOCUS: &str = "\0focus";
+pub const STATE_FOCUS_WITHIN: &str = "\0focus-within";
+pub const STATE_TARGET: &str = "\0target";
 
 /// One compound selector: `p.note#intro[lang]:first-child`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -450,11 +464,13 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
                         has = true;
                         continue;
                     }
-                    // Interaction states: a snapshot of the page is in none of them
-                    // (and :visited never matches, for privacy).
-                    ("hover" | "focus" | "active" | "focus-visible" | "focus-within" | "visited" | "target" | "indeterminate" | "placeholder-shown" | "autofill" | "-webkit-autofill", None) => {
-                        Pseudo::Never
-                    }
+                    // Interaction states the snapshot marks; the rest never match
+                    // (and :visited never does, for privacy).
+                    ("hover", None) => Pseudo::Hover,
+                    ("focus" | "focus-visible", None) => Pseudo::Focus,
+                    ("focus-within", None) => Pseudo::FocusWithin,
+                    ("target", None) => Pseudo::Target,
+                    ("active" | "visited" | "indeterminate" | "placeholder-shown" | "autofill" | "-webkit-autofill", None) => Pseudo::Never,
                     ("checked", None) => Pseudo::Checked,
                     ("disabled", None) => Pseudo::Disabled,
                     ("enabled", None) => Pseudo::Enabled,
@@ -607,7 +623,7 @@ mod tests {
         assert!(r[1].decls[0].important && r[1].decls[0].value == "bold 2em/1.2 Georgia, serif");
         assert_eq!(r[2].media, ["print"]);
         assert_eq!(r[3].media, ["screen"]);
-        assert_eq!(r[4].selectors[0].parts[0].0.pseudos, [Pseudo::Never], "a:hover is kept but never matches");
+        assert_eq!(r[4].selectors[0].parts[0].0.pseudos, [Pseudo::Hover]);
         assert_eq!(r[5].selectors[0].parts[0].0.attrs[0], ("href".into(), AttrOp::Prefix("http".into())));
     }
 
@@ -632,7 +648,8 @@ mod tests {
         for (q, want) in [("screen and (min-width: 600px)", true), ("(max-width: 40em)", false), ("print", false), ("(prefers-color-scheme: dark)", true), ("not print", true), ("screen, print", true), ("(min-width: 900px)", false)] {
             assert_eq!(media_applies(q, &env), want, "{q}");
         }
-        assert_eq!(parse_selector("a:hover").unwrap().parts[0].0.pseudos, [Pseudo::Never]);
+        assert_eq!(parse_selector("a:hover").unwrap().parts[0].0.pseudos, [Pseudo::Hover]);
+        assert_eq!(parse_selector("a:visited").unwrap().parts[0].0.pseudos, [Pseudo::Never]);
         for bad in ["p::marker", "li:has(p)", "> p", "", "a b >"] {
             assert!(parse_selector(bad).is_none() || bad == "a b >", "{bad}");
         }

@@ -156,10 +156,29 @@ fn forms_typing_and_submit() {
     rt.type_text("volant rs");
     rt.key("Backspace");
     assert_eq!(text_of(&rt, "live"), "typing volant r");
+    // The caret moves, and typing goes where it is.
+    rt.key("Home");
+    rt.type_text(">");
+    rt.key("End");
+    rt.key("ArrowLeft");
+    rt.key("Delete");
+    rt.key("ArrowLeft");
+    rt.key("Backspace");
+    assert_eq!(text_of(&rt, "live"), "typing >volan ");
+    rt.key("Home");
+    rt.key("Delete");
+    rt.key("End");
+    rt.key("Backspace");
+    rt.type_text("t r");
+    assert_eq!(text_of(&rt, "live"), "typing volant r");
     let safe = id(&rt, "safe");
     rt.click(safe);
     let lang = id(&rt, "lang");
     rt.click(lang);
+    let (menu_for, items) = rt.take_menu().expect("a select opens its menu");
+    assert_eq!(menu_for, lang);
+    assert_eq!(items.iter().map(|m| (m.label.as_str(), m.selected)).collect::<Vec<_>>(), [("English", true), ("French", false)]);
+    rt.choose(lang, 1);
     rt.click(q);
     rt.key("Enter");
     assert_eq!(rt.take_navigation().map(|n| n.url).as_deref(), Some("https://example.com/search?q=volant+r&safe=on&lang=fr"));
@@ -302,4 +321,91 @@ fn post_forms_cookies_and_request_headers() {
     let boundary = ty.strip_prefix("multipart/form-data; boundary=").unwrap();
     let body = String::from_utf8(nav.body.unwrap()).unwrap();
     assert_eq!(body, format!("--{boundary}\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhi\r\n--{boundary}--\r\n"));
+}
+
+#[test]
+fn hover_focus_target_and_caret_in_snapshots() {
+    let mut rt = page(
+        "<style>a:hover { color: red } .card:hover .hint { display: block } .hint { display: none } :target { outline: 0 }</style>\
+         <p id=plain>plain <b id=bold>text</b></p><a id=link href='#sec'>go</a><div class=card id=card><span class=hint id=hint>hi</span></div>\
+         <input id=f value=abc><h2 id=sec>Section</h2>\
+         <script>let log = []; const c = document.getElementById('card');\
+           c.addEventListener('mouseenter', () => log.push('enter')); c.addEventListener('mouseleave', () => log.push('leave'));\
+           c.addEventListener('mouseover', e => log.push('over:' + e.target.id));</script>",
+    );
+    let id = |rt: &Runtime, id: &str| {
+        let s = rt.state.borrow();
+        (0..s.dom.nodes.len() as NodeId).find(|&n| s.dom.attr(n, "id") == Some(id)).unwrap()
+    };
+    let (plain, bold, link, card, hint) = (id(&rt, "plain"), id(&rt, "bold"), id(&rt, "link"), id(&rt, "card"), id(&rt, "hint"));
+    // No :hover rule covers plain text: no new layout.
+    assert!(!rt.hover(Some(plain)));
+    assert!(!rt.hover(Some(bold)));
+    assert!(rt.hover(Some(link)), "a:hover changes the link");
+    assert!(rt.hover(Some(hint)), ".card:hover .hint changes");
+    assert!(!rt.hover(Some(card)), "still inside the card");
+    assert!(rt.hover(None));
+    rt.interp.run("console.log(log.join())").unwrap();
+    assert_eq!(console(&mut rt), "over:hint,enter,over:card,leave");
+    rt.hover(Some(hint));
+    let snap = rt.snapshot();
+    let marked = |snap: &Snapshot, id: &str, mark: &str| (0..snap.dom.nodes.len() as NodeId).any(|n| snap.dom.attr(n, "id") == Some(id) && snap.dom.attr(n, mark).is_some());
+    assert!(marked(&snap, "card", css::STATE_HOVER) && marked(&snap, "hint", css::STATE_HOVER) && !marked(&snap, "link", css::STATE_HOVER));
+    // Focus puts the caret at the end of the field; arrows move it.
+    let f = id(&rt, "f");
+    rt.click(f);
+    rt.key("ArrowLeft");
+    let snap = rt.snapshot();
+    let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
+    let svg = crate::svg::to_svg(&page);
+    assert!(svg.contains(">ab</text>") && svg.contains(">c</text>"), "the caret splits the value: {svg}");
+    // A same-page link scrolls to its target, which is :target.
+    rt.click(link);
+    assert!(rt.take_navigation().is_none(), "#links stay on the page");
+    let snap = rt.snapshot();
+    assert!(snap.url.ends_with("#sec"));
+    let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
+    let y = anchor_y(&snap, &page, "sec").expect("the section is on the page");
+    assert!(y > 40.0, "{y}");
+}
+
+#[test]
+fn canvas_drawing_is_recorded() {
+    let mut rt = page(
+        "<canvas id=c width=200 height=100></canvas><canvas id=empty></canvas>\
+         <script>const c = document.getElementById('c'), g = c.getContext('2d');\
+           g.fillStyle = 'red'; g.fillRect(0, 0, 10, 10);\
+           g.clearRect(0, 0, 200, 100);\
+           g.fillStyle = '#00f'; g.translate(50, 20); g.fillRect(0, 0, 10, 5);\
+           g.beginPath(); g.arc(0, 0, 10, 0, Math.PI * 2); g.strokeStyle = 'rgba(0,0,0,0.5)'; g.lineWidth = 2; g.stroke();\
+           g.setTransform(1, 0, 0, 1, 0, 0); g.font = 'bold 16px serif'; g.textAlign = 'center'; g.fillText('Hi', 100, 90);\
+           console.log(g.measureText('Hi').width > 10, c.width, document.getElementById('empty').width, c.getContext('webgl'));</script>",
+    );
+    assert_eq!(console(&mut rt), "true 200 300 null");
+    let snap = rt.snapshot();
+    assert_eq!(snap.canvases.len(), 1, "only the canvas with a context");
+    let canvas = snap.canvases.values().next().unwrap();
+    assert_eq!((canvas.width, canvas.height, canvas.ops.len()), (200.0, 100.0, 3), "{:?}", canvas.ops);
+    use crate::canvas::{Align, Op};
+    match &canvas.ops[0] {
+        Op::Path { subpaths, fill: Some(c), stroke: None, .. } => {
+            assert_eq!((c.b, subpaths[0].1[0], subpaths[0].1[2]), (255, (50.0, 20.0), (60.0, 25.0)));
+        }
+        other => panic!("{other:?}"),
+    }
+    match &canvas.ops[1] {
+        Op::Path { subpaths, stroke: Some(c), line_width, .. } => assert!(c.a == 128 && *line_width == 2.0 && subpaths[0].1.len() > 8 && (subpaths[0].1[0].0 - 60.0).abs() < 0.01),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(&canvas.ops[2], Op::Text { text, size, bold: true, serif: true, align: Align::Center, .. } if text == "Hi" && *size == 16.0));
+    // Laid out like a picture of that size.
+    let page = render_snapshot(&snap, &[], Env { width: 800.0, dark: false }, &ApproxFonts, &NoImages);
+    let boxes: Vec<(f32, f32, String)> = page.items.iter().filter_map(|i| match i {
+        crate::Item::Image { w, h, src, .. } => Some((*w, *h, src.clone())),
+        _ => None,
+    }).collect();
+    assert_eq!(boxes.len(), 2);
+    assert_eq!((boxes[0].0, boxes[0].1), (200.0, 100.0));
+    assert!(snap.canvases.contains_key(&boxes[0].2));
+    assert_eq!((boxes[1].0, boxes[1].1), (300.0, 150.0));
 }
