@@ -21,6 +21,7 @@ pub mod css;
 pub mod fonts;
 pub mod forms;
 pub mod layout;
+pub mod raster;
 pub mod reader;
 pub mod script;
 pub mod select;

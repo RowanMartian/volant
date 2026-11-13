@@ -37,6 +37,7 @@ pub mod hash;
 pub mod fuzzy;
 pub mod history;
 pub mod json;
+pub mod png;
 pub mod macho;
 pub mod html;
 pub mod http;

@@ -18,13 +18,17 @@
 //!                                              (other files fetched with curl; console printed)
 //! volant-tools js FILE.js                      run a script with Volant's own JavaScript engine
 //! volant-tools survey SITES.txt OUT_DIR [--jobs N] [--only TEXT]
-//! volant-tools wpt WPT_DIR LIST OUT_DIR [--jobs N] [--baseline FILE [--write-baseline]]
 //!                                              run each site through Simple Page's steps and
 //!                                              report what shows, what falls back, errors and timings
+//! volant-tools wpt WPT_DIR LIST OUT_DIR [--jobs N] [--baseline FILE [--write-baseline]]
+//!                                              web-platform-tests' testharness.js tests (see wpt.rs)
+//! volant-tools reftest WPT_DIR LIST OUT_DIR [--jobs N] [--shots] [--baseline FILE [--write-baseline]]
+//!                                              web-platform-tests' reftests, compared in pixels (see reftest.rs)
 //! ```
 
 mod site;
 mod survey;
+mod reftest;
 mod wpt;
 
 use std::path::{Path, PathBuf};
@@ -262,6 +266,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "survey-one" => survey::one(arg(1)?),
         "wpt" => wpt::run(&args[1..])?,
         "wpt-one" => wpt::one(arg(1)?, arg(2)?),
+        "reftest" => reftest::run(&args[1..])?,
+        "reftest-one" => reftest::one(arg(1)?, arg(2)?, args.get(3).map(String::as_str)),
         other => return Err(format!("unknown command {other:?}; see the top of crates/tools/src/main.rs")),
     }
     Ok(())

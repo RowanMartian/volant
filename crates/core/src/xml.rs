@@ -277,7 +277,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// XML's five entities and character references (other `&` stays as written).
+/// XML's five entities, HTML's named characters and character references (other `&` stays as written).
 fn unescape(s: &str) -> String {
     if !s.contains('&') {
         return s.replace("\r\n", "\n");
@@ -293,18 +293,17 @@ fn unescape(s: &str) -> String {
             continue;
         };
         let ent = &rest[1..semi];
-        let c = match ent {
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "amp" => Some('&'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            _ => ent
-                .strip_prefix("#x")
-                .and_then(|h| u32::from_str_radix(h, 16).ok())
-                .or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()))
-                .and_then(char::from_u32),
-        };
+        // XHTML's named characters (&nbsp; and the rest) as well, as browsers know them.
+        if let Some((_, v)) = crate::html::ENTITIES.iter().find(|(k, _)| *k == ent) {
+            out.push_str(v);
+            rest = &rest[semi + 1..];
+            continue;
+        }
+        let c = ent
+            .strip_prefix("#x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()))
+            .and_then(char::from_u32);
         match c {
             Some(c) => {
                 out.push(c);

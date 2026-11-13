@@ -1,6 +1,7 @@
 name: Engine conformance
 
-# web-platform-tests on Volant's own engine (every change), and the
+# web-platform-tests on Volant's own engine (every change: testharness.js
+# tests and CSS reftests), and the
 # compatibility survey of real sites through Simple Page (weekly, or by hand).
 on:
   push:
@@ -44,6 +45,37 @@ jobs:
         with:
           name: wpt-results
           path: wpt-results/
+
+  # CSS reftests: each test page and its reference rendered by the engine and
+  # compared in pixels (see crates/tools/src/reftest.rs).
+  reftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build volant-tools
+        run: cargo build --locked --release -p volant-tools
+
+      - name: Fetch the reftests (pinned)
+        run: |
+          git init -q wpt
+          cd wpt
+          git remote add origin https://github.com/web-platform-tests/wpt.git
+          git sparse-checkout set resources common fonts images css/support css/reference css/filter-effects/reference $(grep -v '^[#!]' ../scripts/wpt/reftests.txt | grep .)
+          git fetch -q --depth 1 --filter=blob:none origin "$(cat ../scripts/wpt/WPT_COMMIT)"
+          git checkout -q FETCH_HEAD
+
+      - name: Run them against the baseline
+        run: target/release/volant-tools reftest wpt scripts/wpt/reftests.txt reftest-results --jobs 4 --baseline scripts/wpt/reftest-baseline.tsv --tolerance 5 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reftest-results
+          path: reftest-results/
 
   survey:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

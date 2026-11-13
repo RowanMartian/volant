@@ -704,8 +704,9 @@ fn family_of(v: &str) -> Option<Family> {
     let names = css_split_commas(v);
     for (k, f) in names.iter().enumerate() {
         let f = f.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
-        // A web font the page loaded: it, with the rest of the list as its fallback.
-        if crate::fonts::is_declared(&f) {
+        // A web font the page loaded (or Ahem, the box font CSS tests take as installed):
+        // it, with the rest of the list as its fallback.
+        if crate::fonts::is_declared(&f) || f == "ahem" {
             let fallback = family_of(&names[k + 1..].join(",")).map(Family::generic).unwrap_or(Family::Sans);
             return Some(crate::fonts::face(&f, fallback));
         }

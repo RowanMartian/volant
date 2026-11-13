@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use volant_engine::script;
 
-const ORIGIN: &str = "http://web-platform.test";
+pub(crate) const ORIGIN: &str = "http://web-platform.test";
 /// How long one test file may take, everything included.
 const LIMIT: Duration = Duration::from_secs(100);
 /// testharness.js times a test out after 10 s (60 s for a long one); ours waits a little longer.
@@ -37,8 +37,8 @@ add_completion_callback(function (tests, status) {
 const TEST_STATUS: [&str; 5] = ["PASS", "FAIL", "TIMEOUT", "NOTRUN", "PRECONDITION_FAILED"];
 const HARNESS_STATUS: [&str; 4] = ["OK", "ERROR", "TIMEOUT", "PRECONDITION_FAILED"];
 
-struct WptHost {
-    root: PathBuf,
+pub(crate) struct WptHost {
+    pub(crate) root: PathBuf,
 }
 
 fn content_type(path: &str) -> &'static str {
@@ -51,6 +51,7 @@ fn content_type(path: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "xml" => "application/xml",
         "png" => "image/png",
+        "xht" => "application/xhtml+xml",
         "txt" => "text/plain",
         _ => "",
     }

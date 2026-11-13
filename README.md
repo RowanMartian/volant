@@ -197,6 +197,13 @@ folder and the most common failures; `--baseline scripts/wpt/baseline.tsv` fails
 than before. In the latest run 85,586 of 96,157 subtests pass (89.0%), and 221 of
 the 962 files pass completely (the first run passed 53.2%).
 
+`volant-tools reftest WPT_DIR scripts/wpt/reftests.txt OUT` runs the CSS reftests (CSS 2, backgrounds, box,
+colour, display, flexbox, position, sizing, text): each test page and its reference go through the whole engine,
+scripts included, then `raster.rs`, a software rasterizer, draws both 800 × 600 px and the pixels are compared,
+allowing what the test's `<meta name=fuzzy>` allows. Text is drawn as a mark per character (Ahem, the CSS tests'
+box font, exactly), so what's compared is layout. In the latest run 4,134 of the 10,894 reftests pass (37.9%);
+`scripts/wpt/reftest-baseline.tsv` holds which, and CI fails when one of them stops passing.
+
 `volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Simple Page and reports what
 it showed, how long each phase took and the most common script errors. Sites that turn automated clients away are
 counted apart, not worked around. In the latest survey Simple Page showed 108 of the 129 sites that answered (84%).

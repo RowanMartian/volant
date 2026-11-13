@@ -1,0 +1,11 @@
+# web-platform-tests reftests that `volant-tools reftest` runs: CSS layout,
+# boxes, colour and text. Lines are folders or files; `!path` leaves one out.
+css/CSS2
+css/css-backgrounds
+css/css-box
+css/css-color
+css/css-display
+css/css-flexbox
+css/css-position
+css/css-sizing
+css/css-text

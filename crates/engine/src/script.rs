@@ -4605,7 +4605,24 @@ const PRELUDE: &str = include_str!("prelude.js");
 impl Runtime {
     /// Parses `html` (keeping scripts) and sets up the page's JavaScript world; runs nothing yet.
     pub fn new(html: &str, url: &str, env: Env, host: Rc<dyn Host>) -> Runtime {
-        let mut dom = html::parse_with_scripts(html);
+        Runtime::from_dom(html::parse_with_scripts(html), url, env, host)
+    }
+
+    /// Like [`Runtime::new`], parsing as the Content-Type says: XHTML and XML
+    /// with the XML parser (falling back to HTML's if it isn't well-formed).
+    pub fn new_typed(text: &str, url: &str, content_type: &str, env: Env, host: Rc<dyn Host>) -> Runtime {
+        let ty = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        if matches!(ty.as_str(), "application/xhtml+xml" | "application/xml" | "text/xml") {
+            if let Ok(dom) = volant_core::xml::parse(text) {
+                let rt = Runtime::from_dom(dom, url, env, host);
+                rt.state.borrow_mut().documents.insert(ROOT, ty);
+                return rt;
+            }
+        }
+        Runtime::new(text, url, env, host)
+    }
+
+    fn from_dom(mut dom: Dom, url: &str, env: Env, host: Rc<dyn Host>) -> Runtime {
         ensure_structure(&mut dom);
         // Everything the page will need first starts on its way now, all at once.
         let preload = std::sync::Arc::new(Preload::default());

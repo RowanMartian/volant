@@ -442,7 +442,7 @@ fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 }
 
 /// The named character references that actually show up in articles.
-const ENTITIES: &[(&str, &str)] = &[
+pub(crate) const ENTITIES: &[(&str, &str)] = &[
     ("amp", "&"), ("lt", "<"), ("gt", ">"), ("quot", "\""), ("apos", "'"), ("nbsp", "\u{a0}"), ("mdash", "—"), ("ndash", "–"),
     ("hellip", "…"), ("rsquo", "’"), ("lsquo", "‘"), ("rdquo", "”"), ("ldquo", "“"), ("laquo", "«"), ("raquo", "»"), ("copy", "©"),
     ("reg", "®"), ("trade", "™"), ("middot", "·"), ("bull", "•"), ("times", "×"), ("divide", "÷"), ("euro", "€"), ("pound", "£"),

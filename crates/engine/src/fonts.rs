@@ -96,6 +96,10 @@ pub struct ApproxFonts;
 
 impl Fonts for ApproxFonts {
     fn width(&self, text: &str, font: &Font) -> f32 {
+        // Ahem, the CSS tests' font: every glyph a 1em box.
+        if crate::raster::is_ahem(font) {
+            return text.chars().count() as f32 * font.size;
+        }
         let per_mille: u32 = text
             .chars()
             .map(|c| match font.family.generic() {
