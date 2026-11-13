@@ -9,7 +9,7 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
 pub fn parse(text: &str) -> Result<Dom, String> {
-    let mut p = Parser { s: text, i: 0, dom: Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default() } };
+    let mut p = Parser { s: text, i: 0, dom: Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default(), attr_ns: Default::default() } };
     p.run()?;
     Ok(p.dom)
 }
@@ -199,8 +199,28 @@ impl<'a> Parser<'a> {
                 if prefix.is_some() && ns.is_none() {
                     return self.err(&format!("an unbound prefix in <{name}>"));
                 }
+                // Prefixed attributes take their prefix's namespace; xmlns ones XMLNS's.
+                let mut attr_ns = Vec::new();
+                for (k, _) in &attrs {
+                    let found = if &**k == "xmlns" {
+                        Some((XMLNS_NS.to_string(), None))
+                    } else if let Some((p, _)) = k.split_once(':') {
+                        match scope.iter().rev().find(|(q, _)| q == p).map(|(_, u)| u.clone()).filter(|u| !u.is_empty()) {
+                            Some(u) => Some((u, Some(p.to_string()))),
+                            None => return self.err(&format!("an unbound prefix in {k}")),
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some((u, p)) = found {
+                        attr_ns.push((k.clone(), u.into(), p.map(Into::into)));
+                    }
+                }
                 let id = self.add(parent, Data::Element { name: name.clone().into(), attrs });
                 self.dom.ns.insert(id, (ns.map(Into::into), prefix.map(Into::into)));
+                if !attr_ns.is_empty() {
+                    self.dom.attr_ns.insert(id, attr_ns);
+                }
                 if stack.is_empty() {
                     root_seen = true;
                 }
@@ -314,6 +334,10 @@ mod tests {
         assert_eq!(d.ns[&a], (Some("urn:x".into()), Some("x".into())));
         assert_eq!(d.attr(a, "b"), Some("1 & 2"));
         assert_eq!(d.text(svg), "t<<raw>");
+        let d = parse("<a xmlns:x='urn:x' x:b='1' c='2'/>").unwrap();
+        let a = d.children(ROOT)[0];
+        assert_eq!(d.attr_ns[&a], vec![("xmlns:x".into(), XMLNS_NS.into(), Some("xmlns".into())), ("x:b".into(), "urn:x".into(), Some("x".into()))]);
+        assert!(parse("<a y:b='1'/>").is_err());
         assert!(parse("<a><b></a>").is_err());
         assert!(parse("<a/><b/>").is_err());
         assert!(parse("<p:a/>").is_err());

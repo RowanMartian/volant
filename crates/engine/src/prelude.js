@@ -904,64 +904,121 @@
   }
 
   // ------------------------------------------------- attribute nodes
+  // Each element keeps one Attr per attribute, so the same one comes back;
+  // an Attr whose attribute is gone has no owner and keeps its last value.
+  const attrCache = new WeakMap()
+  const attrKey = (ns, local) => (ns || '') + '\u0000' + local
   class Attr {
-    constructor(name, value, owner) { this._name = name; this._value = value; this.ownerElement = owner || null }
+    constructor(name, value, owner, ns = null, prefix = null, local = name) { this._name = name; this._value = value; this._owner = owner || null; this._ns = ns; this._prefix = prefix; this._local = local }
+    get ownerElement() {
+      const o = this._owner
+      if (!o) return null
+      const m = attrCache.get(o)
+      if (m && m.get(attrKey(this._ns, this._local)) === this && o.hasAttributeNS(this._ns, this._local)) return o
+      this._owner = null
+      return null
+    }
     get name() { return this._name }
     get nodeName() { return this._name }
-    get localName() { return this._name }
-    get namespaceURI() { return null }
-    get prefix() { return null }
+    get localName() { return this._local }
+    get namespaceURI() { return this._ns }
+    get prefix() { return this._prefix }
     get specified() { return true }
     get nodeType() { return 2 }
-    get value() { const o = this.ownerElement; const v = o ? o.getAttribute(this._name) : null; return v == null ? this._value : v }
-    set value(v) { this._value = String(v); if (this.ownerElement) this.ownerElement.setAttribute(this._name, this._value) }
+    get ownerDocument() { return this._owner ? this._owner.ownerDocument : document }
+    get value() { const o = this.ownerElement; if (o) this._value = o.getAttributeNS(this._ns, this._local); return this._value }
+    set value(v) { this._value = String(v); const o = this.ownerElement; if (o) o.setAttributeNS(this._ns, this._name, this._value) }
     get nodeValue() { return this.value }
-    set nodeValue(v) { this.value = v }
+    set nodeValue(v) { this.value = v === null ? '' : v }
     get textContent() { return this.value }
-    set textContent(v) { this.value = v }
+    set textContent(v) { this.value = v === null ? '' : v }
+    cloneNode() { return new Attr(this._name, this.value, null, this._ns, this._prefix, this._local) }
+    isEqualNode(o) { return !!o && o.nodeType === 2 && o.namespaceURI === this._ns && o.localName === this._local && o.value === this.value }
+  }
+  const attrFor = (el, a) => {
+    let m = attrCache.get(el)
+    if (!m) attrCache.set(el, (m = new Map()))
+    const k = attrKey(a.namespaceURI, a.localName)
+    let at = m.get(k)
+    if (!at || at._name !== a.name || at._owner !== el) m.set(k, (at = new Attr(a.name, a.value, el, a.namespaceURI, a.prefix, a.localName)))
+    else at._value = a.value
+    return at
   }
   class NamedNodeMap {
     item(i) { return this[i] || null }
-    getNamedItem(n) { n = String(n).toLowerCase(); for (let i = 0; i < this.length; i++) if (this[i].name === n) return this[i]; return null }
-    getNamedItemNS(_ns, n) { return this.getNamedItem(n) }
+    getNamedItem(n) { n = String(n); if (this._lower) n = n.toLowerCase(); for (let i = 0; i < this.length; i++) if (this[i].name === n) return this[i]; return null }
+    getNamedItemNS(ns, n) { ns = ns == null || ns === '' ? null : String(ns); n = String(n); for (let i = 0; i < this.length; i++) if (this[i].namespaceURI === ns && this[i].localName === n) return this[i]; return null }
     setNamedItem(a) { return this._el.setAttributeNode(a) }
-    setNamedItemNS(a) { return this._el.setAttributeNode(a) }
-    removeNamedItem(n) { const a = this.getNamedItem(n); if (!a) throw new DOMException('no such attribute', 'NotFoundError'); this._el.removeAttribute(a.name); return a }
+    setNamedItemNS(a) { return this._el.setAttributeNodeNS(a) }
+    removeNamedItem(n) { const a = this.getNamedItem(n); if (!a) throw new DOMException('no such attribute', 'NotFoundError'); return this._el.removeAttributeNode(a) }
+    removeNamedItemNS(ns, n) { const a = this.getNamedItemNS(ns, n); if (!a) throw new DOMException('no such attribute', 'NotFoundError'); return this._el.removeAttributeNode(a) }
     [Symbol.iterator]() { return Array.prototype.values.call(this) }
   }
   g.Attr = Attr
   g.NamedNodeMap = NamedNodeMap
   {
     const EP = Element.prototype
+    const lowers = el => el.namespaceURI === 'http://www.w3.org/1999/xhtml' && (!el.ownerDocument || el.ownerDocument.contentType === 'text/html')
     const pairs = Object.getOwnPropertyDescriptor(EP, 'attributes').get
     Object.defineProperty(EP, 'attributes', {
       configurable: true, enumerable: true,
       get() {
         const m = Object.create(NamedNodeMap.prototype), list = pairs.call(this)
         list.forEach((a, i) => {
-          const at = new Attr(a.name, a.value, this)
+          const at = attrFor(this, a)
           m[i] = at
           if (!(a.name in m)) Object.defineProperty(m, a.name, { value: at, configurable: true })
         })
         Object.defineProperty(m, 'length', { value: list.length })
         Object.defineProperty(m, '_el', { value: this })
+        Object.defineProperty(m, '_lower', { value: lowers(this) })
         return m
       },
     })
-    EP.getAttributeNode = function (n) { n = String(n).toLowerCase(); return this.hasAttribute(n) ? new Attr(n, '', this) : null }
-    EP.getAttributeNodeNS = function (_ns, n) { return this.getAttributeNode(n) }
+    // Removing an attribute leaves its Attr with the value it had.
+    const keep = el => { const m = attrCache.get(el); if (m) for (const at of m.values()) if (at._owner === el) void at.value }
+    for (const k of ['removeAttribute', 'removeAttributeNS', 'toggleAttribute']) {
+      const f = EP[k]
+      EP[k] = function (...a) { keep(this); return f.apply(this, a) }
+    }
+    EP.getAttributeNode = function (n) { return this.attributes.getNamedItem(n) }
+    EP.getAttributeNodeNS = function (ns, n) { return this.attributes.getNamedItemNS(ns, n) }
     EP.setAttributeNode = function (a) {
-      const old = this.getAttributeNode(a.name)
-      const v = a.ownerElement && a.ownerElement !== this ? a.value : a._value
-      this.setAttribute(a.name, v == null ? '' : v)
-      a.ownerElement = this
+      if (!(a instanceof Attr)) throw new TypeError('not an Attr')
+      const owner = a.ownerElement
+      if (owner && owner !== this) throw new DOMException('the attribute is in use', 'InUseAttributeError')
+      const old = this.getAttributeNodeNS(a.namespaceURI, a.localName)
+      if (old === a) return a
+      if (old) { void old.value; old._owner = null }
+      const v = a._value == null ? '' : a._value
+      if (old) this.setAttributeNS(a.namespaceURI, old.name, v)
+      else this.setAttributeNS(a.namespaceURI, a.name, v)
+      a._owner = this
+      let m = attrCache.get(this)
+      if (!m) attrCache.set(this, (m = new Map()))
+      m.set(attrKey(a.namespaceURI, a.localName), a)
       return old
     }
     EP.setAttributeNodeNS = EP.setAttributeNode
-    EP.removeAttributeNode = function (a) { this.removeAttribute(a.name); a._value = a.value; a.ownerElement = null; return a }
+    EP.removeAttributeNode = function (a) {
+      if (!(a instanceof Attr) || a.ownerElement !== this) throw new DOMException('no such attribute', 'NotFoundError')
+      void a.value
+      this.removeAttributeNS(a.namespaceURI, a.localName)
+      a._owner = null
+      return a
+    }
     const DP = Document.prototype
-    DP.createAttribute = function (n) { return new Attr(String(n).toLowerCase(), '', null) }
-    DP.createAttributeNS = function (_ns, n) { return new Attr(String(n), '', null) }
+    DP.createAttribute = function (n) {
+      n = String(n)
+      if (!n || /[\t\n\f\r \0\/=>]/.test(n)) throw new DOMException('not a valid attribute name', 'InvalidCharacterError')
+      return new Attr(this.contentType === 'text/html' ? n.toLowerCase() : n, '', null)
+    }
+    DP.createAttributeNS = function (ns, n) {
+      ns = ns == null || ns === '' ? null : String(ns); n = String(n)
+      // Reuses createElementNS's validation of the name against the namespace.
+      const probe = this.createElementNS(ns, n)
+      return new Attr(n, '', null, ns, probe.prefix, probe.localName)
+    }
   }
 
   // ------------------------------------------------- interfaces, as in browsers
@@ -1375,7 +1432,34 @@
         set(v) { if (spec.n && v === null) this.removeAttribute(a); else this.setAttribute(a, String(v)) },
       }),
       t: (a) => ({ get() { return __tokenList(this, a) }, set(v) { this.setAttribute(a, String(v)) } }),
+      // A long limited to non-negative numbers (maxLength, minLength).
+      ll: (a, def = -1) => ({
+        get() { const n = int(str(this, a)); return n === null || n < 0 || n > MAX ? def : n },
+        set(v) { const n = +v | 0; if (n < 0) throw new DOMException('the value must not be negative', 'IndexSizeError'); this.setAttribute(a, String(n)) },
+      }),
+      // A nullable DOMString (role and the ARIA attributes).
+      ns: (a) => ({ get() { return this.getAttribute(a) }, set(v) { if (v == null) this.removeAttribute(a); else this.setAttribute(a, String(v)) } }),
     }
+    // tabIndex: 0 for elements that take focus by default, -1 for the rest.
+    const focusable = el => {
+      const t = el.localName
+      if (el.namespaceURI === 'http://www.w3.org/2000/svg') return t === 'a' && (el.hasAttribute('href') || el.hasAttribute('xlink:href'))
+      if ((t === 'a' || t === 'area') && el.hasAttribute('href')) return true
+      if (['button', 'frame', 'iframe', 'input', 'object', 'select', 'textarea'].includes(t)) return true
+      if (t === 'summary' && el.parentNode && el.parentNode.localName === 'details' && Array.prototype.find.call(el.parentNode.children, c => c.localName === 'summary') === el) return true
+      return el.isContentEditable === true
+    }
+    const tabIndex = {
+      get() { const n = int(str(this, 'tabindex')); return n === null || n < -MAX - 1 || n > MAX ? (focusable(this) ? 0 : -1) : n },
+      set(v) { this.setAttribute('tabindex', String(+v | 0)) },
+    }
+    for (const C of [g.HTMLElement, g.SVGElement, g.MathMLElement]) if (C) Object.defineProperty(C.prototype, 'tabIndex', { get: tabIndex.get, set: tabIndex.set, configurable: true, enumerable: true })
+    for (const C of ['HTMLInputElement', 'HTMLTextAreaElement']) REFLECT[C] = (REFLECT[C] || []).concat([['maxLength', 'll'], ['minLength', 'll']])
+    // ARIA reflection (ARIAMixin), on every element.
+    REFLECT.Element = [['role', 'ns'], ...('ActiveDescendant Atomic AutoComplete BrailleLabel BrailleRoleDescription Busy Checked ColCount ColIndex ColIndexText ColSpan Current ' +
+      'Description Disabled Expanded HasPopup Hidden Invalid KeyShortcuts Label Level Live Modal MultiLine MultiSelectable Orientation Placeholder PosInSet Pressed ReadOnly ' +
+      'Relevant Required RoleDescription RowCount RowIndex RowIndexText RowSpan Selected SetSize Sort ValueMax ValueMin ValueNow ValueText').split(' ')
+      .filter(n => n !== 'ActiveDescendant').map(n => ['aria' + n, 'ns', 'aria-' + n.toLowerCase()])]
     // Native accessors that already reflect the attribute exactly stay as they are.
     const plain = { s: 1, u: 1, b: 1 }
     for (const iface in REFLECT) {

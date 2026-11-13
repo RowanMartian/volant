@@ -36,6 +36,9 @@ pub struct Dom {
     /// The namespace and prefix of elements made by `createElementNS` and
     /// in XML documents. Other elements are HTML's (`<svg>` SVG's, `<math>` MathML's).
     pub ns: std::collections::HashMap<NodeId, (Option<Box<str>>, Option<Box<str>>)>,
+    /// Attributes with a namespace (`setAttributeNS`, XML's prefixed ones):
+    /// per element, (qualified name, namespace, prefix). Others have none.
+    pub attr_ns: std::collections::HashMap<NodeId, Vec<(Box<str>, Box<str>, Option<Box<str>>)>>,
 }
 
 pub const ROOT: NodeId = 0;
@@ -415,7 +418,7 @@ fn parse_opts(html: &str, scripts: bool) -> Dom {
         b.text("<");
         i += 1;
     }
-    Dom { nodes: b.nodes, ns: Default::default() }
+    Dom { nodes: b.nodes, ns: Default::default(), attr_ns: Default::default() }
 }
 
 fn read_name(html: &str, start: usize) -> (String, usize) {

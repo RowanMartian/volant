@@ -193,7 +193,7 @@ cargo run --release -p volant-core --example compile_lists -- easylist.txt easyp
 HTML's DOM interfaces, at the commit in `scripts/wpt/WPT_COMMIT`) through the engine with no browser: each file
 in its own process, the tests served from the checkout, and testharness.js reporting back. It writes a table by
 folder and the most common failures; `--baseline scripts/wpt/baseline.tsv` fails when a file passes fewer subtests
-than before. In the latest run 82,067 of 92,781 subtests pass (88.5%), and 210 of
+than before. In the latest run 85,272 of 96,157 subtests pass (88.7%), and 220 of
 the 962 files pass completely (the first run passed 53.2%).
 
 `volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Simple Page and reports what

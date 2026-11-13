@@ -742,6 +742,36 @@ fn remove_attr(dom: &mut Dom, id: NodeId, k: &str) {
     if let Some(attrs) = attrs_mut(dom, id) {
         attrs.retain(|(a, _)| &**a != k);
     }
+    if let Some(list) = dom.attr_ns.get_mut(&id) {
+        list.retain(|(a, _, _)| &**a != k);
+    }
+}
+
+/// An attribute's (namespace, prefix, local name), from its qualified name.
+fn attr_name_parts<'a>(dom: &'a Dom, id: NodeId, k: &'a str) -> (Option<&'a str>, Option<&'a str>, &'a str) {
+    match dom.attr_ns.get(&id).and_then(|l| l.iter().find(|(a, _, _)| &**a == k)) {
+        Some((_, ns, Some(p))) => (Some(&**ns), Some(&**p), k.strip_prefix(&**p).and_then(|r| r.strip_prefix(':')).unwrap_or(k)),
+        Some((_, ns, None)) => (Some(&**ns), None, k),
+        None => (None, None, k),
+    }
+}
+
+/// The qualified name of `id`'s attribute in `ns` named `local`, if it has one.
+fn attr_by_ns(dom: &Dom, id: NodeId, ns: Option<&str>, local: &str) -> Option<String> {
+    let Data::Element { attrs, .. } = &dom.nodes[id as usize].data else { return None };
+    attrs.iter().map(|(k, _)| &**k).find(|k| {
+        let (n, _, l) = attr_name_parts(dom, id, k);
+        n == ns && l == local
+    }).map(str::to_string)
+}
+
+/// `setAttribute` and friends lower-case names only on HTML elements in HTML documents.
+fn attr_key(s: &State, id: NodeId, k: std::rc::Rc<str>) -> String {
+    let html = match s.dom.ns.get(&id) {
+        None => true,
+        Some((ns, _)) => ns.as_deref() == Some(HTML_NS) && in_html_doc(s, id),
+    };
+    if html { k.to_ascii_lowercase() } else { k.to_string() }
 }
 
 fn new_node(dom: &mut Dom, data: Data) -> NodeId {
@@ -883,6 +913,9 @@ fn clone_node(dom: &mut Dom, id: NodeId, deep: bool) -> NodeId {
     if let Some(ns) = dom.ns.get(&id).cloned() {
         dom.ns.insert(copy, ns);
     }
+    if let Some(a) = dom.attr_ns.get(&id).cloned() {
+        dom.attr_ns.insert(copy, a);
+    }
     if deep {
         for c in dom.nodes[id as usize].children.clone() {
             let cc = clone_node(dom, c, true);
@@ -904,6 +937,9 @@ fn import(dom: &mut Dom, src: &Dom) -> NodeId {
         let id = new_node(dom, data);
         if let Some(ns) = src.ns.get(&sid) {
             dom.ns.insert(id, ns.clone());
+        }
+        if let Some(a) = src.attr_ns.get(&sid) {
+            dom.attr_ns.insert(id, a.clone());
         }
         let _ = insert(dom, parent, id, None);
         for &c in src.children(sid) {
@@ -2827,11 +2863,43 @@ fn install(i: &mut Interp, st: &S) {
     }
     method(i, st, &node, "querySelector", |i, st, id, a| query(i, st, id, &arg(&a, 0), false));
     method(i, st, &node, "querySelectorAll", |i, st, id, a| query(i, st, id, &arg(&a, 0), true));
+    // In HTML documents HTML elements match the name lower-cased, others as given.
     method(i, st, &node, "getElementsByTagName", |i, st, id, a| {
-        let t = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
+        let t = i.to_str(&arg(&a, 0))?.to_string();
+        let lower = t.to_ascii_lowercase();
         let found: Vec<NodeId> = {
             let s = st.borrow();
-            descendants(&s.dom, id).into_iter().filter(|&n| is_element(&s.dom, n) && (t == "*" || s.dom.tag(n) == Some(t.as_str()))).collect()
+            let html_doc = in_html_doc(&s, id);
+            descendants(&s.dom, id)
+                .into_iter()
+                .filter(|&n| {
+                    is_element(&s.dom, n)
+                        && (t == "*" || s.dom.tag(n) == Some(if html_doc && ns_of(&s.dom, n).0 == Some(HTML_NS) { lower.as_str() } else { t.as_str() }))
+                })
+                .collect()
+        };
+        Ok(wrap_list(i, st, found))
+    });
+    method(i, st, &node, "getElementsByTagNameNS", |i, st, id, a| {
+        let ns = match arg(&a, 0) {
+            Value::Null | Value::Undefined => None,
+            v => Some(i.to_str(&v)?.to_string()).filter(|n| !n.is_empty()),
+        };
+        let local = i.to_str(&arg(&a, 1))?.to_string();
+        let found: Vec<NodeId> = {
+            let s = st.borrow();
+            descendants(&s.dom, id)
+                .into_iter()
+                .filter(|&n| {
+                    if !is_element(&s.dom, n) {
+                        return false;
+                    }
+                    let (en, ep) = ns_of(&s.dom, n);
+                    let tag = s.dom.tag(n).unwrap_or("");
+                    let l = ep.and_then(|p| tag.strip_prefix(p)).and_then(|r| r.strip_prefix(':')).unwrap_or(tag);
+                    (ns.as_deref() == Some("*") || ns.as_deref() == en) && (local == "*" || local == l)
+                })
+                .collect()
         };
         Ok(wrap_list(i, st, found))
     });
@@ -2871,14 +2939,19 @@ fn install(i: &mut Interp, st: &S) {
     getter(i, st, &element, "namespaceURI", |_i, st, id| Ok(ns_of(&st.borrow().dom, id).0.map(str_val).unwrap_or(Value::Null)));
     getter(i, st, &element, "prefix", |_i, st, id| Ok(ns_of(&st.borrow().dom, id).1.map(str_val).unwrap_or(Value::Null)));
     method(i, st, &element, "getAttribute", |i, st, id, a| {
-        let k = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
+        let k = i.to_str(&arg(&a, 0))?;
+        let k = attr_key(&st.borrow(), id, k);
         if k == "style" {
             flush(i, st);
         }
         Ok(st.borrow().dom.attr(id, &k).map(str_val).unwrap_or(Value::Null))
     });
     method(i, st, &element, "setAttribute", |i, st, id, a| {
-        let k = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
+        let k = i.to_str(&arg(&a, 0))?;
+        if k.is_empty() || !no_ws_or(&k, &['/', '=', '>']) {
+            return i.throw("InvalidCharacterError", "not a valid attribute name");
+        }
+        let k = attr_key(&st.borrow(), id, k);
         let v = i.to_str(&arg(&a, 1))?;
         {
             let mut s = st.borrow_mut();
@@ -2894,7 +2967,8 @@ fn install(i: &mut Interp, st: &S) {
         Ok(Value::Undefined)
     });
     method(i, st, &element, "removeAttribute", |i, st, id, a| {
-        let k = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
+        let k = i.to_str(&arg(&a, 0))?;
+        let k = attr_key(&st.borrow(), id, k);
         {
             let mut s = st.borrow_mut();
             remove_attr(&mut s.dom, id, &k);
@@ -2906,11 +2980,16 @@ fn install(i: &mut Interp, st: &S) {
         Ok(Value::Undefined)
     });
     method(i, st, &element, "hasAttribute", |i, st, id, a| {
-        let k = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
+        let k = i.to_str(&arg(&a, 0))?;
+        let k = attr_key(&st.borrow(), id, k);
         Ok(Value::Bool(st.borrow().dom.attr(id, &k).is_some()))
     });
     method(i, st, &element, "toggleAttribute", |i, st, id, a| {
-        let k = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
+        let k = i.to_str(&arg(&a, 0))?;
+        if k.is_empty() || !no_ws_or(&k, &['/', '=', '>']) {
+            return i.throw("InvalidCharacterError", "not a valid attribute name");
+        }
+        let k = attr_key(&st.borrow(), id, k);
         let has = st.borrow().dom.attr(id, &k).is_some();
         let want = match arg(&a, 1) {
             Value::Undefined => !has,
@@ -2935,18 +3014,96 @@ fn install(i: &mut Interp, st: &S) {
         Ok(i.array(names))
     });
     getter(i, st, &element, "attributes", |i, st, id| {
-        let pairs: Vec<(String, String)> = match &st.borrow().dom.nodes[id as usize].data {
-            Data::Element { attrs, .. } => attrs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
-            _ => Vec::new(),
+        type Parts = (String, String, Option<String>, Option<String>, String);
+        let pairs: Vec<Parts> = {
+            let s = st.borrow();
+            match &s.dom.nodes[id as usize].data {
+                Data::Element { attrs, .. } => attrs
+                    .iter()
+                    .map(|(k, v)| {
+                        let (ns, p, l) = attr_name_parts(&s.dom, id, k);
+                        (k.to_string(), v.clone(), ns.map(str::to_string), p.map(str::to_string), l.to_string())
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
         };
         let mut list = Vec::new();
-        for (k, v) in pairs {
+        for (k, v, ns, p, l) in pairs {
             let o = i.obj(Kind::Plain);
             i.set(&o, "name", str_val(&k))?;
             i.set(&o, "value", str_val(&v))?;
+            i.set(&o, "namespaceURI", ns.as_deref().map(str_val).unwrap_or(Value::Null))?;
+            i.set(&o, "prefix", p.as_deref().map(str_val).unwrap_or(Value::Null))?;
+            i.set(&o, "localName", str_val(&l))?;
             list.push(o);
         }
         Ok(i.array(list))
+    });
+    // The namespace-aware attribute methods.
+    fn ns_arg(i: &mut Interp, v: &Value) -> Result<Option<String>, Value> {
+        Ok(match v {
+            Value::Null | Value::Undefined => None,
+            v => Some(i.to_str(v)?.to_string()).filter(|s| !s.is_empty()),
+        })
+    }
+    method(i, st, &element, "setAttributeNS", |i, st, id, a| {
+        let ns = ns_arg(i, &arg(&a, 0))?;
+        let qname = i.to_str(&arg(&a, 1))?.to_string();
+        let v = i.to_str(&arg(&a, 2))?;
+        let (prefix, local) = match validate_and_extract(ns.as_deref(), &qname) {
+            Ok(x) => x,
+            Err((name, msg)) => return i.throw(name, msg),
+        };
+        {
+            let mut s = st.borrow_mut();
+            match attr_by_ns(&s.dom, id, ns.as_deref(), &local) {
+                Some(k) => set_attr(&mut s.dom, id, &k, &v),
+                None => {
+                    set_attr(&mut s.dom, id, &qname, &v);
+                    let list = s.dom.attr_ns.entry(id).or_default();
+                    list.retain(|(a, _, _)| **a != *qname);
+                    if let Some(ns) = &ns {
+                        list.push((Box::from(qname.as_str()), Box::from(ns.as_str()), prefix.map(Into::into)));
+                    }
+                }
+            }
+            if qname == "style" {
+                s.styles.remove(&id);
+            }
+            if qname.starts_with("data-") {
+                s.datasets.remove(&id);
+            }
+        }
+        changed(st);
+        Ok(Value::Undefined)
+    });
+    method(i, st, &element, "getAttributeNS", |i, st, id, a| {
+        let ns = ns_arg(i, &arg(&a, 0))?;
+        let local = i.to_str(&arg(&a, 1))?;
+        let s = st.borrow();
+        Ok(attr_by_ns(&s.dom, id, ns.as_deref(), &local).and_then(|k| s.dom.attr(id, &k)).map(str_val).unwrap_or(Value::Null))
+    });
+    method(i, st, &element, "hasAttributeNS", |i, st, id, a| {
+        let ns = ns_arg(i, &arg(&a, 0))?;
+        let local = i.to_str(&arg(&a, 1))?;
+        Ok(Value::Bool(attr_by_ns(&st.borrow().dom, id, ns.as_deref(), &local).is_some()))
+    });
+    method(i, st, &element, "removeAttributeNS", |i, st, id, a| {
+        let ns = ns_arg(i, &arg(&a, 0))?;
+        let local = i.to_str(&arg(&a, 1))?;
+        let k = attr_by_ns(&st.borrow().dom, id, ns.as_deref(), &local);
+        if let Some(k) = k {
+            {
+                let mut s = st.borrow_mut();
+                remove_attr(&mut s.dom, id, &k);
+                if k == "style" {
+                    s.styles.remove(&id);
+                }
+            }
+            changed(st);
+        }
+        Ok(Value::Undefined)
     });
     // Reflected string attributes: Element's own, then HTML's (not on SVG or MathML elements).
     for (proto, prop, attr) in [("id", "id"), ("className", "class"), ("role", "role"), ("slot", "slot")].map(|(p, a)| (&element, p, a)).into_iter().chain([
@@ -4959,7 +5116,7 @@ impl Runtime {
     pub fn snapshot(&mut self) -> Snapshot {
         flush(&mut self.interp, &self.state);
         let s = self.state.borrow();
-        let mut dom = Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default() };
+        let mut dom = Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default(), attr_ns: Default::default() };
         let mut map = vec![ROOT];
         // Interaction states, marked on the copy for `:hover`, `:focus`, `:focus-within` and `:target`.
         let mut marks: HashMap<NodeId, Vec<&'static str>> = HashMap::new();
