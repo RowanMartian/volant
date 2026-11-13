@@ -201,7 +201,7 @@ the 962 files pass completely (the first run passed 53.2%).
 colour, display, flexbox, position, sizing, text): each test page and its reference go through the whole engine,
 scripts included, then `raster.rs`, a software rasterizer, draws both 800 × 600 px and the pixels are compared,
 allowing what the test's `<meta name=fuzzy>` allows. Text is drawn as a mark per character (Ahem, the CSS tests'
-box font, exactly), so what's compared is layout. In the latest run 6,797 of the 10,894 reftests pass (62.4%; the first run passed 26.7%);
+box font, exactly), so what's compared is layout. In the latest run 6,921 of the 10,894 reftests pass (63.5%; the first run passed 26.7%);
 `scripts/wpt/reftest-baseline.tsv` holds which, and CI fails when one of them stops passing.
 
 `volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Simple Page and reports what

@@ -94,6 +94,10 @@ pub enum AlignItems {
     Start,
     Center,
     End,
+    /// First baselines line up (in a flex row; elsewhere, as start).
+    Baseline,
+    /// Last baselines line up, the items toward the end (in a flex row; elsewhere, as end).
+    LastBaseline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +241,8 @@ pub enum Align {
     Left,
     Center,
     Right,
+    /// Lines (but the last) stretched to both edges at their spaces.
+    Justify,
 }
 
 /// `object-fit`: how an image fills its box.
@@ -307,6 +313,16 @@ pub struct Style {
     /// Line height in px.
     pub line_height: f32,
     pub align: Align,
+    /// word-spacing: extra px after each space.
+    pub word_spacing: Len,
+    /// text-indent: the first line's start, moved in.
+    pub indent: Len,
+    /// `hanging-punctuation: first`.
+    pub hang_first: bool,
+    /// `text-justify: none`.
+    pub justify_none: bool,
+    /// text-align-last (or justify-all): how the last line aligns, when not as `align` says.
+    pub align_last: Option<Align>,
     pub space: Space,
     pub list: ListStyle,
     pub transform: Transform,
@@ -451,6 +467,11 @@ impl Default for Style {
             family: Family::Sans,
             line_height: 16.0 * 1.25,
             align: Align::Left,
+            word_spacing: Len::Px(0.0),
+            indent: Len::Px(0.0),
+            hang_first: false,
+            justify_none: false,
+            align_last: None,
             space: Space::Normal,
             list: ListStyle::Disc,
             transform: Transform::None,
@@ -1812,9 +1833,35 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         }
         "text-align" => {
             s.align = match lower.as_str() {
-                "center" => Align::Center,
-                "right" | "end" => Align::Right,
+                "center" | "-webkit-center" => Align::Center,
+                "right" | "end" | "-webkit-right" => Align::Right,
+                "justify" | "justify-all" => Align::Justify,
                 _ => Align::Left,
+            };
+            s.align_last = (lower == "justify-all").then_some(Align::Justify);
+        }
+        "word-spacing" => {
+            if lower == "normal" {
+                s.word_spacing = Len::Px(0.0);
+            } else if let Some(l) = len(v).filter(|l| *l != Len::Auto) {
+                // (A percentage is of the font size, kept so each element resolves its own.)
+                s.word_spacing = l;
+            }
+        }
+        "text-indent" => {
+            if let Some(l) = split_spaces(v).first().and_then(|p| len(p)).filter(|l| *l != Len::Auto) {
+                s.indent = l;
+            }
+        }
+        "text-justify" => s.justify_none = lower == "none",
+        "hanging-punctuation" => s.hang_first = lower.split_whitespace().any(|w| w == "first"),
+        "text-align-last" => {
+            s.align_last = match lower.as_str() {
+                "center" => Some(Align::Center),
+                "right" | "end" => Some(Align::Right),
+                "left" | "start" => Some(Align::Left),
+                "justify" => Some(Align::Justify),
+                _ => None,
             }
         }
         "overflow-wrap" | "word-wrap" => {
@@ -2042,8 +2089,10 @@ fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
         "align-items" | "align-self" => {
             let a = match lower.as_str() {
                 "center" => Some(AlignItems::Center),
-                "flex-start" | "start" | "self-start" | "baseline" | "first baseline" => Some(AlignItems::Start),
-                "flex-end" | "end" | "self-end" | "last baseline" => Some(AlignItems::End),
+                "flex-start" | "start" | "self-start" => Some(AlignItems::Start),
+                "baseline" | "first baseline" => Some(AlignItems::Baseline),
+                "flex-end" | "end" | "self-end" => Some(AlignItems::End),
+                "last baseline" => Some(AlignItems::LastBaseline),
                 "stretch" | "normal" => Some(AlignItems::Stretch),
                 _ => None,
             };
@@ -2353,6 +2402,11 @@ pub(crate) fn inherited(p: &Style) -> Style {
         family: p.family,
         line_height: p.line_height,
         align: p.align,
+        word_spacing: p.word_spacing,
+        indent: p.indent,
+        hang_first: p.hang_first,
+        justify_none: p.justify_none,
+        align_last: p.align_last,
         space: p.space,
         list: p.list,
         transform: p.transform,

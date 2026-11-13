@@ -1430,6 +1430,8 @@ impl<'r> Ctx<'_> {
             }
             BoxKind::Flow => {
                 let (mut mn, mut mx) = (0f32, 0f32);
+                // (text-indent widens the first line; a percentage counts as nothing here.)
+                let mut ind = match s.indent { Len::Px(v) => v, Len::Mix(v, _) => v, _ => 0.0 };
                 for c in &b.children {
                     match c {
                         Child::Block(cb) => {
@@ -1442,7 +1444,8 @@ impl<'r> Ctx<'_> {
                         Child::Inline(run) => {
                             let atoms = self.atoms(run, 0.0);
                             // (Collapsible spaces at the end of a line hang: they don't count.)
-                            let (mut line, mut spaces) = (0f32, 0f32);
+                            let (mut line, mut spaces) = (std::mem::take(&mut ind), 0f32);
+                            let mut lead = line;
                             // (Words joined by spaces that don't wrap, nowrap or pre, make one unbreakable piece.)
                             let (mut word, mut joined) = (0f32, 0f32);
                             for a in &atoms {
@@ -1463,7 +1466,7 @@ impl<'r> Ctx<'_> {
                                     }
                                     Kind::Word => {
                                         // (Pieces with no break opportunity between them are one.)
-                                        word = if a.brk { a.w } else { word + a.w };
+                                        word = if a.brk { a.w } else { word + a.w } + std::mem::take(&mut lead);
                                         joined = 0.0;
                                         mn = mn.max(word);
                                     }
@@ -2049,6 +2052,7 @@ impl<'r> Ctx<'_> {
                 let trailing = opts.collapse && self.margins_through(b, true);
                 let mut prev = Margin::default();
                 let mut tail_cleared = false;
+                let mut first_line = true;
                 for child in &b.children {
                     match child {
                         Child::Block(cb) if self.empty(cb) => {
@@ -2100,7 +2104,10 @@ impl<'r> Ctx<'_> {
                             tail_cleared = self.cleared_empty(cb);
                         }
                         Child::Inline(run) => {
-                            let h = self.inline(run, content_x, cursor + prev.px(), content_w, b.node);
+                            // (text-indent moves the block's first line in.)
+                            let indent = if first_line { s.indent.resolve(content_w) } else { 0.0 };
+                            let h = self.inline(run, content_x, cursor + prev.px(), content_w, b.node, indent, first_line && s.hang_first);
+                            first_line &= h <= 0.0;
                             // A run that made no lines (only floats, or spaces) doesn't
                             // separate the margins around it.
                             if h > 0.0 {
@@ -2806,8 +2813,22 @@ impl<'r> Ctx<'_> {
                 Justify::Evenly => (free / (nf + 1.0), free / (nf + 1.0)),
             };
             // Cross size: each item's height at its width; the line is as tall as the tallest.
-            let heights: Vec<f32> = line.iter().map(|i| i.size).collect::<Vec<_>>().into_iter().zip(line.iter().map(|i| i.b)).map(|(w, b)| self.measure_block(b, w)).collect();
-            let mut line_h = line.iter().zip(&heights).map(|(i, h)| h + i.mt + i.mb).fold(0.0, f32::max);
+            // (Each item's first baseline too, from its margin edge: its bottom when it has no line.)
+            // (And its last baseline's distance from its bottom margin edge.)
+            let measured: Vec<(f32, f32, f32)> = line.iter().map(|i| {
+                let (h, lines) = self.measure_lines(i.b, i.size, false);
+                (h, i.mt + lines.map_or(h, |(first, _)| first), h - lines.map_or(h, |(_, last)| last) + i.mb)
+            }).collect();
+            let heights: Vec<f32> = measured.iter().map(|m| m.0).collect();
+            let line_base = line.iter().zip(&measured).filter(|(i, _)| i.align == AlignItems::Baseline).map(|(_, m)| m.1).fold(0.0, f32::max);
+            let line_last = line.iter().zip(&measured).filter(|(i, _)| i.align == AlignItems::LastBaseline).map(|(_, m)| m.2).fold(0.0, f32::max);
+            // How far each baseline-aligned item moves from its edge of the line.
+            let shifts: Vec<f32> = line.iter().zip(&measured).map(|(i, m)| match i.align {
+                AlignItems::Baseline => line_base - m.1,
+                AlignItems::LastBaseline => line_last - m.2,
+                _ => 0.0,
+            }).collect();
+            let mut line_h = line.iter().zip(&heights).zip(&shifts).map(|((i, h), d)| h + i.mt + i.mb + d).fold(0.0, f32::max);
             if !s.wrap {
                 // A single line is as tall as the container, when that's known, or within its min and max heights.
                 line_h = match self.avail_h {
@@ -2820,7 +2841,7 @@ impl<'r> Ctx<'_> {
                     }
                 };
             }
-            prepared.push((line, start, between, auto_each, heights, line_h));
+            prepared.push((line, start, between, auto_each, heights, line_h, shifts));
         }
         // align-content shares the container's spare height among wrapped lines.
         let nl = prepared.len();
@@ -2839,19 +2860,21 @@ impl<'r> Ctx<'_> {
             (AlignContent::Around, true) => (y + spare / nf / 2.0, spare / nf, 0.0),
             (AlignContent::Evenly, true) => (y + spare / (nf + 1.0), spare / (nf + 1.0), 0.0),
         };
-        for (li, (line, start, between, auto_each, heights, line_h)) in prepared.into_iter().enumerate() {
+        for (li, (line, start, between, auto_each, heights, line_h, shifts)) in prepared.into_iter().enumerate() {
             let line_h = line_h + grow_each;
             if li > 0 {
                 top += s.row_gap + gap_extra;
             }
             let mut cx = x + start;
-            for (i, h) in line.iter().zip(heights) {
+            for ((i, h), shift) in line.iter().zip(heights).zip(shifts) {
                 cx += i.ml + if i.auto_l { auto_each } else { 0.0 };
                 let room = line_h - i.mt - i.mb;
                 let (dy, min_h) = match i.align {
                     AlignItems::Stretch if i.stretch => (0.0, room),
                     AlignItems::Center => ((room - h) / 2.0, 0.0),
                     AlignItems::End => (room - h, 0.0),
+                    AlignItems::Baseline => (shift, 0.0),
+                    AlignItems::LastBaseline => (room - h - shift, 0.0),
                     _ => (0.0, 0.0),
                 };
                 self.block(i.b, cx, top + i.mt + dy, i.size, Opts { width: Some(i.size), min_h, bfc: true, ..Default::default() });
@@ -2918,7 +2941,12 @@ impl<'r> Ctx<'_> {
         for &b in order {
             let st = self.styles[b.node as usize].clone();
             let (mt, mb) = vmargins(&st, width);
-            let align = st.align_self.unwrap_or(s.align_items);
+            // (Across a column, baselines don't line up: they fall back to start and end.)
+            let align = match st.align_self.unwrap_or(s.align_items) {
+                AlignItems::LastBaseline => AlignItems::End,
+                AlignItems::Baseline => AlignItems::Start,
+                a => a,
+            };
             let (ml, mr) = (st.margin[3].resolve(width), st.margin[1].resolve(width));
             let avail = (width - ml - mr).max(0.0);
             let fixed = st.width != Len::Auto && st.margin[1] != Len::Auto && st.margin[3] != Len::Auto;
@@ -3329,7 +3357,7 @@ impl<'r> Ctx<'_> {
                                 let w = self.measure(sp, &font);
                                 push(&mut atoms, atom(Kind::Space, sp.into(), w, *style, *link, &inside), &mut open);
                             } else if !last_space {
-                                let w = self.measure(" ", &font);
+                                let w = self.measure(" ", &font) + s.word_spacing.resolve(s.font_size);
                                 push(&mut atoms, atom(Kind::Space, " ".into(), w, *style, *link, &inside), &mut open);
                                 last_space = true;
                             }
@@ -3397,14 +3425,32 @@ impl<'r> Ctx<'_> {
     /// (an ideographic one...) where text wraps.
     fn hangs(&self, a: &Atom) -> bool {
         let s = &self.styles[a.style as usize];
-        self.collapsible(a) || (a.kind == Kind::Space && a.text != " " && a.text != "        " && s.space != Space::Pre && !s.break_spaces)
+        a.kind == Kind::Space && s.space != Space::Pre && !s.break_spaces
     }
 
     /// Breaks a run of inline content into lines at (x, y), `width` wide (less
     /// any floats beside them); returns the height used.
-    fn inline(&mut self, run: &'r [Inline], x: f32, y: f32, width: f32, block: NodeId) -> f32 {
+    fn inline(&mut self, run: &'r [Inline], x: f32, y: f32, width: f32, block: NodeId, mut indent: f32, hang: bool) -> f32 {
         let bs = self.styles[block as usize].clone();
         let atoms = self.atoms(run, width);
+        if hang {
+            // hanging-punctuation: first: an opening bracket or quote that starts the block sits in the margin,
+            // unless a border comes before it.
+            for a in &atoms {
+                match a.kind {
+                    Kind::Open if self.styles[a.style as usize].border_width[3] > 0.0 => break,
+                    Kind::Open | Kind::Close | Kind::Space => {}
+                    Kind::Word => {
+                        if let Some(c) = a.text.chars().next().filter(|c| "([{\"'\u{ab}\u{2018}\u{201c}\u{201a}\u{201e}\u{2039}\u{300c}\u{300e}\u{3008}\u{300a}\u{3010}\u{ff08}".contains(*c)) {
+                            let font = font_of(&self.styles[a.style as usize].clone());
+                            indent -= self.measure(c.encode_utf8(&mut [0; 4]), &font);
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
         let pre = |s: &Style| matches!(s.space, Space::Pre | Space::PreWrap);
         if !atoms.iter().any(|a| matches!(a.kind, Kind::Word | Kind::Image | Kind::Block | Kind::Break | Kind::Float | Kind::Abs) || (a.kind == Kind::Space && pre(&self.styles[a.style as usize]))) {
             return 0.0;
@@ -3415,6 +3461,7 @@ impl<'r> Ctx<'_> {
             let est = bs.line_height;
             // Too narrow beside the floats for the next word or image: go below them.
             let (mut left, mut right) = self.span(top, est, x, width);
+            left += indent;
             for _ in 0..64 {
                 let need = queue.iter().find(|a| matches!(a.kind, Kind::Word | Kind::Image | Kind::Block)).map(|a| a.w).unwrap_or(0.0);
                 if need <= right - left + FIT {
@@ -3424,10 +3471,12 @@ impl<'r> Ctx<'_> {
                     Some(b) if b > top => {
                         top = b;
                         (left, right) = self.span(top, est, x, width);
+                        left += indent;
                     }
                     _ => break,
                 }
             }
+            indent = 0.0;
             let mut line: Vec<Atom<'r>> = Vec::new();
             let mut line_w = 0.0;
             let mut split = false;
@@ -3608,11 +3657,35 @@ impl<'r> Ctx<'_> {
             }
         }
         let used: f32 = line.iter().map(|a| a.w).sum();
-        let dx = match bs.align {
-            Align::Left => 0.0,
+        // Spaces hanging at the end don't count for alignment (before a forced break, only
+        // what doesn't fit hangs).
+        let hanging: f32 = line.iter().rev().skip_while(|a| matches!(a.kind, Kind::Close | Kind::Break)).take_while(|a| self.hangs(a)).map(|a| a.w).sum();
+        let hanging = if end == After::Break { hanging.min((used - avail).max(0.0)) } else { hanging };
+        let used = used - hanging;
+        let last = matches!(end, After::Break | After::BlockEnd);
+        let align = match (last, bs.align_last, bs.align) {
+            (true, Some(a), _) => a,
+            (true, None, Align::Justify) => Align::Left,
+            (_, _, a) => a,
+        };
+        // (text-justify: none keeps a justified line at the start.)
+        let align = if align == Align::Justify && bs.justify_none { Align::Left } else { align };
+        // Justified: the spare width goes to the spaces between words.
+        let spaces = line.iter().rposition(|a| a.content() && a.kind != Kind::Space).map_or(0, |end| line[..end].iter().filter(|a| a.kind == Kind::Space).count());
+        let stretch = if align == Align::Justify && spaces > 0 && avail > used { (avail - used) / spaces as f32 } else { 0.0 };
+        let dx = match align {
+            Align::Left | Align::Justify => 0.0,
             Align::Center => ((avail - used) / 2.0).max(0.0),
             Align::Right => (avail - used).max(0.0),
         };
+        if stretch > 0.0 {
+            let end = line.iter().rposition(|a| a.content() && a.kind != Kind::Space).unwrap_or(0);
+            for a in &mut line[..end] {
+                if a.kind == Kind::Space {
+                    a.w += stretch;
+                }
+            }
+        }
         let baseline = top + above;
         let line_h = above + below;
         self.baselines.push((self.line_depth, baseline));
@@ -3714,9 +3787,11 @@ impl<'r> Ctx<'_> {
                 }
                 Kind::Word | Kind::Space => {
                     let (style, link, start) = (a.style, a.link, i);
+                    let split_spaces = stretch > 0.0 || self.styles[style as usize].word_spacing != Len::Px(0.0);
                     let mut text = String::new();
                     let mut w = 0.0;
-                    while i < line.len() && matches!(line[i].kind, Kind::Word | Kind::Space) && line[i].style == style && line[i].link == link {
+                    // (A justified line draws each word where it was put.)
+                    while i < line.len() && matches!(line[i].kind, Kind::Word | Kind::Space) && line[i].style == style && line[i].link == link && !(split_spaces && i > start && (line[i].kind == Kind::Space || line[i - 1].kind == Kind::Space)) {
                         text.push_str(&line[i].text);
                         w += line[i].w;
                         i += 1;
