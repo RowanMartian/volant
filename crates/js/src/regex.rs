@@ -213,9 +213,9 @@ impl Parser<'_> {
 
     fn hex(&mut self, n: usize) -> Option<char> {
         let digits: String = self.s.get(self.i..self.i + n)?.iter().collect();
-        let v = u32::from_str_radix(&digits, 16).ok()?;
+        let ch = char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?;
         self.i += n;
-        char::from_u32(v)
+        Some(ch)
     }
 
     /// After a backslash. Returns a `Node::Class` for class escapes.

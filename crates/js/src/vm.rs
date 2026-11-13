@@ -997,6 +997,7 @@ impl Interp {
                             stack.push(Value::Obj(Rc::new(RefCell::new(fo))));
                         }
                         Op::This => stack.push(f.this.clone()),
+                        Op::NewTarget => stack.push(if f.construct { f.func.clone() } else { Value::Undefined }),
                         Op::Callee => stack.push(f.func.clone()),
                         Op::Arguments => {
                             let a = stack[f.bp..f.bp + f.argc].to_vec();

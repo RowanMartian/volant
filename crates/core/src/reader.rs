@@ -456,7 +456,7 @@ fn serialize(d: &Dom, info: &Info, id: NodeId, url: &str, title: &str, out: &mut
             *words += t.split_whitespace().count();
             html::escape_into(t, out, false);
         }
-        Data::Document => {}
+        Data::Document | Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } => {}
         Data::Element { name, .. } => {
             let name: &str = name;
             if name == "img" {

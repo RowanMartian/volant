@@ -147,6 +147,8 @@ pub enum Op {
     /// A closure over funcs[i].
     Closure(u32),
     This,
+    /// The function `new` called, or undefined.
+    NewTarget,
     /// The function being run (a named function expression's own name).
     Callee,
     Arguments,
@@ -2208,6 +2210,9 @@ impl Compiler {
             }
             Expr::Ident(n) => self.load_name(n)?,
             Expr::This => self.load_name(&"this".into())?,
+            Expr::NewTarget => {
+                self.emit(Op::NewTarget);
+            }
             Expr::Array(items) => {
                 if items.iter().any(|x| matches!(x, Expr::Spread(_))) {
                     self.emit(Op::NewArray(0));

@@ -1466,6 +1466,7 @@ fn matches_compound(dom: &Dom, id: NodeId, c: &Compound) -> bool {
             Pseudo::OnlyChild => element_siblings(dom, id) == [id],
             Pseudo::Empty => dom.children(id).iter().all(|&k| match &dom.nodes[k as usize].data {
                 Data::Text(t) => t.is_empty(),
+                Data::Comment(_) | Data::Pi { .. } => true,
                 _ => false,
             }),
         };

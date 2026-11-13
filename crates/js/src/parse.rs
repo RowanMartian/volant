@@ -391,6 +391,8 @@ pub enum Expr {
     Undefined,
     Ident(Rc<str>),
     This,
+    /// `new.target`
+    NewTarget,
     Array(Vec<Expr>),
     /// Properties: (key, value), with computed keys and spreads.
     Object(Vec<Prop>),
@@ -1448,7 +1450,7 @@ impl Parser {
         let mut e = if self.eat_word("new") {
             if self.eat(".") {
                 self.prop_name()?; // new.target
-                Expr::Undefined
+                Expr::NewTarget
             } else {
                 let callee = self.member_only()?;
                 let args = if self.eat("(") { self.args()? } else { Vec::new() };

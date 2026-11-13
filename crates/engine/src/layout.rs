@@ -284,6 +284,7 @@ impl Builder<'_> {
         for &c in self.dom.children(id) {
             match &self.dom.nodes[c as usize].data {
                 Data::Text(t) => run.push(Inline::Text { text: t.clone(), style: c, link: None }),
+                Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } => {}
                 Data::Element { .. } => {
                     if self.styles[c as usize].display == Display::None {
                         continue;
@@ -403,6 +404,7 @@ impl Builder<'_> {
     fn child(&mut self, id: NodeId, out: &mut Vec<Child>, run: &mut Vec<Inline>, link: Option<usize>, item_no: &mut usize) {
         match &self.dom.nodes[id as usize].data {
             Data::Text(t) => run.push(Inline::Text { text: t.clone(), style: id, link }),
+            Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } => {}
             Data::Element { .. } => {
                 let s = &self.styles[id as usize];
                 if s.display == Display::None {

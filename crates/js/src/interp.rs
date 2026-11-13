@@ -474,19 +474,44 @@ impl Interp {
     }
 
     pub fn error(&self, name: &str, msg: &str) -> Value {
+        #[rustfmt::skip]
+        fn dom_exception_code(name: &str) -> Option<u16> {
+            Some(match name {
+                "IndexSizeError" => 1, "HierarchyRequestError" => 3, "WrongDocumentError" => 4, "InvalidCharacterError" => 5,
+                "NoModificationAllowedError" => 7, "NotFoundError" => 8, "NotSupportedError" => 9, "InUseAttributeError" => 10,
+                "InvalidStateError" => 11, "SyntaxError" => 12, "InvalidModificationError" => 13, "NamespaceError" => 14,
+                "InvalidAccessError" => 15, "TypeMismatchError" => 17, "SecurityError" => 18, "NetworkError" => 19, "AbortError" => 20,
+                "URLMismatchError" => 21, "QuotaExceededError" => 22, "TimeoutError" => 23, "InvalidNodeTypeError" => 24, "DataCloneError" => 25,
+                n if n.ends_with("Error") => 0,
+                _ => return None,
+            })
+        }
         let e = self.obj(Kind::Error);
         if let Value::Obj(o) = &e {
             // RangeError, TypeError, …: their own prototype, so `instanceof` works.
+            // "DOM:SyntaxError" and the like: the DOMException, not the JavaScript error of that name.
+            let (name, dom) = match name.strip_prefix("DOM:") {
+                Some(n) => (n, true),
+                None => (name, false),
+            };
             if name != "Error" {
-                let proto = match self.global_obj.borrow().get_own(name) {
+                let proto = if dom { None } else { match self.global_obj.borrow().get_own(name) {
                     Some(Slot::Data(Value::Obj(c))) => match c.borrow().get_own("prototype") {
                         Some(Slot::Data(Value::Obj(p))) => Some(p.clone()),
                         _ => None,
                     },
                     _ => None,
-                };
+                } };
                 if proto.is_some() {
                     o.borrow_mut().proto = proto;
+                } else if let Some(code) = dom_exception_code(name) {
+                    // HierarchyRequestError and the rest: DOMExceptions, with their legacy codes.
+                    if let Some(Slot::Data(Value::Obj(c))) = self.global_obj.borrow().get_own("DOMException") {
+                        if let Some(Slot::Data(Value::Obj(p))) = c.borrow().get_own("prototype") {
+                            o.borrow_mut().proto = Some(p.clone());
+                        }
+                    }
+                    o.borrow_mut().set_own("code", Value::Num(code as f64));
                 }
             }
             let mut o = o.borrow_mut();

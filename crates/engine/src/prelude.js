@@ -6,6 +6,33 @@
   const noop = () => {}
   const define = (o, k, get, set) => Object.defineProperty(o, k, { get, set: set || noop })
 
+  // ---------------------------------------------------------------- DOMException
+  const DOM_CODES = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5, NoModificationAllowedError: 7,
+    NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10, InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13,
+    NamespaceError: 14, InvalidAccessError: 15, TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+    QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25 }
+  const DOM_CONSTANTS = { INDEX_SIZE_ERR: 1, DOMSTRING_SIZE_ERR: 2, HIERARCHY_REQUEST_ERR: 3, WRONG_DOCUMENT_ERR: 4, INVALID_CHARACTER_ERR: 5,
+    NO_DATA_ALLOWED_ERR: 6, NO_MODIFICATION_ALLOWED_ERR: 7, NOT_FOUND_ERR: 8, NOT_SUPPORTED_ERR: 9, INUSE_ATTRIBUTE_ERR: 10, INVALID_STATE_ERR: 11,
+    SYNTAX_ERR: 12, INVALID_MODIFICATION_ERR: 13, NAMESPACE_ERR: 14, INVALID_ACCESS_ERR: 15, VALIDATION_ERR: 16, TYPE_MISMATCH_ERR: 17,
+    SECURITY_ERR: 18, NETWORK_ERR: 19, ABORT_ERR: 20, URL_MISMATCH_ERR: 21, QUOTA_EXCEEDED_ERR: 22, TIMEOUT_ERR: 23, INVALID_NODE_TYPE_ERR: 24, DATA_CLONE_ERR: 25 }
+  function DOMException(message, name) {
+    if (!new.target) throw new TypeError("Constructor DOMException requires 'new'")
+    const e = Object.create(DOMException.prototype)
+    Object.defineProperty(e, 'message', { value: message === undefined ? '' : String(message), writable: true, configurable: true })
+    Object.defineProperty(e, 'name', { value: name === undefined ? 'Error' : String(name), writable: true, configurable: true })
+    Object.defineProperty(e, 'code', { value: DOM_CODES[e.name] || 0, writable: true, configurable: true })
+    Object.defineProperty(e, 'stack', { value: '', writable: true, configurable: true })
+    return e
+  }
+  DOMException.prototype = Object.create(Error.prototype)
+  Object.defineProperty(DOMException.prototype, 'constructor', { value: DOMException, writable: true, configurable: true })
+  Object.defineProperty(DOMException.prototype, 'toString', { value: function () { return this.name + (this.message ? ': ' + this.message : '') }, writable: true, configurable: true })
+  for (const k in DOM_CONSTANTS) {
+    Object.defineProperty(DOMException, k, { value: DOM_CONSTANTS[k], enumerable: true })
+    Object.defineProperty(DOMException.prototype, k, { value: DOM_CONSTANTS[k], enumerable: true })
+  }
+  g.DOMException = DOMException
+
   // ---------------------------------------------------------------- events
   const EventProto = Object.getPrototypeOf(__makeEvent('x'))
   const eventClass = (name, defaults) => {
@@ -550,7 +577,46 @@
       return f
     },
   })
-  document.implementation = { hasFeature: () => true, createHTMLDocument: () => new DOMParser().parseFromString('', 'text/html') }
+  // ---------------------------------------------------------------- more documents
+  const NS = { html: 'http://www.w3.org/1999/xhtml', svg: 'http://www.w3.org/2000/svg' }
+  class DOMImplementation {
+    constructor(doc) { Object.defineProperty(this, '_doc', { value: doc }) }
+    hasFeature() { return true }
+    createHTMLDocument(title) {
+      const d = __parseDocument('<!DOCTYPE html><html><head></head><body></body></html>')
+      if (title !== undefined) { const t = d.createElement('title'); t.appendChild(d.createTextNode(String(title))); d.head.appendChild(t) }
+      return d
+    }
+    createDocument(namespace, qualifiedName, doctype) {
+      if (arguments.length < 2) throw new TypeError('createDocument needs 2 arguments')
+      const ns = namespace == null ? null : String(namespace)
+      const d = __newDocument(ns === NS.html ? 'application/xhtml+xml' : ns === NS.svg ? 'image/svg+xml' : 'application/xml')
+      if (doctype != null) d.appendChild(doctype)
+      const q = qualifiedName == null ? '' : String(qualifiedName)
+      if (q !== '') d.appendChild(d.createElementNS(ns, q))
+      return d
+    }
+    createDocumentType(name, publicId, systemId) {
+      if (arguments.length < 3) throw new TypeError('createDocumentType needs 3 arguments')
+      return __createDocumentType(name, publicId, systemId)
+    }
+  }
+  g.DOMImplementation = DOMImplementation
+  const impls = new WeakMap()
+  Object.defineProperty(Document.prototype, 'implementation', {
+    get() { let m = impls.get(this); if (!m) { m = new DOMImplementation(this); impls.set(this, m) } return m },
+    configurable: true, enumerable: true,
+  })
+  {
+    const P = Document.prototype
+    const D = function Document() { if (!new.target) throw new TypeError("Constructor Document requires 'new'"); return __newDocument('application/xml') }
+    D.prototype = P
+    Object.defineProperty(P, 'constructor', { value: D, writable: true, configurable: true })
+    Object.setPrototypeOf(D, g.Node)
+    g.Document = D
+    g.XMLDocument = function XMLDocument() { throw new TypeError('Illegal constructor') }
+    g.XMLDocument.prototype = P
+  }
   g.Image = function (w, h) { const i = document.createElement('img'); if (w) i.width = w; if (h) i.height = h; return i }
   g.Audio = function (src) { const a = document.createElement('audio'); if (src) a.src = src; return a }
   g.Option = function (text, value, def, selected) {
@@ -561,18 +627,12 @@
     return o
   }
   g.DOMParser = class DOMParser {
-    parseFromString(html) {
-      const root = document.createElement('html')
-      root.innerHTML = String(html)
-      const body = root.querySelector('body') || root
-      const head = root.querySelector('head') || root
-      const t = root.querySelector('title')
-      return {
-        documentElement: root, body, head, title: t ? t.textContent : '',
-        querySelector: s => root.querySelector(s), querySelectorAll: s => root.querySelectorAll(s),
-        getElementById: id => root.querySelector('#' + id), getElementsByTagName: n => root.getElementsByTagName(n),
-        getElementsByClassName: n => root.getElementsByClassName(n), createElement: n => document.createElement(n),
-      }
+    parseFromString(markup, type) {
+      if (arguments.length < 2) throw new TypeError('parseFromString needs 2 arguments')
+      type = String(type)
+      if (!['text/html', 'text/xml', 'application/xml', 'application/xhtml+xml', 'image/svg+xml'].includes(type)) throw new TypeError('unsupported type ' + type)
+      // XML gets the HTML parser too, for now (tag names lose their case).
+      return __parseDocument(String(markup), type)
     }
   }
   g.XMLSerializer = class XMLSerializer { serializeToString(n) { return n.outerHTML || n.textContent || '' } }
@@ -801,7 +861,7 @@
     getNamedItemNS(_ns, n) { return this.getNamedItem(n) }
     setNamedItem(a) { return this._el.setAttributeNode(a) }
     setNamedItemNS(a) { return this._el.setAttributeNode(a) }
-    removeNamedItem(n) { const a = this.getNamedItem(n); if (!a) throw new DOMException('NotFoundError'); this._el.removeAttribute(a.name); return a }
+    removeNamedItem(n) { const a = this.getNamedItem(n); if (!a) throw new DOMException('no such attribute', 'NotFoundError'); this._el.removeAttribute(a.name); return a }
     [Symbol.iterator]() { return Array.prototype.values.call(this) }
   }
   g.Attr = Attr
@@ -1053,5 +1113,53 @@
         set(v) { if (k === 'origin') return; try { const u = new URL(this.href); u[k] = v; this.setAttribute('href', u.href) } catch (_) {} },
       })
     }
+  }
+
+  // ---------------------------------------------------------------- CharacterData, Text, Comment
+  const needs = (args, n, what) => { if (args.length < n) throw new TypeError(what + ' needs ' + n + ' argument' + (n > 1 ? 's' : '')) }
+  const reconstruct = (name, parent, make) => {
+    const P = g[name].prototype
+    const C = function () { if (!new.target) throw new TypeError("Constructor " + name + " requires 'new'"); return make.apply(null, arguments) }
+    C.prototype = P
+    Object.defineProperty(P, 'constructor', { value: C, writable: true, configurable: true })
+    Object.defineProperty(C, 'name', { value: name })
+    if (parent) Object.setPrototypeOf(C, parent)
+    g[name] = C
+  }
+  reconstruct('Text', g.CharacterData, (d) => document.createTextNode(d === undefined ? '' : d))
+  reconstruct('Comment', g.CharacterData, (d) => document.createComment(d === undefined ? '' : d))
+  reconstruct('DocumentFragment', g.Node, () => document.createDocumentFragment())
+  Object.setPrototypeOf(g.CharacterData, g.Node)
+  Object.setPrototypeOf(g.ProcessingInstruction, g.CharacterData)
+  Object.setPrototypeOf(g.DocumentType, g.Node)
+  const CD = g.CharacterData.prototype
+  const offsetIn = (node, off) => {
+    off = off >>> 0
+    if (off > node.data.length) throw new DOMException('offset ' + off + ' is past the end', 'IndexSizeError')
+    return off
+  }
+  CD.substringData = function (off, count) {
+    needs(arguments, 2, 'substringData')
+    off = offsetIn(this, off)
+    return this.data.substring(off, off + (count >>> 0))
+  }
+  CD.replaceData = function (off, count, data) {
+    needs(arguments, 3, 'replaceData')
+    off = offsetIn(this, off)
+    count = count >>> 0
+    const d = this.data
+    this.data = d.slice(0, off) + String(data) + d.slice(Math.min(d.length, off + count))
+  }
+  CD.appendData = function (data) { needs(arguments, 1, 'appendData'); this.data = this.data + String(data) }
+  CD.insertData = function (off, data) { needs(arguments, 2, 'insertData'); this.replaceData(off, 0, data) }
+  CD.deleteData = function (off, count) { needs(arguments, 2, 'deleteData'); this.replaceData(off, count, '') }
+  g.Text.prototype.splitText = function (off) {
+    needs(arguments, 1, 'splitText')
+    off = offsetIn(this, off)
+    const d = this.data
+    const rest = document.createTextNode(d.slice(off))
+    if (this.parentNode) this.parentNode.insertBefore(rest, this.nextSibling)
+    this.data = d.slice(0, off)
+    return rest
   }
 })(window)

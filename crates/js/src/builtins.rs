@@ -1426,6 +1426,7 @@ pub fn install(i: &mut Interp) {
         let m = i.to_str(&m)?;
         Ok(Value::Str(if m.is_empty() { n.to_string() } else { format!("{n}: {m}") }.into()))
     });
+    let mut error_ctor: Option<Obj> = None;
     for name in ["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError"] {
         let proto = if name == "Error" {
             ep.clone()
@@ -1435,7 +1436,7 @@ pub fn install(i: &mut Interp) {
             p
         };
         let proto2 = proto.clone();
-        ctor(i, name, &proto, move |i, _t, a| {
+        let made = ctor(i, name, &proto, move |i, _t, a| {
             let e = i.obj(Kind::Error);
             if let Value::Obj(o) = &e {
                 o.borrow_mut().proto = Some(proto2.clone());
@@ -1443,10 +1444,21 @@ pub fn install(i: &mut Interp) {
                     let m = i.to_str(&arg(&a, 0))?;
                     o.borrow_mut().set_own("message", Value::Str(m));
                 }
+                if let Value::Obj(opts) = arg(&a, 1) {
+                    if opts.borrow().get_own("cause").is_some() {
+                        let c = i.get(&Value::Obj(opts.clone()), "cause")?;
+                        o.borrow_mut().set_own("cause", c);
+                    }
+                }
                 o.borrow_mut().set_own("stack", Value::Str("".into()));
             }
             Ok(e)
         });
+        // TypeError and the rest inherit from Error, as constructors too.
+        match &error_ctor {
+            None => error_ctor = Some(made),
+            Some(base) => made.borrow_mut().proto = Some(base.clone()),
+        }
     }
 
     // ---------------------------------------------------------- Map, Set

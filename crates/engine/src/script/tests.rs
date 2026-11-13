@@ -479,3 +479,31 @@ fn same_origin_policy_and_cors() {
     assert_eq!(line("xhr"), "xhr refused");
     assert!(out.contains("Blocked by CORS"), "{out}");
 }
+
+#[test]
+fn node_types_documents_and_dom_exceptions() {
+    let mut rt = page(
+        r#"<!DOCTYPE html><html><body><!--marker--><p id="p">a<!-- x -->b</p><script>
+          const out = []
+          const p = document.getElementById('p')
+          out.push(document.doctype.name + ' ' + document.doctype.nodeType + ' ' + document.body.firstChild.nodeType + ' ' + document.body.firstChild.data)
+          out.push(p.childNodes.length + ' ' + p.textContent + ' ' + p.innerHTML)
+          const t = new Text('hello'); out.push(t.splitText(2).data + ' ' + t.data + ' ' + (t instanceof CharacterData))
+          try { t.appendChild(document.createElement('b')) } catch (e) { out.push(e.name + ' ' + e.code + ' ' + (e instanceof DOMException)) }
+          try { document.appendChild(document.createElement('b')) } catch (e) { out.push(e.name) }
+          try { p.classList.add('') } catch (e) { out.push(e.name + ' ' + e.code) }
+          const d = document.implementation.createHTMLDocument('T')
+          const q = d.createElement('i'); d.body.appendChild(q)
+          out.push(d.title + ' ' + (q.ownerDocument === d) + ' ' + (d.body !== document.body) + ' ' + d.documentElement.nodeName)
+          document.body.appendChild(q); out.push(String(q.ownerDocument === document))
+          const x = new DOMParser().parseFromString('<p class=z>hi</p>', 'text/html')
+          out.push(x.querySelector('.z').textContent + ' ' + (x.body.parentNode === x.documentElement))
+          out.push(String(Object.getPrototypeOf(TypeError) === Error))
+          console.log(out.join(' | '))
+        </script></body></html>"#,
+    );
+    assert_eq!(
+        console(&mut rt),
+        "html 10 8 marker | 3 ab a<!-- x -->b | llo he true | HierarchyRequestError 3 true | HierarchyRequestError | SyntaxError 12 | T true true HTML | true | hi true | true"
+    );
+}

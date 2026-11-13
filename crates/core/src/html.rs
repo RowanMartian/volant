@@ -9,11 +9,17 @@
 
 pub type NodeId = u32;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Data {
     Document,
     Element { name: Box<str>, attrs: Vec<(Box<str>, String)> },
     Text(String),
+    /// Kept only when parsing for scripts (which can see them), or made by scripts.
+    Comment(String),
+    /// `<!DOCTYPE name PUBLIC "public id" "system id">`.
+    Doctype { name: Box<str>, public_id: String, system_id: String },
+    /// `<?target data?>`: only scripts make these in HTML documents.
+    Pi { target: Box<str>, data: String },
 }
 
 #[derive(Debug)]
@@ -202,6 +208,38 @@ fn find_ci(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     None
 }
 
+/// A doctype's name and identifiers, from what follows `<!DOCTYPE`.
+fn doctype(rest: &str) -> Data {
+    let rest = rest.trim_start();
+    let name_end = rest.find(|c: char| c.is_ascii_whitespace()).unwrap_or(rest.len());
+    let name = rest[..name_end].to_ascii_lowercase();
+    let mut after = rest[name_end..].trim_start();
+    // A quoted identifier: its text and how much of `s` it took.
+    let quoted = |s: &str| -> Option<(String, usize)> {
+        let t = s.trim_start();
+        let lead = s.len() - t.len();
+        let q = t.chars().next().filter(|&c| c == '"' || c == '\'')?;
+        let end = t[1..].find(q)?;
+        Some((t[1..1 + end].to_string(), lead + end + 2))
+    };
+    let (mut public_id, mut system_id) = (String::new(), String::new());
+    if after.len() >= 6 && after[..6].eq_ignore_ascii_case("public") {
+        after = &after[6..];
+        if let Some((p, used)) = quoted(after) {
+            public_id = p;
+            after = &after[used..];
+            if let Some((sy, _)) = quoted(after) {
+                system_id = sy;
+            }
+        }
+    } else if after.len() >= 6 && after[..6].eq_ignore_ascii_case("system") {
+        if let Some((sy, _)) = quoted(&after[6..]) {
+            system_id = sy;
+        }
+    }
+    Data::Doctype { name: name.into(), public_id, system_id }
+}
+
 /// Parses a whole document.
 pub fn parse(html: &str) -> Dom {
     parse_opts(html, false)
@@ -230,11 +268,37 @@ fn parse_opts(html: &str, scripts: bool) -> Dom {
         }
         let rest = &bytes[i..];
         if rest.starts_with(b"<!--") {
-            i = find(bytes, i + 4, b"-->").map(|p| p + 3).unwrap_or(n);
+            // `<!-->` and `<!--->` are empty comments.
+            let (body_end, end) = if rest[4..].starts_with(b">") {
+                (i + 4, i + 5)
+            } else if rest[4..].starts_with(b"->") {
+                (i + 4, i + 6)
+            } else {
+                match find(bytes, i + 4, b"-->") {
+                    Some(p) => (p, p + 3),
+                    None => (n, n),
+                }
+            };
+            if scripts {
+                b.add(Data::Comment(html[i + 4..body_end].to_string()));
+            }
+            i = end;
             continue;
         }
         if rest.len() > 1 && (rest[1] == b'!' || rest[1] == b'?') {
-            i = memchr(b'>', &bytes[i..]).map(|p| p + i + 1).unwrap_or(n);
+            let end = memchr(b'>', &bytes[i..]).map(|p| p + i).unwrap_or(n);
+            if scripts {
+                let inner = &html[i + 2..end];
+                if rest[1] == b'!' && inner.len() >= 7 && inner[..7].eq_ignore_ascii_case("doctype") {
+                    if b.nodes.iter().all(|n| !matches!(n.data, Data::Doctype { .. } | Data::Element { .. })) {
+                        b.add(doctype(&inner[7..]));
+                    }
+                } else {
+                    // Anything else is a bogus comment (`<?xml …>` keeps its `?`).
+                    b.add(Data::Comment(html[i + if rest[1] == b'?' { 1 } else { 2 }..end].to_string()));
+                }
+            }
+            i = (end + 1).min(n);
             continue;
         }
         if rest.len() > 2 && rest[1] == b'/' && rest[2].is_ascii_alphabetic() {
@@ -454,6 +518,9 @@ mod tests {
                     outline(d, c, out);
                 }
             }
+            Data::Comment(t) => out.push_str(&format!("<!--{t}-->")),
+            Data::Doctype { name, .. } => out.push_str(&format!("<!DOCTYPE {name}>")),
+            Data::Pi { .. } => {}
         }
     }
 

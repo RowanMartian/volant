@@ -529,3 +529,11 @@ fn feature_detection() {
     ";
     assert_eq!(out(src), "1 next 1 2 a\nSymbol(x) x true 1 k\ntrue function true");
 }
+
+#[test]
+fn spec_details_from_web_platform_tests() {
+    // new.target, Error subclasses inheriting from Error as constructors, and lone-surrogate escapes in classes.
+    assert_eq!(out("function F() { return new.target === F } function G() { this.t = new.target === G } console.log(F(), new G().t)"), "false true");
+    assert_eq!(out("console.log(Object.getPrototypeOf(TypeError) === Error, new Error('m', { cause: 7 }).cause)"), "true 7");
+    assert_eq!(out(r"console.log(/[\udc00-\udfff]/.test('u'), 'function'.replace(/(^|[^\ud800-\udbff])([\udc00-\udfff]+)/g, 'X'))"), "false function");
+}

@@ -397,7 +397,17 @@ impl Navigation {
 /// Where window-level listeners are kept.
 const WINDOW: NodeId = NodeId::MAX;
 const FRAGMENT: &str = "#document-fragment";
-const COMMENT: &str = "#comment";
+/// XML's Name production, near enough: a letter, `_` or `:` (or any non-ASCII), then those, digits, `-` and `.`.
+fn is_xml_name(s: &str) -> bool {
+    let mut c = s.chars();
+    let start = |ch: char| ch.is_ascii_alphabetic() || ch == '_' || ch == ':' || (ch as u32) >= 0xC0;
+    matches!(c.next(), Some(f) if start(f)) && c.all(|ch| start(ch) || ch.is_ascii_digit() || ch == '-' || ch == '.' || ch == '\u{B7}')
+}
+
+/// A name with at most one `:`, not at either end (as DOM's "validate a qualified name" wants).
+fn is_qualified_name(s: &str) -> bool {
+    is_xml_name(s) && s.matches(':').count() <= 1 && !s.starts_with(':') && !s.ends_with(':')
+}
 /// The native stack a thread running a [`Runtime`] needs.
 pub const STACK: usize = 512 << 20;
 /// The step budget for each script and each event (about a second of work).
@@ -418,6 +428,10 @@ struct Protos {
     by_tag: HashMap<&'static str, Obj>,
     html_document: Obj,
     text: Obj,
+    comment: Obj,
+    doctype: Obj,
+    pi: Obj,
+    fragment: Obj,
     class_list: Obj,
     style: Obj,
     event: Obj,
@@ -461,6 +475,62 @@ pub struct State {
     /// Bumped on every change to the document (so the app knows to lay it out again).
     pub generation: u64,
     computed: Option<Computed>,
+    /// The document each node made by (or adopted into) a document other than
+    /// the page's belongs to, where its tree doesn't say.
+    owners: HashMap<NodeId, NodeId>,
+    /// Documents other than the page's, and their content types.
+    documents: HashMap<NodeId, String>,
+}
+
+/// The document a node belongs to: the document at the root of its tree, or
+/// (out of the tree) the one that made or last adopted it.
+fn owner_doc(s: &State, id: NodeId) -> NodeId {
+    let mut r = id;
+    loop {
+        let p = s.dom.nodes[r as usize].parent;
+        if p == r {
+            break;
+        }
+        r = p;
+    }
+    if matches!(s.dom.nodes[r as usize].data, Data::Document) {
+        return r;
+    }
+    s.owners.get(&r).or_else(|| s.owners.get(&id)).copied().unwrap_or(ROOT)
+}
+
+/// Moves a subtree into `doc` (as inserting it into another document's tree does).
+fn adopt(st: &S, doc: NodeId, n: NodeId) {
+    let mut s = st.borrow_mut();
+    let doc = owner_doc(&s, doc);
+    let mut all = descendants(&s.dom, n);
+    all.push(n);
+    for k in all {
+        if doc == ROOT {
+            s.owners.remove(&k);
+        } else {
+            s.owners.insert(k, doc);
+        }
+    }
+}
+
+/// Records that `doc` made node `n` (nothing to record for the page's own document).
+fn made_by(st: &S, doc: NodeId, n: NodeId) {
+    let doc = owner_doc(&st.borrow(), doc);
+    if doc != ROOT {
+        st.borrow_mut().owners.insert(n, doc);
+    }
+}
+
+/// The document element: the document's first element child.
+fn document_element(dom: &Dom, doc: NodeId) -> Option<NodeId> {
+    dom.children(doc).iter().copied().find(|&c| dom.tag(c).is_some_and(|t| !t.starts_with('#')))
+}
+
+/// The document element's first child that is one of `tags`.
+fn html_child(dom: &Dom, doc: NodeId, tags: &[&str]) -> Option<NodeId> {
+    let html = document_element(dom, doc).filter(|&h| dom.tag(h) == Some("html"))?;
+    dom.children(html).iter().copied().find(|&c| dom.tag(c).is_some_and(|t| tags.contains(&t)))
 }
 
 /// What `getComputedStyle` keeps between calls: the parsed sheets (until
@@ -625,6 +695,71 @@ fn connected(dom: &Dom, id: NodeId) -> bool {
 }
 
 /// Inserts `child` into `parent` before `before` (or at the end); fragments insert their children.
+/// DOM's "ensure pre-insert validity" (and the replace variant, when `replacing`):
+/// the DOMException name and message for an insertion the DOM can't make.
+fn check_insert(dom: &Dom, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: bool) -> Result<(), (&'static str, &'static str)> {
+    let kind = |id: NodeId| match &dom.nodes[id as usize].data {
+        Data::Document => 'D',
+        Data::Text(_) => 'T',
+        Data::Comment(_) | Data::Pi { .. } => 'C',
+        Data::Doctype { .. } => 'Y',
+        Data::Element { name, .. } if &**name == FRAGMENT => 'F',
+        Data::Element { .. } => 'E',
+    };
+    let hierarchy = |m| Err(("HierarchyRequestError", m));
+    let pk = kind(parent);
+    if matches!(pk, 'T' | 'C' | 'Y') {
+        return hierarchy("this node can't have children");
+    }
+    if is_inclusive_ancestor(dom, node, parent) {
+        return hierarchy("the new child contains the parent");
+    }
+    if let Some(b) = before {
+        if dom.nodes[b as usize].parent != parent || b == parent {
+            return Err(("NotFoundError", if replacing { "the node to replace isn't a child of this node" } else { "the node to insert before isn't a child of this node" }));
+        }
+    }
+    let nk = kind(node);
+    if nk == 'D' {
+        return hierarchy("a document can't be inserted");
+    }
+    if nk == 'Y' && pk != 'D' {
+        return hierarchy("a doctype can only be in a document");
+    }
+    if pk == 'D' {
+        let elements = |id: NodeId| dom.children(id).iter().filter(|&&c| kind(c) == 'E').count();
+        // Element children of the document other than the one being replaced.
+        let others = dom.children(parent).iter().filter(|&&c| kind(c) == 'E' && !(replacing && Some(c) == before)).count();
+        let kids = dom.children(parent);
+        let at = before.and_then(|b| kids.iter().position(|&k| k == b));
+        // Is there a doctype at or after the reference child (skipping it when it's being replaced)?
+        let doctype_after = at.map(|p| kids[p + replacing as usize..].iter().any(|&k| kind(k) == 'Y')).unwrap_or(false);
+        let element_before = match at {
+            Some(p) => kids[..p].iter().any(|&k| kind(k) == 'E'),
+            None => others > 0,
+        };
+        match nk {
+            'T' => return hierarchy("a document can't hold text"),
+            'F' => {
+                if dom.children(node).iter().any(|&c| kind(c) == 'T') || elements(node) > 1 {
+                    return hierarchy("a document can only have one element");
+                }
+                if elements(node) == 1 && (others > 0 || doctype_after) {
+                    return hierarchy("the document already has an element");
+                }
+            }
+            'E' if others > 0 || doctype_after => return hierarchy("the document already has an element"),
+            'Y' => {
+                if kids.iter().any(|&k| kind(k) == 'Y' && !(replacing && Some(k) == before)) || element_before {
+                    return hierarchy("the document can't take a doctype there");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn insert(dom: &mut Dom, parent: NodeId, child: NodeId, before: Option<NodeId>) -> Result<(), &'static str> {
     if is_inclusive_ancestor(dom, child, parent) {
         return Err("the new child contains the parent");
@@ -641,9 +776,13 @@ fn insert(dom: &mut Dom, parent: NodeId, child: NodeId, before: Option<NodeId>) 
 }
 
 fn set_text(dom: &mut Dom, id: NodeId, text: &str) {
-    if let Data::Text(t) = &mut dom.nodes[id as usize].data {
-        *t = text.to_string();
-        return;
+    match &mut dom.nodes[id as usize].data {
+        Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } => {
+            *t = text.to_string();
+            return;
+        }
+        Data::Doctype { .. } => return,
+        _ => {}
     }
     for c in dom.nodes[id as usize].children.clone() {
         detach(dom, c);
@@ -657,9 +796,7 @@ fn set_text(dom: &mut Dom, id: NodeId, text: &str) {
 /// Copies a node (and its subtree when `deep`) within the document.
 fn clone_node(dom: &mut Dom, id: NodeId, deep: bool) -> NodeId {
     let data = match &dom.nodes[id as usize].data {
-        Data::Document => Data::Element { name: FRAGMENT.into(), attrs: Vec::new() },
-        Data::Element { name, attrs } => Data::Element { name: name.clone(), attrs: attrs.clone() },
-        Data::Text(t) => Data::Text(t.clone()),
+        other => other.clone(),
     };
     let copy = new_node(dom, data);
     if deep {
@@ -678,6 +815,7 @@ fn import(dom: &mut Dom, src: &Dom) -> NodeId {
             Data::Element { name, attrs } => Data::Element { name: name.clone(), attrs: attrs.clone() },
             Data::Text(t) => Data::Text(t.clone()),
             Data::Document => return,
+            other => other.clone(),
         };
         let id = new_node(dom, data);
         let _ = insert(dom, parent, id, None);
@@ -699,7 +837,10 @@ fn ensure_structure(dom: &mut Dom) {
         Some(h) => h,
         None => {
             let h = new_node(dom, el("html"));
-            for c in dom.children(ROOT).to_vec() {
+            // The doctype (and comments before the first element) stay with the document.
+            let kids = dom.children(ROOT).to_vec();
+            let lead = kids.iter().take_while(|&&c| matches!(dom.nodes[c as usize].data, Data::Doctype { .. } | Data::Comment(_))).count();
+            for &c in &kids[lead..] {
                 let _ = insert(dom, h, c, None);
             }
             let _ = insert(dom, ROOT, h, None);
@@ -744,7 +885,23 @@ fn serialize(dom: &Dom, id: NodeId, out: &mut String) {
                 html::escape_into(t, out, false);
             }
         }
-        Data::Element { name, .. } if &**name == COMMENT => out.push_str("<!---->"),
+        Data::Comment(t) => {
+            out.push_str("<!--");
+            out.push_str(t);
+            out.push_str("-->");
+        }
+        Data::Doctype { name, .. } => {
+            out.push_str("<!DOCTYPE ");
+            out.push_str(name);
+            out.push('>');
+        }
+        Data::Pi { target, data } => {
+            out.push_str("<?");
+            out.push_str(target);
+            out.push(' ');
+            out.push_str(data);
+            out.push('>');
+        }
         Data::Element { name, attrs } if &**name != FRAGMENT => {
             out.push('<');
             out.push_str(name);
@@ -892,6 +1049,10 @@ fn proto_for(st: &S, id: NodeId) -> Obj {
     match &s.dom.nodes[id as usize].data {
         Data::Document => p.html_document.clone(),
         Data::Text(_) => p.text.clone(),
+        Data::Comment(_) => p.comment.clone(),
+        Data::Doctype { .. } => p.doctype.clone(),
+        Data::Pi { .. } => p.pi.clone(),
+        Data::Element { name, .. } if &**name == FRAGMENT => p.fragment.clone(),
         Data::Element { name, .. } if name.starts_with('#') => p.node.clone(),
         Data::Element { name, .. } => p.by_tag.get(&**name).unwrap_or(&p.html_element).clone(),
     }
@@ -1810,7 +1971,12 @@ fn install(i: &mut Interp, st: &S) {
     };
     let node = mk(i, Some(i.object_proto.clone()));
     let element = mk(i, Some(node.clone()));
-    let text = mk(i, Some(node.clone()));
+    let character_data = mk(i, Some(node.clone()));
+    let text = mk(i, Some(character_data.clone()));
+    let comment = mk(i, Some(character_data.clone()));
+    let pi = mk(i, Some(character_data.clone()));
+    let doctype = mk(i, Some(node.clone()));
+    let fragment = mk(i, Some(node.clone()));
     let document = mk(i, Some(node.clone()));
     let class_list = mk(i, Some(i.object_proto.clone()));
     let style_p = mk(i, Some(i.object_proto.clone()));
@@ -1853,6 +2019,10 @@ fn install(i: &mut Interp, st: &S) {
         html_document: html_document.clone(),
         node: node.clone(),
         text: text.clone(),
+        comment: comment.clone(),
+        doctype: doctype.clone(),
+        pi: pi.clone(),
+        fragment: fragment.clone(),
         class_list: class_list.clone(),
         style: style_p.clone(),
         event: event.clone(),
@@ -1872,10 +2042,21 @@ fn install(i: &mut Interp, st: &S) {
     };
     let node_ctor = ctor(i, "Node", &node);
     let element_ctor = ctor(i, "Element", &element);
+    ctor(i, "CharacterData", &character_data);
     ctor(i, "Text", &text);
+    ctor(i, "Comment", &comment);
+    ctor(i, "ProcessingInstruction", &pi);
+    ctor(i, "DocumentType", &doctype);
+    ctor(i, "DocumentFragment", &fragment);
     ctor(i, "Document", &document);
     ctor(i, "Event", &event);
-    for (k, v) in [("ELEMENT_NODE", 1.0), ("TEXT_NODE", 3.0), ("COMMENT_NODE", 8.0), ("DOCUMENT_NODE", 9.0), ("DOCUMENT_FRAGMENT_NODE", 11.0)] {
+    #[rustfmt::skip]
+    let node_types = [("ELEMENT_NODE", 1.0), ("ATTRIBUTE_NODE", 2.0), ("TEXT_NODE", 3.0), ("CDATA_SECTION_NODE", 4.0), ("ENTITY_REFERENCE_NODE", 5.0),
+        ("ENTITY_NODE", 6.0), ("PROCESSING_INSTRUCTION_NODE", 7.0), ("COMMENT_NODE", 8.0), ("DOCUMENT_NODE", 9.0), ("DOCUMENT_TYPE_NODE", 10.0),
+        ("DOCUMENT_FRAGMENT_NODE", 11.0), ("NOTATION_NODE", 12.0), ("DOCUMENT_POSITION_DISCONNECTED", 1.0), ("DOCUMENT_POSITION_PRECEDING", 2.0),
+        ("DOCUMENT_POSITION_FOLLOWING", 4.0), ("DOCUMENT_POSITION_CONTAINS", 8.0), ("DOCUMENT_POSITION_CONTAINED_BY", 16.0),
+        ("DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC", 32.0)];
+    for (k, v) in node_types {
         if let Value::Obj(n) = &node_ctor {
             n.borrow_mut().set_own(k, Value::Num(v));
         }
@@ -1908,7 +2089,7 @@ fn install(i: &mut Interp, st: &S) {
         ctor(i, name, proto);
         proto.borrow_mut().set_own("\0@toStringTag", str_val(name));
     }
-    for name in ["CharacterData", "Comment", "DocumentFragment", "ShadowRoot"] {
+    for name in ["ShadowRoot"] {
         let f = i.native(|i, _t, _a| i.throw("TypeError", "Illegal constructor"));
         if let Value::Obj(fo) = &f {
             fo.borrow_mut().set_own("prototype", Value::Obj(node.clone()));
@@ -1952,7 +2133,7 @@ fn install(i: &mut Interp, st: &S) {
     }
 
     // Object.prototype.toString tags (libraries tell plain objects from host objects by these).
-    for (o, tag) in [(&element, "Element"), (&html_element, "HTMLElement"), (&text, "Text"), (&document, "Document"), (&html_document, "HTMLDocument"), (&node, "Node"), (&event, "Event"), (&class_list, "DOMTokenList"), (&style_p, "CSSStyleDeclaration")] {
+    for (o, tag) in [(&comment, "Comment"), (&doctype, "DocumentType"), (&pi, "ProcessingInstruction"), (&fragment, "DocumentFragment"), (&character_data, "CharacterData"), (&element, "Element"), (&html_element, "HTMLElement"), (&text, "Text"), (&document, "Document"), (&html_document, "HTMLDocument"), (&node, "Node"), (&event, "Event"), (&class_list, "DOMTokenList"), (&style_p, "CSSStyleDeclaration")] {
         o.borrow_mut().set_own("\0@toStringTag", str_val(tag));
     }
     i.global_obj.borrow_mut().set_own("\0@toStringTag", str_val("Window"));
@@ -2058,9 +2239,11 @@ fn install(i: &mut Interp, st: &S) {
         Ok(Value::Num(match &s.dom.nodes[id as usize].data {
             Data::Document => 9.0,
             Data::Text(_) => 3.0,
-            Data::Element { name, .. } if &**name == COMMENT => 8.0,
+            Data::Comment(_) => 8.0,
+            Data::Doctype { .. } => 10.0,
+            Data::Pi { .. } => 7.0,
             Data::Element { name, .. } if &**name == FRAGMENT => 11.0,
-            _ => 1.0,
+            Data::Element { .. } => 1.0,
         }))
     });
     getter(i, st, &node, "nodeName", |_i, st, id| {
@@ -2068,6 +2251,9 @@ fn install(i: &mut Interp, st: &S) {
         Ok(str_val(&match &s.dom.nodes[id as usize].data {
             Data::Document => "#document".to_string(),
             Data::Text(_) => "#text".to_string(),
+            Data::Comment(_) => "#comment".to_string(),
+            Data::Doctype { name, .. } => name.to_string(),
+            Data::Pi { target, .. } => target.to_string(),
             Data::Element { name, .. } if name.starts_with('#') => name.to_string(),
             Data::Element { name, .. } => name.to_ascii_uppercase(),
         }))
@@ -2132,49 +2318,88 @@ fn install(i: &mut Interp, st: &S) {
         |_i, st, id| {
             let s = st.borrow();
             Ok(match &s.dom.nodes[id as usize].data {
-                Data::Document => Value::Null,
+                Data::Document | Data::Doctype { .. } => Value::Null,
+                Data::Comment(t) | Data::Pi { data: t, .. } => str_val(t),
                 _ => str_val(&s.dom.text(id)),
             })
         },
         |i, st, id, v| {
             let t = if matches!(v, Value::Null | Value::Undefined) { "".into() } else { i.to_str(&v)? };
+            if matches!(st.borrow().dom.nodes[id as usize].data, Data::Document | Data::Doctype { .. }) {
+                return Ok(());
+            }
             set_text(&mut st.borrow_mut().dom, id, &t);
             changed(st);
             Ok(())
         },
     );
-    for name in ["nodeValue", "data", "wholeText"] {
+    for (name, proto) in [("nodeValue", &node), ("data", &character_data)] {
         accessor(
             i,
             st,
-            &node,
+            proto,
             name,
             |_i, st, id| {
                 let s = st.borrow();
                 Ok(match &s.dom.nodes[id as usize].data {
-                    Data::Text(t) => str_val(t),
+                    Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } => str_val(t),
                     _ => Value::Null,
                 })
             },
             |i, st, id, v| {
-                let t = i.to_str(&v)?;
-                let is_text = matches!(st.borrow().dom.nodes[id as usize].data, Data::Text(_));
-                if is_text {
-                    set_text(&mut st.borrow_mut().dom, id, &t);
-                    changed(st);
-                }
+                // Both are [LegacyNullToEmptyString].
+                let t = if matches!(v, Value::Null) { "".into() } else { i.to_str(&v)? };
+                set_text(&mut st.borrow_mut().dom, id, &t);
+                changed(st);
                 Ok(())
             },
         );
     }
-    getter(i, st, &node, "length", |_i, st, id| {
+    getter(i, st, &text, "wholeText", |_i, st, id| {
+        // This text node's run of adjacent text nodes, joined.
+        let s = st.borrow();
+        let p = s.dom.parent(id);
+        let run: Vec<NodeId> = if p == id { vec![id] } else { s.dom.children(p).to_vec() };
+        let at = run.iter().position(|&k| k == id).unwrap_or(0);
+        let is_text = |k: &NodeId| matches!(s.dom.nodes[*k as usize].data, Data::Text(_));
+        let start = run[..at].iter().rposition(|k| !is_text(k)).map(|x| x + 1).unwrap_or(0);
+        let end = run[at..].iter().position(|k| !is_text(k)).map(|x| x + at).unwrap_or(run.len());
+        let mut out = String::new();
+        for k in &run[start..end] {
+            if let Data::Text(t) = &s.dom.nodes[*k as usize].data {
+                out.push_str(t);
+            }
+        }
+        Ok(str_val(&out))
+    });
+    getter(i, st, &character_data, "length", |_i, st, id| {
         let s = st.borrow();
         Ok(match &s.dom.nodes[id as usize].data {
-            Data::Text(t) => Value::Num(t.encode_utf16().count() as f64),
+            Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } => Value::Num(t.encode_utf16().count() as f64),
             _ => Value::Undefined,
         })
     });
-    getter(i, st, &node, "ownerDocument", |i, st, id| Ok(if id == ROOT { Value::Null } else { wrap(i, st, ROOT) }));
+    getter(i, st, &pi, "target", |_i, st, id| {
+        Ok(match &st.borrow().dom.nodes[id as usize].data {
+            Data::Pi { target, .. } => str_val(target),
+            _ => Value::Undefined,
+        })
+    });
+    for (k, which) in [("name", 0), ("publicId", 1), ("systemId", 2)] {
+        getter(i, st, &doctype, k, move |_i, st, id| {
+            Ok(match &st.borrow().dom.nodes[id as usize].data {
+                Data::Doctype { name, public_id, system_id } => str_val([&**name, public_id.as_str(), system_id.as_str()][which]),
+                _ => Value::Undefined,
+            })
+        });
+    }
+    getter(i, st, &node, "ownerDocument", |i, st, id| {
+        if matches!(st.borrow().dom.nodes[id as usize].data, Data::Document) {
+            return Ok(Value::Null);
+        }
+        let d = owner_doc(&st.borrow(), id);
+        Ok(wrap(i, st, d))
+    });
     getter(i, st, &node, "isConnected", |_i, st, id| Ok(Value::Bool(connected(&st.borrow().dom, id))));
     method(i, st, &node, "getRootNode", |i, st, id, _a| {
         let mut r = id;
@@ -2218,8 +2443,11 @@ fn install(i: &mut Interp, st: &S) {
             _ => 1.0,
         }))
     });
-    fn insert_js(i: &mut Interp, st: &S, parent: NodeId, child: &Value, before: Option<NodeId>) -> Res<Value> {
+    fn insert_js(i: &mut Interp, st: &S, parent: NodeId, child: &Value, before: Option<NodeId>, replacing: bool) -> Res<Value> {
         let Some(c) = node_of(child) else { return i.throw("TypeError", "the argument is not a Node") };
+        if let Err((name, msg)) = check_insert(&st.borrow().dom, parent, c, before, replacing) {
+            return i.throw(name, msg);
+        }
         let is_frag = st.borrow().dom.tag(c) == Some(FRAGMENT);
         let moved: Vec<NodeId> = if is_frag { st.borrow().dom.children(c).to_vec() } else { vec![c] };
         let r = insert(&mut st.borrow_mut().dom, parent, c, before);
@@ -2227,15 +2455,37 @@ fn install(i: &mut Interp, st: &S) {
             return i.throw("HierarchyRequestError", e);
         }
         changed(st);
+        // Into another document's tree: the nodes are that document's now.
+        let other_docs = !st.borrow().owners.is_empty() || owner_doc(&st.borrow(), parent) != ROOT;
+        if other_docs {
+            for &n in &moved {
+                adopt(st, parent, n);
+            }
+        }
         for n in moved {
             inserted(i, st, n);
         }
         Ok(child.clone())
     }
-    method(i, st, &node, "appendChild", |i, st, id, a| insert_js(i, st, id, &arg(&a, 0), None));
+    method(i, st, &node, "appendChild", |i, st, id, a| insert_js(i, st, id, &arg(&a, 0), None, false));
     method(i, st, &node, "insertBefore", |i, st, id, a| {
+        if a.len() < 2 {
+            return i.throw("TypeError", "insertBefore needs 2 arguments");
+        }
         let before = node_of(&arg(&a, 1));
-        insert_js(i, st, id, &arg(&a, 0), before)
+        if before.is_none() && !matches!(arg(&a, 1), Value::Null | Value::Undefined) {
+            return i.throw("TypeError", "the second argument is not a Node");
+        }
+        // Inserting a node before itself inserts it before its next sibling.
+        let before = match (before, node_of(&arg(&a, 0))) {
+            (Some(b), Some(n)) if b == n => {
+                let d = &st.borrow().dom;
+                let kids = d.children(id);
+                kids.iter().position(|&k| k == b).and_then(|p| kids.get(p + 1).copied())
+            }
+            (b, _) => b,
+        };
+        insert_js(i, st, id, &arg(&a, 0), before, false)
     });
     method(i, st, &node, "removeChild", |i, st, id, a| {
         let child = arg(&a, 0);
@@ -2250,7 +2500,14 @@ fn install(i: &mut Interp, st: &S) {
     method(i, st, &node, "replaceChild", |i, st, id, a| {
         let (new, old) = (arg(&a, 0), arg(&a, 1));
         let Some(o) = node_of(&old) else { return i.throw("TypeError", "the argument is not a Node") };
-        insert_js(i, st, id, &new, Some(o))?;
+        let Some(n) = node_of(&new) else { return i.throw("TypeError", "the argument is not a Node") };
+        if let Err((name, msg)) = check_insert(&st.borrow().dom, id, n, Some(o), true) {
+            return i.throw(name, msg);
+        }
+        if n == o {
+            return Ok(old);
+        }
+        insert_js(i, st, id, &new, Some(o), true)?;
         detach(&mut st.borrow_mut().dom, o);
         changed(st);
         Ok(old)
@@ -2258,9 +2515,46 @@ fn install(i: &mut Interp, st: &S) {
     method(i, st, &node, "cloneNode", |i, st, id, a| {
         let deep = Interp::truthy(&arg(&a, 0));
         let c = clone_node(&mut st.borrow_mut().dom, id, deep);
+        let is_doc = matches!(st.borrow().dom.nodes[id as usize].data, Data::Document);
+        if is_doc {
+            let ty = st.borrow().documents.get(&id).cloned().unwrap_or_else(|| "text/html".into());
+            st.borrow_mut().documents.insert(c, ty);
+        } else {
+            let doc = owner_doc(&st.borrow(), id);
+            adopt(st, doc, c);
+        }
         Ok(wrap(i, st, c))
     });
-    method(i, st, &node, "normalize", |_i, _st, _id, _a| Ok(Value::Undefined));
+    // Joins adjacent text nodes and drops empty ones, all the way down.
+    method(i, st, &node, "normalize", |_i, st, id, _a| {
+        fn norm(dom: &mut Dom, id: NodeId) {
+            let kids = dom.children(id).to_vec();
+            let mut prev_text: Option<NodeId> = None;
+            for k in kids {
+                let text = match &dom.nodes[k as usize].data {
+                    Data::Text(t) => Some(t.clone()),
+                    _ => None,
+                };
+                match (text, prev_text) {
+                    (Some(t), _) if t.is_empty() => detach(dom, k),
+                    (Some(t), Some(p)) => {
+                        if let Data::Text(pt) = &mut dom.nodes[p as usize].data {
+                            pt.push_str(&t);
+                        }
+                        detach(dom, k);
+                    }
+                    (Some(_), None) => prev_text = Some(k),
+                    (None, _) => {
+                        prev_text = None;
+                        norm(dom, k);
+                    }
+                }
+            }
+        }
+        norm(&mut st.borrow_mut().dom, id);
+        changed(st);
+        Ok(Value::Undefined)
+    });
     // ChildNode / ParentNode conveniences (strings become text nodes).
     fn to_nodes(i: &mut Interp, st: &S, a: &[Value]) -> Res<Vec<NodeId>> {
         let mut out = Vec::new();
@@ -2684,100 +2978,212 @@ fn install(i: &mut Interp, st: &S) {
         };
         Ok(wrap_opt(i, st, found))
     });
-    // classList
-    getter(i, st, &element, "classList", |i, st, id| {
+    // classList, and the DOMTokenList behind every token-list attribute (relList, sandbox, …).
+    fn token_list(i: &Interp, st: &S, el: &Value, id: NodeId, attr: &str) -> Value {
+        let slot = format!("\0tl:{attr}");
+        if let Value::Obj(w) = el {
+            if let Some(v) = hidden(w, &slot) {
+                return v;
+            }
+        }
         let proto = st.borrow().protos.as_ref().map(|p| p.class_list.clone());
         let o = i.obj(Kind::Plain);
         if let Value::Obj(oo) = &o {
             oo.borrow_mut().proto = proto;
             oo.borrow_mut().set_own("\0node", Value::Num(id as f64));
+            oo.borrow_mut().set_own("\0attr", str_val(attr));
         }
-        Ok(o)
-    });
-    fn classes(st: &S, id: NodeId) -> Vec<String> {
-        st.borrow().dom.attr(id, "class").unwrap_or("").split_whitespace().map(str::to_string).collect()
+        if let Value::Obj(w) = el {
+            w.borrow_mut().set_own(&slot, o.clone());
+        }
+        o
     }
-    fn set_classes(st: &S, id: NodeId, c: Vec<String>) {
-        set_attr(&mut st.borrow_mut().dom, id, "class", &c.join(" "));
+    getter(i, st, &element, "classList", |i, st, id| {
+        let el = wrap(i, st, id);
+        Ok(token_list(i, st, &el, id, "class"))
+    });
+    {
+        let st2 = st.clone();
+        let f = i.native(move |i, _t, a| {
+            let el = arg(&a, 0);
+            let Some(id) = node_of(&el) else { return i.throw("TypeError", "not a node") };
+            let attr = i.to_str(&arg(&a, 1))?.to_string();
+            Ok(token_list(i, &st2, &el, id, &attr))
+        });
+        i.global_obj.borrow_mut().set_own("__tokenList", f);
+    }
+    /// The element and attribute a DOMTokenList stands for.
+    fn list_of(i: &Interp, this: &Value) -> Res<(NodeId, String)> {
+        let id = this_node(i, this)?;
+        let attr = match this {
+            Value::Obj(o) => match hidden(o, "\0attr") {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => "class".into(),
+            },
+            _ => "class".into(),
+        };
+        Ok((id, attr))
+    }
+    /// The token set: the attribute split on ASCII whitespace, duplicates dropped.
+    fn tokens(st: &S, id: NodeId, attr: &str) -> Vec<String> {
+        let s = st.borrow();
+        let mut out: Vec<String> = Vec::new();
+        for t in s.dom.attr(id, attr).unwrap_or("").split(|c: char| matches!(c, ' ' | '\t' | '\n' | '\x0c' | '\r')).filter(|t| !t.is_empty()) {
+            if !out.iter().any(|x| x == t) {
+                out.push(t.to_string());
+            }
+        }
+        out
+    }
+    /// DOMTokenList's update steps.
+    fn set_tokens(st: &S, id: NodeId, attr: &str, c: Vec<String>) {
+        if c.is_empty() && st.borrow().dom.attr(id, attr).is_none() {
+            return;
+        }
+        set_attr(&mut st.borrow_mut().dom, id, attr, &c.join(" "));
         changed(st);
     }
-    method(i, st, &class_list, "add", |i, st, id, a| {
-        let mut c = classes(st, id);
+    fn token(i: &mut Interp, v: &Value) -> Res<String> {
+        let t = i.to_str(v)?.to_string();
+        if t.is_empty() {
+            return i.throw("DOM:SyntaxError", "a token can't be empty");
+        }
+        if t.contains([' ', '\t', '\n', '\x0c', '\r']) {
+            return i.throw("InvalidCharacterError", "a token can't contain whitespace");
+        }
+        Ok(t)
+    }
+    let st_tl = st.clone();
+    let tl_proto = class_list.clone();
+    let tl_method = move |i: &Interp, name: &str, f: fn(&mut Interp, &S, NodeId, &str, Vec<Value>) -> Res<Value>| {
+        let st = st_tl.clone();
+        def(i, &tl_proto, name, move |i, t, a| {
+            let (id, attr) = list_of(i, &t)?;
+            f(i, &st, id, &attr, a)
+        });
+    };
+    tl_method(i, "add", |i, st, id, attr, a| {
+        let mut want = Vec::new();
         for v in &a {
-            let t = i.to_str(v)?.to_string();
+            want.push(token(i, v)?);
+        }
+        let mut c = tokens(st, id, attr);
+        for t in want {
             if !c.contains(&t) {
                 c.push(t);
             }
         }
-        set_classes(st, id, c);
+        set_tokens(st, id, attr, c);
         Ok(Value::Undefined)
     });
-    method(i, st, &class_list, "remove", |i, st, id, a| {
-        let mut c = classes(st, id);
+    tl_method(i, "remove", |i, st, id, attr, a| {
+        let mut gone = Vec::new();
         for v in &a {
-            let t = i.to_str(v)?.to_string();
-            c.retain(|x| *x != t);
+            gone.push(token(i, v)?);
         }
-        set_classes(st, id, c);
+        let mut c = tokens(st, id, attr);
+        c.retain(|x| !gone.contains(x));
+        set_tokens(st, id, attr, c);
         Ok(Value::Undefined)
     });
-    method(i, st, &class_list, "toggle", |i, st, id, a| {
-        let mut c = classes(st, id);
-        let t = i.to_str(&arg(&a, 0))?.to_string();
-        let want = match arg(&a, 1) {
-            Value::Undefined => !c.contains(&t),
-            f => Interp::truthy(&f),
+    tl_method(i, "toggle", |i, st, id, attr, a| {
+        let t = token(i, &arg(&a, 0))?;
+        let mut c = tokens(st, id, attr);
+        let has = c.contains(&t);
+        let force = match arg(&a, 1) {
+            Value::Undefined => None,
+            f => Some(Interp::truthy(&f)),
         };
-        c.retain(|x| *x != t);
+        let want = force.unwrap_or(!has);
+        if has == want {
+            return Ok(Value::Bool(want));
+        }
         if want {
             c.push(t);
+        } else {
+            c.retain(|x| *x != t);
         }
-        set_classes(st, id, c);
+        set_tokens(st, id, attr, c);
         Ok(Value::Bool(want))
     });
-    method(i, st, &class_list, "contains", |i, st, id, a| {
+    tl_method(i, "contains", |i, st, id, attr, a| {
         let t = i.to_str(&arg(&a, 0))?.to_string();
-        Ok(Value::Bool(classes(st, id).contains(&t)))
+        Ok(Value::Bool(tokens(st, id, attr).contains(&t)))
     });
-    method(i, st, &class_list, "replace", |i, st, id, a| {
-        let (old, new) = (i.to_str(&arg(&a, 0))?.to_string(), i.to_str(&arg(&a, 1))?.to_string());
-        let mut c = classes(st, id);
-        let found = c.iter().position(|x| *x == old);
-        if let Some(p) = found {
+    tl_method(i, "replace", |i, st, id, attr, a| {
+        let old = token(i, &arg(&a, 0))?;
+        let new = token(i, &arg(&a, 1))?;
+        let mut c = tokens(st, id, attr);
+        let Some(p) = c.iter().position(|x| *x == old) else { return Ok(Value::Bool(false)) };
+        if c.contains(&new) {
+            c.remove(p);
+            let q = c.iter().position(|x| *x == new).unwrap_or(0);
+            // The new token takes the earlier of the two places.
+            if q > p {
+                let n = c.remove(q);
+                c.insert(p, n);
+            }
+        } else {
             c[p] = new;
-            set_classes(st, id, c);
         }
-        Ok(Value::Bool(found.is_some()))
+        set_tokens(st, id, attr, c);
+        Ok(Value::Bool(true))
     });
-    method(i, st, &class_list, "item", |_i, st, id, a| {
-        let k = match arg(&a, 0) {
-            Value::Num(n) => n as usize,
-            _ => 0,
+    tl_method(i, "supports", |i, _st, _id, attr, a| {
+        let t = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
+        let supported: &[&str] = match attr {
+            "rel" => &["alternate", "stylesheet", "icon", "preload", "prefetch", "preconnect", "dns-prefetch", "modulepreload", "noopener", "noreferrer", "opener", "manifest", "next", "search", "author", "help", "license", "bookmark", "external", "nofollow", "tag"],
+            "sandbox" => &["allow-downloads", "allow-forms", "allow-modals", "allow-orientation-lock", "allow-pointer-lock", "allow-popups", "allow-popups-to-escape-sandbox", "allow-presentation", "allow-same-origin", "allow-scripts", "allow-top-navigation", "allow-top-navigation-by-user-activation", "allow-top-navigation-to-custom-protocols"],
+            _ => return i.throw("TypeError", &format!("{attr} has no supported tokens")),
         };
-        Ok(classes(st, id).get(k).map(|s| str_val(s)).unwrap_or(Value::Null))
+        Ok(Value::Bool(supported.contains(&t.as_str())))
     });
-    method(i, st, &class_list, "forEach", |i, st, id, a| {
+    tl_method(i, "item", |i, st, id, attr, a| {
+        let k = i.to_number(&arg(&a, 0))?;
+        let k = if k.is_finite() { (k.trunc() as i64).rem_euclid(1 << 32) as usize } else { 0 };
+        Ok(tokens(st, id, attr).get(k).map(|s| str_val(s)).unwrap_or(Value::Null))
+    });
+    tl_method(i, "forEach", |i, st, id, attr, a| {
         let f = arg(&a, 0);
-        for (k, c) in classes(st, id).into_iter().enumerate() {
-            i.call(&f, Value::Undefined, vec![str_val(&c), Value::Num(k as f64)])?;
+        let this = arg(&a, 1);
+        for (k, c) in tokens(st, id, attr).into_iter().enumerate() {
+            i.call(&f, this.clone(), vec![str_val(&c), Value::Num(k as f64)])?;
         }
         Ok(Value::Undefined)
     });
-    method(i, st, &class_list, "toString", |_i, st, id, _a| Ok(str_val(&classes(st, id).join(" "))));
+    tl_method(i, "toString", |_i, st, id, attr, _a| Ok(str_val(st.borrow().dom.attr(id, attr).unwrap_or(""))));
     for name in ["\0@iterator", "values", "keys", "entries"] {
-        method(i, st, &class_list, name, move |i, st, id, _a| {
-            let list: Vec<Value> = classes(st, id).iter().map(|c| str_val(c)).collect();
+        let st = st.clone();
+        def(i, &class_list, name, move |i, t, _a| {
+            let (id, attr) = list_of(i, &t)?;
+            let list: Vec<Value> = tokens(&st, id, &attr).iter().map(|c| str_val(c)).collect();
             let arr = i.array(list);
             let f = i.get(&arr, if name == "\0@iterator" { "values" } else { name })?;
             i.call(&f, arr, vec![])
         });
     }
-    getter(i, st, &class_list, "length", |_i, st, id| Ok(Value::Num(classes(st, id).len() as f64)));
-    accessor(i, st, &class_list, "value", |_i, st, id| Ok(str_val(&classes(st, id).join(" "))), |i, st, id, v| {
-        let t = i.to_str(&v)?;
-        set_classes(st, id, t.split_whitespace().map(str::to_string).collect());
-        Ok(())
-    });
+    {
+        let st1 = st.clone();
+        let len = i.native(move |i, t, _a| {
+            let (id, attr) = list_of(i, &t)?;
+            Ok(Value::Num(tokens(&st1, id, &attr).len() as f64))
+        });
+        class_list.borrow_mut().set_slot("length", Slot::Accessor(Some(len), None));
+        let st2 = st.clone();
+        let get = i.native(move |i, t, _a| {
+            let (id, attr) = list_of(i, &t)?;
+            Ok(str_val(st2.borrow().dom.attr(id, &attr).unwrap_or("")))
+        });
+        let st3 = st.clone();
+        let set = i.native(move |i, t, a| {
+            let (id, attr) = list_of(i, &t)?;
+            let v = i.to_str(&arg(&a, 0))?;
+            set_attr(&mut st3.borrow_mut().dom, id, &attr, &v);
+            changed(&st3);
+            Ok(Value::Undefined)
+        });
+        class_list.borrow_mut().set_slot("value", Slot::Accessor(Some(get), Some(set)));
+    }
     // style
     getter(i, st, &element, "style", |i, st, id| {
         if let Some(v) = st.borrow().styles.get(&id) {
@@ -3077,28 +3483,41 @@ fn install(i: &mut Interp, st: &S) {
     method(i, st, &element, "pause", |_i, _st, _id, _a| Ok(Value::Undefined));
 
     // ---------------------------------------------------------- Document
-    let find_tag = |st: &S, t: &str| st.borrow().dom.find(t);
-    getter(i, st, &document, "documentElement", move |i, st, _id| Ok(wrap_opt(i, st, find_tag(st, "html"))));
-    getter(i, st, &document, "head", move |i, st, _id| Ok(wrap_opt(i, st, find_tag(st, "head"))));
-    getter(i, st, &document, "body", move |i, st, _id| Ok(wrap_opt(i, st, find_tag(st, "body"))));
-    getter(i, st, &document, "scrollingElement", move |i, st, _id| Ok(wrap_opt(i, st, find_tag(st, "html"))));
+    getter(i, st, &document, "documentElement", |i, st, id| {
+        let found = document_element(&st.borrow().dom, id);
+        Ok(wrap_opt(i, st, found))
+    });
+    getter(i, st, &document, "head", |i, st, id| {
+        let found = html_child(&st.borrow().dom, id, &["head"]);
+        Ok(wrap_opt(i, st, found))
+    });
+    getter(i, st, &document, "body", |i, st, id| {
+        let found = html_child(&st.borrow().dom, id, &["body", "frameset"]);
+        Ok(wrap_opt(i, st, found))
+    });
+    getter(i, st, &document, "scrollingElement", |i, st, id| {
+        let found = document_element(&st.borrow().dom, id);
+        Ok(wrap_opt(i, st, found))
+    });
     accessor(
         i,
         st,
         &document,
         "title",
-        |_i, st, _id| {
+        |_i, st, id| {
             let s = st.borrow();
-            Ok(str_val(&s.dom.find("title").map(|t| s.dom.text(t).split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default()))
+            let title = descendants(&s.dom, id).into_iter().find(|&n| s.dom.tag(n) == Some("title"));
+            Ok(str_val(&title.map(|t| s.dom.text(t).split_ascii_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default()))
         },
-        |i, st, _id, v| {
+        |i, st, id, v| {
             let t = i.to_str(&v)?;
             let mut s = st.borrow_mut();
-            let title = match s.dom.find("title") {
+            let found = descendants(&s.dom, id).into_iter().find(|&n| s.dom.tag(n) == Some("title"));
+            let title = match found {
                 Some(t) => t,
                 None => {
+                    let Some(head) = html_child(&s.dom, id, &["head"]) else { return Ok(()) };
                     let t = new_node(&mut s.dom, Data::Element { name: "title".into(), attrs: Vec::new() });
-                    let head = s.dom.find("head").unwrap_or(ROOT);
                     let _ = insert(&mut s.dom, head, t, None);
                     t
                 }
@@ -3108,13 +3527,40 @@ fn install(i: &mut Interp, st: &S) {
             Ok(())
         },
     );
-    getter(i, st, &document, "URL", |_i, st, _id| Ok(str_val(&st.borrow().url)));
-    getter(i, st, &document, "documentURI", |_i, st, _id| Ok(str_val(&st.borrow().url)));
+    getter(i, st, &document, "URL", |_i, st, id| Ok(if id == ROOT { str_val(&st.borrow().url) } else { str_val("about:blank") }));
+    getter(i, st, &document, "documentURI", |_i, st, id| Ok(if id == ROOT { str_val(&st.borrow().url) } else { str_val("about:blank") }));
     getter(i, st, &document, "baseURI", |_i, st, _id| Ok(str_val(&st.borrow().url)));
     getter(i, st, &document, "referrer", |_i, _st, _id| Ok(str_val("")));
     getter(i, st, &document, "characterSet", |_i, _st, _id| Ok(str_val("UTF-8")));
     getter(i, st, &document, "compatMode", |_i, _st, _id| Ok(str_val("CSS1Compat")));
-    getter(i, st, &document, "contentType", |_i, _st, _id| Ok(str_val("text/html")));
+    getter(i, st, &document, "contentType", |_i, st, id| Ok(str_val(st.borrow().documents.get(&id).map(String::as_str).unwrap_or("text/html"))));
+    {
+        // __newDocument(contentType): an empty document; __parseDocument(html): one parsed from markup.
+        let st2 = st.clone();
+        let f = i.native(move |i, _t, a| {
+            let ty = i.to_str(&arg(&a, 0))?.to_string();
+            let d = new_node(&mut st2.borrow_mut().dom, Data::Document);
+            st2.borrow_mut().documents.insert(d, ty);
+            Ok(wrap(i, &st2, d))
+        });
+        i.global_obj.borrow_mut().set_own("__newDocument", f);
+        let st3 = st.clone();
+        let f = i.native(move |i, _t, a| {
+            let markup = i.to_str(&arg(&a, 0))?;
+            let mut parsed = html::parse_with_scripts(&markup);
+            ensure_structure(&mut parsed);
+            let mut s = st3.borrow_mut();
+            let d = new_node(&mut s.dom, Data::Document);
+            s.documents.insert(d, "text/html".into());
+            let frag = import(&mut s.dom, &parsed);
+            for c in s.dom.children(frag).to_vec() {
+                let _ = insert(&mut s.dom, d, c, None);
+            }
+            drop(s);
+            Ok(wrap(i, &st3, d))
+        });
+        i.global_obj.borrow_mut().set_own("__parseDocument", f);
+    }
     getter(i, st, &document, "visibilityState", |_i, _st, _id| Ok(str_val("visible")));
     getter(i, st, &document, "hidden", |_i, _st, _id| Ok(Value::Bool(false)));
     getter(i, st, &document, "defaultView", |i, _st, _id| Ok(Value::Obj(i.global_obj.clone())));
@@ -3165,47 +3611,94 @@ fn install(i: &mut Interp, st: &S) {
         },
     );
     for (name, tag) in [("forms", "form"), ("images", "img"), ("scripts", "script"), ("links", "a"), ("embeds", "embed")] {
-        getter(i, st, &document, name, move |i, st, _id| {
+        getter(i, st, &document, name, move |i, st, id| {
             let found: Vec<NodeId> = {
                 let s = st.borrow();
-                descendants(&s.dom, ROOT).into_iter().filter(|&n| s.dom.tag(n) == Some(tag)).collect()
+                descendants(&s.dom, id).into_iter().filter(|&n| s.dom.tag(n) == Some(tag)).collect()
             };
             Ok(wrap_list(i, st, found))
         });
     }
-    method(i, st, &document, "createElement", |i, st, _id, a| {
-        let t = i.to_str(&arg(&a, 0))?.to_ascii_lowercase();
+    method(i, st, &document, "createElement", |i, st, doc, a| {
+        let t = i.to_str(&arg(&a, 0))?;
+        if !is_xml_name(&t) {
+            return i.throw("InvalidCharacterError", "not a valid element name");
+        }
+        // HTML documents lower-case the name; XML ones keep it.
+        let html = st.borrow().documents.get(&owner_doc(&st.borrow(), doc)).is_none_or(|t| t == "text/html");
+        let t = if html { t.to_ascii_lowercase() } else { t.to_string() };
         let n = new_node(&mut st.borrow_mut().dom, Data::Element { name: t.into(), attrs: Vec::new() });
+        made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
-    method(i, st, &document, "createElementNS", |i, st, _id, a| {
+    method(i, st, &document, "createElementNS", |i, st, doc, a| {
         let t = i.to_str(&arg(&a, 1))?.to_ascii_lowercase();
         let n = new_node(&mut st.borrow_mut().dom, Data::Element { name: t.into(), attrs: Vec::new() });
+        made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
-    method(i, st, &document, "createTextNode", |i, st, _id, a| {
+    method(i, st, &document, "createTextNode", |i, st, doc, a| {
         let t = i.to_str(&arg(&a, 0))?;
         let n = new_node(&mut st.borrow_mut().dom, Data::Text(t.to_string()));
+        made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
-    method(i, st, &document, "createComment", |i, st, _id, _a| {
-        let n = new_node(&mut st.borrow_mut().dom, Data::Element { name: COMMENT.into(), attrs: Vec::new() });
+    method(i, st, &document, "createComment", |i, st, doc, a| {
+        let t = i.to_str(&arg(&a, 0))?;
+        let n = new_node(&mut st.borrow_mut().dom, Data::Comment(t.to_string()));
+        made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
-    method(i, st, &document, "createDocumentFragment", |i, st, _id, _a| {
+    method(i, st, &document, "createProcessingInstruction", |i, st, doc, a| {
+        let target = i.to_str(&arg(&a, 0))?;
+        let data = i.to_str(&arg(&a, 1))?;
+        if !is_xml_name(&target) || data.contains("?>") {
+            return i.throw("InvalidCharacterError", "not a valid processing instruction");
+        }
+        let n = new_node(&mut st.borrow_mut().dom, Data::Pi { target: target.to_string().into(), data: data.to_string() });
+        made_by(st, doc, n);
+        Ok(wrap(i, st, n))
+    });
+    getter(i, st, &document, "doctype", |i, st, id| {
+        let found = st.borrow().dom.children(id).iter().copied().find(|&c| matches!(st.borrow().dom.nodes[c as usize].data, Data::Doctype { .. }));
+        Ok(wrap_opt(i, st, found))
+    });
+    {
+        let st2 = st.clone();
+        let f = i.native(move |i, _t, a| {
+            let name = i.to_str(&arg(&a, 0))?;
+            if !is_qualified_name(&name) {
+                return i.throw("InvalidCharacterError", "not a valid doctype name");
+            }
+            let public_id = i.to_str(&arg(&a, 1))?.to_string();
+            let system_id = i.to_str(&arg(&a, 2))?.to_string();
+            let n = new_node(&mut st2.borrow_mut().dom, Data::Doctype { name: name.to_string().into(), public_id, system_id });
+            Ok(wrap(i, &st2, n))
+        });
+        i.global_obj.borrow_mut().set_own("__createDocumentType", f);
+    }
+    method(i, st, &document, "createDocumentFragment", |i, st, doc, _a| {
         let n = new_node(&mut st.borrow_mut().dom, Data::Element { name: FRAGMENT.into(), attrs: Vec::new() });
+        made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
     method(i, st, &document, "createEvent", |i, st, _id, _a| Ok(make_event(i, st, "", false, false)));
-    method(i, st, &document, "importNode", |i, st, _id, a| {
-        let Some(n) = node_of(&arg(&a, 0)) else { return Ok(Value::Null) };
+    method(i, st, &document, "importNode", |i, st, doc, a| {
+        let Some(n) = node_of(&arg(&a, 0)) else { return i.throw("TypeError", "the argument is not a Node") };
+        if matches!(st.borrow().dom.nodes[n as usize].data, Data::Document) {
+            return i.throw("NotSupportedError", "a document can't be imported");
+        }
         let c = clone_node(&mut st.borrow_mut().dom, n, Interp::truthy(&arg(&a, 1)));
+        adopt(st, doc, c);
         Ok(wrap(i, st, c))
     });
-    method(i, st, &document, "adoptNode", |_i, st, _id, a| {
-        if let Some(n) = node_of(&arg(&a, 0)) {
-            detach(&mut st.borrow_mut().dom, n);
+    method(i, st, &document, "adoptNode", |i, st, doc, a| {
+        let Some(n) = node_of(&arg(&a, 0)) else { return i.throw("TypeError", "the argument is not a Node") };
+        if matches!(st.borrow().dom.nodes[n as usize].data, Data::Document) {
+            return i.throw("NotSupportedError", "a document can't be adopted");
         }
+        detach(&mut st.borrow_mut().dom, n);
+        adopt(st, doc, n);
         Ok(arg(&a, 0))
     });
     method(i, st, &document, "hasFocus", |_i, _st, _id, _a| Ok(Value::Bool(true)));
@@ -3668,6 +4161,8 @@ impl Runtime {
             protos: None,
             generation: 1,
             computed: None,
+            owners: HashMap::new(),
+            documents: HashMap::new(),
         }));
         let mut interp = Interp::new();
         // Real pages nest calls deeply (module loaders, jQuery); run on a big stack (see STACK).
@@ -4184,7 +4679,7 @@ impl Runtime {
                     Data::Element { name: name.clone(), attrs }
                 }
                 Data::Text(t) => Data::Text(t.clone()),
-                Data::Document => return,
+                Data::Document | Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } => return,
             };
             let id = dst.nodes.len() as NodeId;
             dst.nodes.push(Node { parent, children: Vec::new(), data });

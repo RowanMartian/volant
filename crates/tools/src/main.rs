@@ -18,12 +18,14 @@
 //!                                              (other files fetched with curl; console printed)
 //! volant-tools js FILE.js                      run a script with Volant's own JavaScript engine
 //! volant-tools survey SITES.txt OUT_DIR [--jobs N] [--only TEXT]
+//! volant-tools wpt WPT_DIR LIST OUT_DIR [--jobs N] [--baseline FILE [--write-baseline]]
 //!                                              run each site through Simple Page's steps and
 //!                                              report what shows, what falls back, errors and timings
 //! ```
 
 mod site;
 mod survey;
+mod wpt;
 
 use std::path::{Path, PathBuf};
 use volant_core::{hash, macho, zip};
@@ -258,6 +260,8 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "survey" => survey::run(&args[1..])?,
         "survey-one" => survey::one(arg(1)?),
+        "wpt" => wpt::run(&args[1..])?,
+        "wpt-one" => wpt::one(arg(1)?, arg(2)?),
         other => return Err(format!("unknown command {other:?}; see the top of crates/tools/src/main.rs")),
     }
     Ok(())

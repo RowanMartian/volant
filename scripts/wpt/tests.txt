@@ -1,0 +1,16 @@
+# The web-platform-tests slice CI runs on Volant's engine (folders or files,
+# relative to a checkout of github.com/web-platform-tests/wpt).
+dom/nodes
+dom/events
+dom/collections
+dom/lists
+dom/traversal
+dom/ranges
+encoding
+url
+html/dom
+# Legacy multibyte decoders: hundreds of thousands of subtests, each through an iframe or XHR.
+!encoding/legacy-mb-japanese
+!encoding/legacy-mb-korean
+!encoding/legacy-mb-schinese
+!encoding/legacy-mb-tchinese
