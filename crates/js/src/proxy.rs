@@ -72,6 +72,10 @@ impl Interp {
         }
         Ok(match v {
             Value::Obj(o) => {
+                // A function's name, length and prototype are made when first asked about.
+                if o.borrow().get_own(k).is_none() && crate::vm::lazy_function_prop(self, o, k).is_some() {
+                    return Ok(true);
+                }
                 let b = o.borrow();
                 b.get_own(k).is_some() || matches!(&b.kind, Kind::Array(arr) if k.parse::<usize>().map(|x| x < arr.len()).unwrap_or(false) || k == "length")
             }

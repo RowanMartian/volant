@@ -138,10 +138,12 @@ impl Parser<'_> {
             _ => return Ok(atom),
         };
         self.i += 1;
-        if matches!(atom, Node::Start | Node::End | Node::WordBoundary(_) | Node::Look(..)) {
+        if matches!(atom, Node::Start | Node::End | Node::WordBoundary(_) | Node::Look(_, false, _)) {
             return Err("nothing to repeat".into());
         }
         let greedy = !self.eat('?');
+        // A repeated lookahead (allowed on the web): it matches no text, so once is as many as matter.
+        let (min, max) = if matches!(atom, Node::Look(..)) { (min.min(1), max.min(1)) } else { (min, max) };
         Ok(Node::Repeat(Box::new(atom), min, max, greedy))
     }
 

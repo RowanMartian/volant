@@ -797,4 +797,98 @@
     EP.toBlob = function (cb) { setTimeout(() => cb && cb(new g.Blob([], { type: 'image/png' })), 0) }
     EP.transferControlToOffscreen = function () { return null }
   }
+
+  // ------------------------------------------------- attribute nodes
+  class Attr {
+    constructor(name, value, owner) { this._name = name; this._value = value; this.ownerElement = owner || null }
+    get name() { return this._name }
+    get nodeName() { return this._name }
+    get localName() { return this._name }
+    get namespaceURI() { return null }
+    get prefix() { return null }
+    get specified() { return true }
+    get nodeType() { return 2 }
+    get value() { const o = this.ownerElement; const v = o ? o.getAttribute(this._name) : null; return v == null ? this._value : v }
+    set value(v) { this._value = String(v); if (this.ownerElement) this.ownerElement.setAttribute(this._name, this._value) }
+    get nodeValue() { return this.value }
+    set nodeValue(v) { this.value = v }
+    get textContent() { return this.value }
+    set textContent(v) { this.value = v }
+  }
+  class NamedNodeMap {
+    item(i) { return this[i] || null }
+    getNamedItem(n) { n = String(n).toLowerCase(); for (let i = 0; i < this.length; i++) if (this[i].name === n) return this[i]; return null }
+    getNamedItemNS(_ns, n) { return this.getNamedItem(n) }
+    setNamedItem(a) { return this._el.setAttributeNode(a) }
+    setNamedItemNS(a) { return this._el.setAttributeNode(a) }
+    removeNamedItem(n) { const a = this.getNamedItem(n); if (!a) throw new DOMException('NotFoundError'); this._el.removeAttribute(a.name); return a }
+    [Symbol.iterator]() { return Array.prototype.values.call(this) }
+  }
+  g.Attr = Attr
+  g.NamedNodeMap = NamedNodeMap
+  {
+    const EP = Element.prototype
+    const pairs = Object.getOwnPropertyDescriptor(EP, 'attributes').get
+    Object.defineProperty(EP, 'attributes', {
+      configurable: true, enumerable: true,
+      get() {
+        const m = Object.create(NamedNodeMap.prototype), list = pairs.call(this)
+        list.forEach((a, i) => { m[i] = new Attr(a.name, a.value, this) })
+        Object.defineProperty(m, 'length', { value: list.length })
+        Object.defineProperty(m, '_el', { value: this })
+        return m
+      },
+    })
+    EP.getAttributeNode = function (n) { n = String(n).toLowerCase(); return this.hasAttribute(n) ? new Attr(n, '', this) : null }
+    EP.getAttributeNodeNS = function (_ns, n) { return this.getAttributeNode(n) }
+    EP.setAttributeNode = function (a) {
+      const old = this.getAttributeNode(a.name)
+      const v = a.ownerElement && a.ownerElement !== this ? a.value : a._value
+      this.setAttribute(a.name, v == null ? '' : v)
+      a.ownerElement = this
+      return old
+    }
+    EP.setAttributeNodeNS = EP.setAttributeNode
+    EP.removeAttributeNode = function (a) { this.removeAttribute(a.name); a._value = a.value; a.ownerElement = null; return a }
+    const DP = Document.prototype
+    DP.createAttribute = function (n) { return new Attr(String(n).toLowerCase(), '', null) }
+    DP.createAttributeNS = function (_ns, n) { return new Attr(String(n), '', null) }
+  }
+
+  // ------------------------------------------------- interfaces, as in browsers
+  // Nodes are EventTargets; window, navigator, history, screen and location are
+  // instances of their interfaces, whose prototypes hold their members.
+  Object.setPrototypeOf(Node.prototype, EventTarget.prototype)
+  const iface = (name, obj, parent) => {
+    const C = function () { throw new TypeError('Illegal constructor') }
+    Object.defineProperty(C, 'name', { value: name })
+    const proto = Object.create(parent ? parent.prototype : Object.prototype)
+    Object.defineProperty(proto, 'constructor', { value: C, writable: true, configurable: true })
+    Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true })
+    C.prototype = proto
+    if (obj) {
+      // Methods move to the prototype; values stay on the object (they change).
+      for (const k of Object.getOwnPropertyNames(obj)) {
+        const d = Object.getOwnPropertyDescriptor(obj, k)
+        if (typeof d.value === 'function' || d.get || d.set) {
+          Object.defineProperty(proto, k, Object.assign(d, { configurable: true }))
+          delete obj[k]
+        }
+      }
+      Object.setPrototypeOf(obj, proto)
+    }
+    g[name] = C
+    return C
+  }
+  {
+    // navigator's fields are fixed: getters on Navigator.prototype, as in browsers.
+    const nav = g.navigator, fields = {}
+    for (const k of Object.keys(nav)) if (typeof nav[k] !== 'function') { fields[k] = nav[k]; delete nav[k] }
+    const Navigator = iface('Navigator', nav)
+    for (const k of Object.keys(fields)) Object.defineProperty(Navigator.prototype, k, { get() { return fields[k] }, configurable: true, enumerable: true })
+  }
+  iface('History', g.history)
+  iface('Screen', g.screen)
+  iface('Location', g.location)
+  iface('Window', null, EventTarget)
 })(window)

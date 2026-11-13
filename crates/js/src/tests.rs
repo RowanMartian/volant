@@ -464,3 +464,29 @@ fn async_ordering() {
         setTimeout(() => console.log(log.join()), 0);";
     assert_eq!(out(src), "a1,sync,p1,a2,p2,a3");
 }
+
+/// Scripts found on real sites by the compatibility survey (scripts/compat).
+#[test]
+fn syntax_from_real_sites() {
+    // A dot after a number's own dot is a property access.
+    assert_eq!(out("console.log(1..toString(), 1.5.toFixed(2), 0..constructor === Number, .5 + 1.e2)"), "1 1.50 true 100.5");
+    // Names with combining marks and other letters.
+    assert_eq!(out("var \u{2118} = 2, nukta\u{93c} = 3, br\u{115}ve = 4; console.log(\u{2118} + nukta\u{93c} + br\u{115}ve)"), "9");
+    // Old-style HTML comments around a script.
+    assert_eq!(out("<!-- hide\nconsole.log('in')\n--> shown"), "in");
+    // A regular expression after `for (…)`, `if (…)` and a function's `}`; division elsewhere.
+    let src = "
+        var n = 0, a = [' -: ', 'x'];
+        for (var i = 0; i < a.length; i++) /^ *-+: *$/.test(a[i]) ? n++ : n;
+        function yc(e) { return 1 }/[1-9]/.test('5') && n++;
+        if (n) /x/.test('x') && n++;
+        var o = { a: 4 }, h = 2;
+        console.log(n, o.a / h / 1, (8) / 2, [6][0] / 3, {}.x);
+    ";
+    assert_eq!(out(src), "3 2 4 2 undefined");
+    // `for (yield …;` in a generator, and assigning through super.
+    assert_eq!(out("function* g() { for (yield {s: 1}; false;) {} } console.log(g().next().value.s)"), "1");
+    assert_eq!(out("class A {} class B extends A { set(v) { super.speed = v; return this.speed } } console.log(new B().set(5))"), "5");
+    // A repeated lookahead.
+    assert_eq!(out("console.log(/((?=lg)?[vl]k-?\\d{3}) bui/i.exec('LK-123 build')[1])"), "LK-123");
+}

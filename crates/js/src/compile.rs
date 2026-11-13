@@ -2632,6 +2632,12 @@ impl Compiler {
 
     fn assign(&mut self, op: &str, target: &Expr, value: &Expr) -> R<()> {
         let logical = matches!(op, "&&=" | "||=" | "??=");
+        // `super.x = v` sets x on this object (the parent's prototype is only where reads look).
+        if let Expr::Member(o, k, opt) = target {
+            if matches!(&**o, Expr::Ident(s) if &**s == "super") {
+                return self.assign(op, &Expr::Member(Box::new(Expr::Ident("this".into())), k.clone(), *opt), value);
+            }
+        }
         match target {
             Expr::Ident(n) => {
                 if op == "=" {
@@ -2712,7 +2718,7 @@ impl Compiler {
                 self.emit(Op::Dup);
                 self.bind(target, false)
             }
-            _ => Err("invalid assignment target".into()),
+            t => Err(format!("invalid assignment target {}", format!("{t:?}").chars().take(120).collect::<String>())),
         }
     }
 }

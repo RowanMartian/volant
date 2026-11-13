@@ -17,17 +17,29 @@
 //!                                              (then JS, typing into the focused field, more JS)
 //!                                              (other files fetched with curl; console printed)
 //! volant-tools js FILE.js                      run a script with Volant's own JavaScript engine
+//! volant-tools survey SITES.txt OUT_DIR [--jobs N] [--only TEXT]
+//!                                              run each site through Simple Page's steps and
+//!                                              report what shows, what falls back, errors and timings
 //! ```
 
 mod site;
+mod survey;
 
 use std::path::{Path, PathBuf};
 use volant_core::{hash, macho, zip};
 
 /// The network for page scripts in previews: curl (where it's installed).
-struct CurlHost;
+pub(crate) struct CurlHost;
+
+/// The User-Agent sent with curl's requests (VOLANT_UA overrides it).
+pub(crate) fn user_agent() -> String {
+    std::env::var("VOLANT_UA").unwrap_or_else(|_| volant_engine::script::USER_AGENT.to_string())
+}
 
 impl volant_engine::script::Host for CurlHost {
+    fn background(&self) -> Option<volant_engine::script::Fetch> {
+        Some(std::sync::Arc::new(|url: &str, page: &str| volant_engine::script::Host::get_for(&CurlHost, url, page)))
+    }
     fn request(&self, req: &volant_engine::script::Request) -> Option<volant_engine::script::Reply> {
         use volant_engine::script::Reply;
         let (method, url) = (req.method, req.url);
@@ -55,7 +67,7 @@ impl volant_engine::script::Host for CurlHost {
             }
         }
         let mut cmd = std::process::Command::new("curl");
-        cmd.args(["-sL", "--max-time", "20", "-X", method, "-w", "\n%{http_code} %{content_type}", url]);
+        cmd.args(["-sL", "--compressed", "--max-time", "20", "-A", &user_agent(), "-X", method, "-w", "\n%{http_code} %{url_effective} %{content_type}", url]);
         for (k, v) in req.headers {
             cmd.args(["-H", &format!("{k}: {v}")]);
         }
@@ -73,7 +85,8 @@ impl volant_engine::script::Host for CurlHost {
         let nl = body.iter().rposition(|&b| b == b'\n')?;
         let tail = String::from_utf8_lossy(&body[nl + 1..]).to_string();
         body.truncate(nl);
-        let (code, ty) = tail.split_once(' ').unwrap_or((&tail, ""));
+        let (code, rest) = tail.split_once(' ').unwrap_or((&tail, ""));
+        let (final_url, ty) = rest.split_once(' ').unwrap_or((rest, ""));
         // VOLANT_DUMP=dir keeps a copy of everything fetched (for debugging pages).
         if let Ok(dir) = std::env::var("VOLANT_DUMP") {
             let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
@@ -85,12 +98,16 @@ impl volant_engine::script::Host for CurlHost {
             rec.extend_from_slice(&body);
             let _ = std::fs::write(c, rec);
         }
-        Some(Reply::ok(code.parse().ok()?, ty, body))
+        let mut reply = Reply::ok(code.parse().ok()?, ty, body);
+        if final_url != url {
+            reply.url = final_url.to_string();
+        }
+        Some(reply)
     }
 }
 
 /// For previews: every image is a 1200 x 800 photo (nothing is downloaded).
-struct PreviewImages;
+pub(crate) struct PreviewImages;
 
 impl volant_engine::Images for PreviewImages {
     fn size(&self, src: &str) -> Option<(f32, f32)> {
@@ -218,7 +235,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     // Linked style sheets, fetched too (unless given with --css).
                     if !args.iter().any(|a| a == "--css") {
                         for (href, media) in script::stylesheet_links(&snap.dom, &snap.url) {
-                            if let Some(r) = host.get(&href).filter(|r| r.success()) {
+                            if let Some(r) = rt.host().get_for(&href, &snap.url).filter(|r| r.success()) {
                                 let text = String::from_utf8_lossy(&r.body).into_owned();
                                 sheets.push(if media.is_empty() || media == "all" { text } else { format!("@media {media} {{\n{text}\n}}") });
                             }
@@ -233,6 +250,8 @@ fn run(args: &[String]) -> Result<(), String> {
             write(out, volant_engine::svg::to_svg(&page).as_bytes())?;
             println!("{out}: {} x {} px, {} items, {} links, laid out in {:.1} ms", page.width, page.height.ceil(), page.items.len(), page.links.len(), took.as_secs_f64() * 1000.0);
         }
+        "survey" => survey::run(&args[1..])?,
+        "survey-one" => survey::one(arg(1)?),
         other => return Err(format!("unknown command {other:?}; see the top of crates/tools/src/main.rs")),
     }
     Ok(())

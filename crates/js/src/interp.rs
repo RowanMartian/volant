@@ -465,7 +465,7 @@ impl Interp {
     pub fn stack_trace(&self) -> String {
         let mut out = String::new();
         for (n, line) in self.call_names.iter().rev().take(10) {
-            out.push_str(&format!("    at {} (line {line})\n", n.as_deref().unwrap_or("<anonymous>")));
+            out.push_str(&format!("    at {} ({})\n", n.as_deref().unwrap_or("<anonymous>"), crate::parse::Where::unpack(*line)));
         }
         out
     }
@@ -941,7 +941,7 @@ impl Interp {
     pub(crate) fn recursion_error(&self) -> Value {
         let mut names: Vec<String> = Vec::new();
         for (n, line) in self.call_names.iter().rev().take(12) {
-            names.push(format!("{}:{line}", n.as_deref().unwrap_or("function")));
+            names.push(format!("{} {}", n.as_deref().unwrap_or("function"), crate::parse::Where::unpack(*line)));
         }
         self.error("RangeError", &format!("too much recursion (in {})", names.join(" ← ")))
     }

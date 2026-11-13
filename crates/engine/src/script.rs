@@ -88,6 +88,145 @@ pub trait Host {
     fn set_cookie(&self, _url: &str, _cookie: &str) -> bool {
         false
     }
+    /// A way to GET a page's files (`url`, for `page`) on other threads, so they
+    /// can all be on their way at once; None if the host can't.
+    fn background(&self) -> Option<Fetch> {
+        None
+    }
+}
+
+/// GETs `url` for `page` from any thread (see [`Host::background`]).
+pub type Fetch = std::sync::Arc<dyn Fn(&str, &str) -> Option<Reply> + Send + Sync>;
+
+/// How many of a page's files are fetched at once.
+const PRELOAD_THREADS: usize = 6;
+
+/// A page's scripts and style sheets, fetched ahead and in parallel as soon as
+/// the page is parsed (they still run in order; only the waiting overlaps).
+#[derive(Default)]
+pub struct Preload {
+    /// By URL: None while on its way, then the reply (None if it failed).
+    slots: std::sync::Mutex<HashMap<String, Option<Option<Reply>>>>,
+    ready: std::sync::Condvar,
+    /// Milliseconds the page spent waiting for preloaded files.
+    waited: std::sync::Mutex<f64>,
+}
+
+impl Preload {
+    fn start(self: &std::sync::Arc<Self>, urls: Vec<String>, page: &str, fetch: Fetch) {
+        let mut queue = std::collections::VecDeque::new();
+        {
+            let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            for u in urls {
+                if !slots.contains_key(&u) {
+                    slots.insert(u.clone(), None);
+                    queue.push_back(u);
+                }
+            }
+        }
+        let n = queue.len().min(PRELOAD_THREADS);
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+        let mut started = 0;
+        for _ in 0..n {
+            let (me, queue, fetch, page) = (self.clone(), queue.clone(), fetch.clone(), page.to_string());
+            let spawned = std::thread::Builder::new().name("volant-preload".into()).spawn(move || loop {
+                let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                let Some(url) = next else { break };
+                let reply = fetch(&url, &page);
+                if let Some(slot) = me.slots.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&url) {
+                    *slot = Some(reply);
+                }
+                me.ready.notify_all();
+            });
+            if spawned.is_ok() {
+                started += 1;
+            }
+        }
+        if started == 0 {
+            // No thread to fetch them: the page asks for each itself.
+            let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            for u in queue.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+                slots.remove(&u);
+            }
+        }
+    }
+
+    /// The preloaded reply for `url` (waiting if it's on its way); None if it wasn't preloaded.
+    fn take(&self, url: &str) -> Option<Option<Reply>> {
+        let started = std::time::Instant::now();
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match slots.get(url) {
+                None => return None,
+                Some(Some(_)) => {
+                    *self.waited.lock().unwrap_or_else(|e| e.into_inner()) += started.elapsed().as_secs_f64() * 1000.0;
+                    return slots.remove(url).flatten();
+                }
+                Some(None) if started.elapsed() > std::time::Duration::from_secs(60) => {
+                    slots.remove(url);
+                    return None;
+                }
+                Some(None) => {
+                    slots = self.ready.wait_timeout(slots, std::time::Duration::from_secs(1)).map(|r| r.0).unwrap_or_else(|e| e.into_inner().0);
+                }
+            }
+        }
+    }
+}
+
+/// The host as the page sees it: preloaded files come from the preload.
+struct Preloading {
+    inner: Rc<dyn Host>,
+    preload: std::sync::Arc<Preload>,
+}
+
+impl Host for Preloading {
+    fn request(&self, req: &Request) -> Option<Reply> {
+        if req.method == "GET" && req.body.is_none() {
+            if let Some(r) = self.preload.take(req.url) {
+                return r;
+            }
+        }
+        self.inner.request(req)
+    }
+    fn cookie(&self, url: &str) -> Option<String> {
+        self.inner.cookie(url)
+    }
+    fn set_cookie(&self, url: &str, cookie: &str) -> bool {
+        self.inner.set_cookie(url, cookie)
+    }
+    fn background(&self) -> Option<Fetch> {
+        self.inner.background()
+    }
+}
+
+/// The files a document will ask for first: its scripts, style sheets and preloads, in order.
+fn subresources(dom: &Dom, base: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in descendants(dom, ROOT) {
+        match dom.tag(id) {
+            Some("script") if is_js(dom, id) => {
+                if let Some(src) = dom.attr(id, "src").filter(|s| !s.trim().is_empty()) {
+                    out.push(resolve_url(base, src));
+                }
+            }
+            Some("link") => {
+                let rel = dom.attr(id, "rel").unwrap_or("").to_ascii_lowercase();
+                let kind = dom.attr(id, "as").unwrap_or("").to_ascii_lowercase();
+                let wanted = rel.split_whitespace().any(|r| r == "stylesheet" || r == "modulepreload") || (rel.split_whitespace().any(|r| r == "preload") && (kind == "script" || kind == "style"));
+                if let Some(href) = dom.attr(id, "href").filter(|h| wanted && !h.trim().is_empty()) {
+                    if !rel.contains("alternate") {
+                        out.push(resolve_url(base, href));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.retain(|u| u.starts_with("http://") || u.starts_with("https://"));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|u| seen.insert(u.clone()));
+    out
 }
 
 /// One recorded canvas operation (see the context in `prelude.js`).
@@ -266,9 +405,12 @@ struct Listener {
 
 struct Protos {
     node: Obj,
-    element: Obj,
+    /// HTMLElement.prototype (under Element's), and each element interface's own
+    /// prototype by tag (HTMLScriptElement.prototype for `script`, …).
+    html_element: Obj,
+    by_tag: HashMap<&'static str, Obj>,
+    html_document: Obj,
     text: Obj,
-    document: Obj,
     class_list: Obj,
     style: Obj,
     event: Obj,
@@ -725,10 +867,16 @@ pub fn node_of(v: &Value) -> Option<NodeId> {
     }
 }
 
-fn protos(st: &S) -> (Obj, Obj, Obj, Obj) {
+/// The prototype a node's wrapper starts with: its interface's, as in browsers.
+fn proto_for(st: &S, id: NodeId) -> Obj {
     let s = st.borrow();
     let p = s.protos.as_ref().expect("protos");
-    (p.node.clone(), p.element.clone(), p.text.clone(), p.document.clone())
+    match &s.dom.nodes[id as usize].data {
+        Data::Document => p.html_document.clone(),
+        Data::Text(_) => p.text.clone(),
+        Data::Element { name, .. } if name.starts_with('#') => p.node.clone(),
+        Data::Element { name, .. } => p.by_tag.get(&**name).unwrap_or(&p.html_element).clone(),
+    }
 }
 
 /// The wrapper object for a node (made on first use).
@@ -736,16 +884,7 @@ fn wrap(i: &Interp, st: &S, id: NodeId) -> Value {
     if let Some(v) = st.borrow().wrappers.get(&id) {
         return v.clone();
     }
-    let (node_p, element_p, text_p, document_p) = protos(st);
-    let proto = {
-        let s = st.borrow();
-        match &s.dom.nodes[id as usize].data {
-            Data::Document => document_p,
-            Data::Text(_) => text_p,
-            Data::Element { name, .. } if name.starts_with('#') => node_p,
-            Data::Element { .. } => element_p,
-        }
-    };
+    let proto = proto_for(st, id);
     let o = i.obj(Kind::Plain);
     if let Value::Obj(oo) = &o {
         oo.borrow_mut().proto = Some(proto);
@@ -911,9 +1050,12 @@ fn inline_handler(i: &mut Interp, st: &S, node: NodeId, ty: &str) -> Option<Valu
     let key = format!("on{ty}");
     let target = if node == WINDOW { Some(Value::Obj(i.global_obj.clone())) } else { st.borrow().wrappers.get(&node).cloned() };
     if let Some(Value::Obj(o)) = &target {
-        if let Some(Slot::Data(f)) = o.borrow().get_own(&key) {
-            if Interp::is_callable(f) {
-                return Some(f.clone());
+        let o = o.borrow();
+        for k in [key.clone(), format!("\0{key}")] {
+            if let Some(Slot::Data(f)) = o.get_own(&k) {
+                if Interp::is_callable(f) {
+                    return Some(f.clone());
+                }
             }
         }
     }
@@ -1643,11 +1785,43 @@ fn install(i: &mut Interp, st: &S) {
     let class_list = mk(i, Some(i.object_proto.clone()));
     let style_p = mk(i, Some(i.object_proto.clone()));
     let event = mk(i, Some(i.object_proto.clone()));
+    let html_element = mk(i, Some(element.clone()));
+    let html_document = mk(i, Some(document.clone()));
+    // Each element interface: (name, its tags, the interface it extends).
+    let mut by_tag: HashMap<&'static str, Obj> = HashMap::new();
+    let mut ifaces: Vec<(&'static str, Obj)> = Vec::new();
+    let media = mk(i, Some(html_element.clone()));
+    let svg = mk(i, Some(element.clone()));
+    let svg_graphics = mk(i, Some(svg.clone()));
+    let mathml = mk(i, Some(element.clone()));
+    let unknown = mk(i, Some(html_element.clone()));
+    ifaces.extend([("HTMLMediaElement", media.clone()), ("SVGElement", svg.clone()), ("SVGGraphicsElement", svg_graphics.clone()), ("MathMLElement", mathml.clone()), ("HTMLUnknownElement", unknown.clone())]);
+    for (name, tags, parent) in ELEMENT_INTERFACES {
+        let parent = match *parent {
+            "media" => &media,
+            "svg" => &svg,
+            "svg-graphics" => &svg_graphics,
+            "mathml" => &mathml,
+            _ => &html_element,
+        };
+        let proto = mk(i, Some(parent.clone()));
+        for t in tags.iter() {
+            by_tag.entry(t).or_insert_with(|| proto.clone());
+        }
+        ifaces.push((name, proto));
+    }
+    for t in ["math", "mi", "mo", "mn", "mrow", "msup", "msub", "mfrac", "msqrt", "mtext", "semantics", "annotation"] {
+        by_tag.insert(t, mathml.clone());
+    }
+    for t in ["blink", "marquee-unknown"] {
+        by_tag.insert(t, unknown.clone());
+    }
     st.borrow_mut().protos = Some(Protos {
+        html_element: html_element.clone(),
+        by_tag,
+        html_document: html_document.clone(),
         node: node.clone(),
-        element: element.clone(),
         text: text.clone(),
-        document: document.clone(),
         class_list: class_list.clone(),
         style: style_p.clone(),
         event: event.clone(),
@@ -1675,52 +1849,46 @@ fn install(i: &mut Interp, st: &S) {
         }
         node.borrow_mut().set_own(k, Value::Num(v));
     }
-    for name in ["HTMLElement", "HTMLUnknownElement"] {
-        i.global_obj.borrow_mut().set_own(name, element_ctor.clone());
+    let _ = element_ctor;
+    ctor(i, "HTMLElement", &html_element);
+    ctor(i, "HTMLDocument", &html_document);
+    for (name, proto) in &ifaces {
+        ctor(i, name, proto);
+        proto.borrow_mut().set_own("\0@toStringTag", str_val(name));
     }
-    // The specific element classes: Element's prototype, and instanceof checks the tag.
-    for (name, tags) in [
-        ("HTMLDivElement", &["div"][..]), ("HTMLSpanElement", &["span"]), ("HTMLAnchorElement", &["a"]), ("HTMLImageElement", &["img"]),
-        ("HTMLInputElement", &["input"]), ("HTMLButtonElement", &["button"]), ("HTMLFormElement", &["form"]), ("HTMLSelectElement", &["select"]),
-        ("HTMLOptionElement", &["option"]), ("HTMLTextAreaElement", &["textarea"]), ("HTMLCanvasElement", &["canvas"]), ("HTMLIFrameElement", &["iframe"]),
-        ("HTMLScriptElement", &["script"]), ("HTMLStyleElement", &["style"]), ("HTMLLinkElement", &["link"]), ("HTMLMetaElement", &["meta"]),
-        ("HTMLBodyElement", &["body"]), ("HTMLHeadElement", &["head"]), ("HTMLHtmlElement", &["html"]), ("HTMLParagraphElement", &["p"]),
-        ("HTMLHeadingElement", &["h1", "h2", "h3", "h4", "h5", "h6"]), ("HTMLUListElement", &["ul"]), ("HTMLOListElement", &["ol"]), ("HTMLLIElement", &["li"]),
-        ("HTMLTableElement", &["table"]), ("HTMLTableRowElement", &["tr"]), ("HTMLTableCellElement", &["td", "th"]), ("HTMLVideoElement", &["video"]),
-        ("HTMLAudioElement", &["audio"]), ("HTMLMediaElement", &["video", "audio"]), ("HTMLTemplateElement", &["template"]), ("HTMLLabelElement", &["label"]),
-        ("HTMLDetailsElement", &["details"]), ("HTMLDialogElement", &["dialog"]), ("HTMLPictureElement", &["picture"]), ("HTMLSourceElement", &["source"]),
-        ("HTMLBRElement", &["br"]), ("HTMLHRElement", &["hr"]), ("HTMLPreElement", &["pre"]), ("HTMLSlotElement", &["slot"]), ("HTMLObjectElement", &["object"]),
-        ("HTMLEmbedElement", &["embed"]), ("HTMLFieldSetElement", &["fieldset"]), ("HTMLLegendElement", &["legend"]), ("HTMLProgressElement", &["progress"]),
-        ("HTMLOutputElement", &["output"]), ("HTMLTimeElement", &["time"]), ("HTMLDataListElement", &["datalist"]), ("HTMLMapElement", &["map"]),
-        ("HTMLAreaElement", &["area"]), ("HTMLBaseElement", &["base"]), ("HTMLTitleElement", &["title"]), ("HTMLQuoteElement", &["blockquote", "q"]),
-        ("SVGElement", &["svg", "path", "g", "circle", "rect", "use", "symbol", "line", "polygon", "polyline", "ellipse", "text", "defs"]), ("SVGSVGElement", &["svg"]),
-        ("MathMLElement", &["math", "mi", "mo", "mn", "mrow", "msup", "msub", "mfrac", "msqrt", "mtext", "semantics", "annotation"]),
-    ] {
-        let tags: Vec<&'static str> = tags.to_vec();
-        let st2 = st.clone();
-        let check = i.native(move |_i, _t, a| {
-            let s = st2.borrow();
-            Ok(Value::Bool(node_of(&arg(&a, 0)).map(|n| s.dom.tag(n).map(|t| tags.contains(&t)).unwrap_or(false)).unwrap_or(false)))
-        });
-        let f = i.native(|i, _t, _a| i.throw("TypeError", "Illegal constructor"));
-        if let Value::Obj(fo) = &f {
-            let mut b = fo.borrow_mut();
-            b.set_own("prototype", Value::Obj(element.clone()));
-            b.set_own("name", str_val(name));
-            b.set_own("\0@hasInstance", check);
-        }
-        i.global_obj.borrow_mut().set_own(name, f);
-    }
-    for name in ["CharacterData", "Comment", "DocumentFragment", "ShadowRoot", "HTMLDocument"] {
+    for name in ["CharacterData", "Comment", "DocumentFragment", "ShadowRoot"] {
         let f = i.native(|i, _t, _a| i.throw("TypeError", "Illegal constructor"));
         if let Value::Obj(fo) = &f {
             fo.borrow_mut().set_own("prototype", Value::Obj(node.clone()));
+            fo.borrow_mut().set_own("name", str_val(name));
         }
         i.global_obj.borrow_mut().set_own(name, f);
     }
+    // Event handler properties (`el.onclick = f`), on HTMLElement's prototype as in browsers.
+    for ev in EVENT_HANDLERS {
+        let key = format!("\0on{ev}");
+        let k2 = key.clone();
+        let get = i.native(move |_i, t, _a| {
+            Ok(match &t {
+                Value::Obj(o) => match o.borrow().get_own(&k2) {
+                    Some(Slot::Data(v)) => v.clone(),
+                    _ => Value::Null,
+                },
+                _ => Value::Undefined,
+            })
+        });
+        let set = i.native(move |_i, t, a| {
+            if let Value::Obj(o) = &t {
+                let v = arg(&a, 0);
+                o.borrow_mut().set_own(&key, if Interp::is_callable(&v) { v } else { Value::Null });
+            }
+            Ok(Value::Undefined)
+        });
+        html_element.borrow_mut().set_slot(&format!("on{ev}"), Slot::Accessor(Some(get), Some(set)));
+    }
 
     // Object.prototype.toString tags (libraries tell plain objects from host objects by these).
-    for (o, tag) in [(&element, "HTMLElement"), (&text, "Text"), (&document, "HTMLDocument"), (&node, "Node"), (&event, "Event"), (&class_list, "DOMTokenList"), (&style_p, "CSSStyleDeclaration")] {
+    for (o, tag) in [(&element, "Element"), (&html_element, "HTMLElement"), (&text, "Text"), (&document, "Document"), (&html_document, "HTMLDocument"), (&node, "Node"), (&event, "Event"), (&class_list, "DOMTokenList"), (&style_p, "CSSStyleDeclaration")] {
         o.borrow_mut().set_own("\0@toStringTag", str_val(tag));
     }
     i.global_obj.borrow_mut().set_own("\0@toStringTag", str_val("Window"));
@@ -1756,7 +1924,8 @@ fn install(i: &mut Interp, st: &S) {
         let e = make_event(i, &st2, &ty, b, c);
         i.set(&e, "isTrusted", Value::Bool(false))?;
         if let Value::Obj(io) = &init {
-            for k in io.borrow().own_keys() {
+            let keys = io.borrow().own_keys();
+            for k in keys {
                 let v = i.get(&init, &k)?;
                 i.set(&e, &k, v)?;
             }
@@ -2071,7 +2240,8 @@ fn install(i: &mut Interp, st: &S) {
     });
     method(i, st, &node, "replaceChildren", |i, st, id, a| {
         let ns = to_nodes(i, st, &a)?;
-        for c in st.borrow().dom.children(id).to_vec() {
+        let old = st.borrow().dom.children(id).to_vec();
+        for c in old {
             detach(&mut st.borrow_mut().dom, c);
         }
         place(i, st, id, ns, None)
@@ -2598,7 +2768,8 @@ fn install(i: &mut Interp, st: &S) {
     let css_text_set = i.native(|i, t, a| {
         let text = i.to_str(&arg(&a, 0))?;
         if let Value::Obj(o) = &t {
-            for k in o.borrow().own_keys() {
+            let keys = o.borrow().own_keys();
+            for k in keys {
                 o.borrow_mut().delete(&k);
             }
             for d in css::parse_declarations(&text) {
@@ -3139,7 +3310,127 @@ fn install(i: &mut Interp, st: &S) {
         Ok(str_val(&computed(&st2, id, &prop)))
     });
     hook(i, "__computed", f);
+
+    // Members are defined once, on Element's and Node's prototypes; each
+    // interface's prototype also holds its own (the same functions), so code that
+    // reads or wraps `HTMLScriptElement.prototype.src` and the like finds them.
+    let own = |from: &[&Obj], to: &Obj, names: &[&str]| {
+        for n in names {
+            let slot = from.iter().find_map(|o| o.borrow().get_own(n).cloned());
+            if let Some(slot) = slot {
+                to.borrow_mut().set_slot(n, slot);
+            }
+        }
+    };
+    own(&[&element], &html_element, HTML_ELEMENT_MEMBERS);
+    for (name, members) in INTERFACE_MEMBERS {
+        let proto = ifaces.iter().find(|(n, _)| n == name).map(|(_, p)| p.clone());
+        if let Some(p) = proto {
+            own(&[&element, &html_element], &p, members);
+        }
+    }
+    own(&[&node, &element], &document, DOCUMENT_MEMBERS);
+    own(&[&node], &element, ELEMENT_MIXIN_MEMBERS);
 }
+
+/// What Element's prototype holds itself (the ParentNode and ChildNode members) rather than inheriting from Node.
+const ELEMENT_MIXIN_MEMBERS: &[&str] = &[
+    "after", "before", "remove", "replaceWith", "append", "prepend", "replaceChildren", "querySelector", "querySelectorAll", "children", "firstElementChild",
+    "lastElementChild", "childElementCount", "nextElementSibling", "previousElementSibling", "getElementsByTagName", "getElementsByClassName", "closest", "matches",
+];
+
+/// Element interfaces: (name, tags, what it extends: "html", "media", "svg", "svg-graphics").
+const ELEMENT_INTERFACES: &[(&str, &[&str], &str)] = &[
+    ("HTMLDivElement", &["div"], "html"), ("HTMLSpanElement", &["span"], "html"), ("HTMLAnchorElement", &["a"], "html"), ("HTMLImageElement", &["img"], "html"),
+    ("HTMLInputElement", &["input"], "html"), ("HTMLButtonElement", &["button"], "html"), ("HTMLFormElement", &["form"], "html"), ("HTMLSelectElement", &["select"], "html"),
+    ("HTMLOptionElement", &["option"], "html"), ("HTMLOptGroupElement", &["optgroup"], "html"), ("HTMLTextAreaElement", &["textarea"], "html"), ("HTMLCanvasElement", &["canvas"], "html"),
+    ("HTMLIFrameElement", &["iframe"], "html"), ("HTMLScriptElement", &["script"], "html"), ("HTMLStyleElement", &["style"], "html"), ("HTMLLinkElement", &["link"], "html"),
+    ("HTMLMetaElement", &["meta"], "html"), ("HTMLBodyElement", &["body"], "html"), ("HTMLHeadElement", &["head"], "html"), ("HTMLHtmlElement", &["html"], "html"),
+    ("HTMLParagraphElement", &["p"], "html"), ("HTMLHeadingElement", &["h1", "h2", "h3", "h4", "h5", "h6"], "html"), ("HTMLUListElement", &["ul"], "html"),
+    ("HTMLOListElement", &["ol"], "html"), ("HTMLLIElement", &["li"], "html"), ("HTMLDListElement", &["dl"], "html"), ("HTMLTableElement", &["table"], "html"),
+    ("HTMLTableSectionElement", &["thead", "tbody", "tfoot"], "html"), ("HTMLTableRowElement", &["tr"], "html"), ("HTMLTableCellElement", &["td", "th"], "html"),
+    ("HTMLTableCaptionElement", &["caption"], "html"), ("HTMLTableColElement", &["col", "colgroup"], "html"), ("HTMLVideoElement", &["video"], "media"),
+    ("HTMLAudioElement", &["audio"], "media"), ("HTMLTemplateElement", &["template"], "html"), ("HTMLLabelElement", &["label"], "html"),
+    ("HTMLDetailsElement", &["details"], "html"), ("HTMLDialogElement", &["dialog"], "html"), ("HTMLPictureElement", &["picture"], "html"),
+    ("HTMLSourceElement", &["source"], "html"), ("HTMLTrackElement", &["track"], "html"), ("HTMLBRElement", &["br"], "html"), ("HTMLHRElement", &["hr"], "html"),
+    ("HTMLPreElement", &["pre", "listing", "xmp"], "html"), ("HTMLSlotElement", &["slot"], "html"), ("HTMLObjectElement", &["object"], "html"),
+    ("HTMLEmbedElement", &["embed"], "html"), ("HTMLFieldSetElement", &["fieldset"], "html"), ("HTMLLegendElement", &["legend"], "html"),
+    ("HTMLProgressElement", &["progress"], "html"), ("HTMLMeterElement", &["meter"], "html"), ("HTMLOutputElement", &["output"], "html"),
+    ("HTMLTimeElement", &["time"], "html"), ("HTMLDataElement", &["data"], "html"), ("HTMLDataListElement", &["datalist"], "html"), ("HTMLMapElement", &["map"], "html"),
+    ("HTMLAreaElement", &["area"], "html"), ("HTMLBaseElement", &["base"], "html"), ("HTMLTitleElement", &["title"], "html"),
+    ("HTMLQuoteElement", &["blockquote", "q"], "html"), ("HTMLModElement", &["ins", "del"], "html"), ("HTMLMenuElement", &["menu"], "html"),
+    ("HTMLFormControlsCollection-unused", &[], "html"), ("HTMLNoScriptElement-unused", &[], "html"),
+    ("SVGSVGElement", &["svg"], "svg-graphics"), ("SVGPathElement", &["path"], "svg-graphics"), ("SVGGElement", &["g"], "svg-graphics"),
+    ("SVGCircleElement", &["circle"], "svg-graphics"), ("SVGRectElement", &["rect"], "svg-graphics"), ("SVGUseElement", &["use"], "svg-graphics"),
+    ("SVGLineElement", &["line"], "svg-graphics"), ("SVGPolygonElement", &["polygon"], "svg-graphics"), ("SVGPolylineElement", &["polyline"], "svg-graphics"),
+    ("SVGEllipseElement", &["ellipse"], "svg-graphics"), ("SVGTextElement", &["text"], "svg-graphics"), ("SVGImageElement", &["image"], "svg-graphics"),
+    ("SVGSymbolElement", &["symbol"], "svg"), ("SVGDefsElement", &["defs"], "svg-graphics"), ("SVGStopElement", &["stop"], "svg"),
+    ("SVGLinearGradientElement", &["lineargradient", "linearGradient"], "svg"), ("SVGRadialGradientElement", &["radialgradient", "radialGradient"], "svg"),
+    ("SVGClipPathElement", &["clippath", "clipPath"], "svg"), ("SVGMaskElement", &["mask"], "svg"), ("SVGTitleElement", &["title-svg-unused"], "svg"),
+];
+
+/// Events with an `on…` property on HTMLElement's prototype.
+const EVENT_HANDLERS: &[&str] = &[
+    "abort", "blur", "cancel", "change", "click", "close", "contextmenu", "dblclick", "drag", "dragend", "dragenter", "dragleave", "dragover", "dragstart", "drop",
+    "error", "focus", "focusin", "focusout", "input", "invalid", "keydown", "keypress", "keyup", "load", "mousedown", "mouseenter", "mouseleave", "mousemove",
+    "mouseout", "mouseover", "mouseup", "pointerdown", "pointermove", "pointerup", "pointercancel", "pointerover", "pointerout", "pointerenter", "pointerleave",
+    "reset", "resize", "scroll", "select", "submit", "toggle", "wheel", "touchstart", "touchmove", "touchend", "touchcancel", "animationend", "transitionend",
+    "loadstart", "loadeddata", "loadedmetadata", "canplay", "play", "pause", "ended", "timeupdate", "volumechange", "beforeinput", "copy", "cut", "paste",
+];
+
+/// What HTMLElement's prototype holds itself.
+const HTML_ELEMENT_MEMBERS: &[&str] = &[
+    "title", "lang", "dir", "hidden", "inert", "accessKey", "draggable", "spellcheck", "autocapitalize", "innerText", "outerText", "translate", "click", "focus",
+    "blur", "style", "dataset", "tabIndex", "offsetParent", "offsetTop", "offsetLeft", "offsetWidth", "offsetHeight", "contentEditable", "isContentEditable",
+    "enterKeyHint", "inputMode", "nonce", "popover", "showPopover", "hidePopover", "togglePopover", "attachInternals",
+];
+
+/// What each interface's prototype holds itself (those Volant has).
+const INTERFACE_MEMBERS: &[(&str, &[&str])] = &[
+    ("HTMLScriptElement", &["src", "type", "noModule", "async", "defer", "crossOrigin", "text", "integrity", "charset", "referrerPolicy"]),
+    ("HTMLImageElement", &["alt", "src", "srcset", "sizes", "crossOrigin", "useMap", "isMap", "width", "height", "naturalWidth", "naturalHeight", "complete", "currentSrc", "referrerPolicy", "decoding", "loading", "decode"]),
+    ("HTMLIFrameElement", &["src", "srcdoc", "name", "sandbox", "allow", "allowFullscreen", "width", "height", "referrerPolicy", "loading", "contentDocument", "contentWindow"]),
+    ("HTMLAnchorElement", &["target", "download", "ping", "rel", "relList", "hreflang", "type", "text", "referrerPolicy", "href", "origin", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search", "hash"]),
+    ("HTMLAreaElement", &["alt", "coords", "shape", "target", "download", "rel", "href"]),
+    ("HTMLLinkElement", &["href", "crossOrigin", "rel", "as", "relList", "media", "integrity", "hreflang", "type", "sizes", "referrerPolicy", "disabled", "sheet"]),
+    ("HTMLInputElement", &["accept", "alt", "autocomplete", "defaultChecked", "checked", "dirName", "disabled", "form", "files", "formAction", "height", "indeterminate", "list", "max", "maxLength", "min", "minLength", "multiple", "name", "pattern", "placeholder", "readOnly", "required", "size", "src", "step", "type", "defaultValue", "value", "valueAsDate", "valueAsNumber", "width", "select", "setSelectionRange", "selectionStart", "selectionEnd", "setRangeText", "checkValidity", "reportValidity", "setCustomValidity", "validity", "validationMessage", "willValidate", "labels", "stepUp", "stepDown", "showPicker"]),
+    ("HTMLTextAreaElement", &["autocomplete", "cols", "rows", "defaultValue", "value", "name", "placeholder", "readOnly", "required", "disabled", "maxLength", "minLength", "wrap", "form", "select", "selectionStart", "selectionEnd", "setSelectionRange", "setRangeText", "textLength", "checkValidity", "reportValidity", "setCustomValidity", "validity", "labels"]),
+    ("HTMLSelectElement", &["autocomplete", "disabled", "form", "multiple", "name", "required", "size", "type", "options", "length", "item", "namedItem", "add", "remove", "selectedOptions", "selectedIndex", "value", "checkValidity", "reportValidity", "setCustomValidity", "validity", "labels"]),
+    ("HTMLOptionElement", &["disabled", "form", "label", "defaultSelected", "selected", "value", "text", "index"]),
+    ("HTMLButtonElement", &["disabled", "form", "formAction", "name", "type", "value", "checkValidity", "reportValidity", "setCustomValidity", "validity", "labels"]),
+    ("HTMLFormElement", &["acceptCharset", "action", "autocomplete", "enctype", "encoding", "method", "name", "noValidate", "target", "rel", "elements", "length", "submit", "requestSubmit", "reset", "checkValidity", "reportValidity"]),
+    ("HTMLCanvasElement", &["width", "height", "getContext", "toDataURL", "toBlob"]),
+    ("HTMLMediaElement", &["src", "currentSrc", "crossOrigin", "preload", "autoplay", "loop", "controls", "muted", "defaultMuted", "volume", "paused", "play", "pause", "load", "currentTime", "duration", "ended", "readyState", "networkState", "canPlayType"]),
+    ("HTMLVideoElement", &["width", "height", "poster", "videoWidth", "videoHeight", "playsInline"]),
+    ("HTMLStyleElement", &["media", "type", "disabled", "sheet"]),
+    ("HTMLMetaElement", &["name", "content", "httpEquiv", "media"]),
+    ("HTMLTemplateElement", &["content"]),
+    ("HTMLDetailsElement", &["open", "name"]),
+    ("HTMLDialogElement", &["open", "returnValue", "show", "showModal", "close"]),
+    ("HTMLLabelElement", &["htmlFor", "control", "form"]),
+    ("HTMLBaseElement", &["href", "target"]),
+    ("HTMLSourceElement", &["src", "srcset", "sizes", "media", "type"]),
+    ("HTMLTableCellElement", &["colSpan", "rowSpan", "headers", "cellIndex"]),
+    ("HTMLTableRowElement", &["cells", "rowIndex", "insertCell", "deleteCell"]),
+    ("HTMLTableElement", &["caption", "tHead", "tFoot", "tBodies", "rows", "insertRow", "deleteRow", "createTHead"]),
+    ("HTMLOListElement", &["start", "reversed", "type"]),
+    ("HTMLLIElement", &["value"]),
+    ("HTMLProgressElement", &["value", "max", "position", "labels"]),
+    ("HTMLOutputElement", &["value", "name", "form"]),
+    ("HTMLTimeElement", &["dateTime"]),
+    ("HTMLSlotElement", &["name", "assignedNodes", "assignedElements"]),
+    ("HTMLObjectElement", &["data", "type", "name", "width", "height"]),
+    ("HTMLEmbedElement", &["src", "type", "width", "height"]),
+    ("HTMLTitleElement", &["text"]),
+    ("HTMLQuoteElement", &["cite"]),
+];
+
+/// What Document's prototype holds itself rather than inheriting from Node.
+const DOCUMENT_MEMBERS: &[&str] = &[
+    "append", "prepend", "replaceChildren", "querySelector", "querySelectorAll", "getElementsByTagName", "getElementsByTagNameNS", "getElementsByClassName",
+    "getElementById", "children", "firstElementChild", "lastElementChild", "childElementCount", "createElement", "createElementNS", "createTextNode",
+    "createComment", "createDocumentFragment", "createEvent", "importNode", "adoptNode",
+];
 
 /// insertAdjacent*: beforebegin, afterbegin, beforeend, afterend.
 fn adjacent(dom: &mut Dom, id: NodeId, pos: &str, n: NodeId) {
@@ -3217,6 +3508,9 @@ pub struct Snapshot {
 /// Does this page look like it came out right in Simple Page? `None` if so,
 /// otherwise why not: the reasons a browser should hand the page to WebKit.
 /// `errors` is how many uncaught script errors the page had.
+/// The User-Agent pages see, in requests and as `navigator.userAgent` (prelude.js says the same).
+pub const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15 Volant/1.0";
+
 pub fn assess(snap: &Snapshot, errors: usize) -> Option<&'static str> {
     fn walk(dom: &Dom, id: NodeId, text: &mut usize, scripts: &mut usize, media: &mut usize, frameset: &mut bool) {
         match dom.tag(id) {
@@ -3255,6 +3549,7 @@ pub struct Runtime {
     pub interp: Interp,
     pub state: S,
     started: std::time::Instant,
+    preload: std::sync::Arc<Preload>,
 }
 
 const PRELUDE: &str = include_str!("prelude.js");
@@ -3264,6 +3559,12 @@ impl Runtime {
     pub fn new(html: &str, url: &str, env: Env, host: Rc<dyn Host>) -> Runtime {
         let mut dom = html::parse_with_scripts(html);
         ensure_structure(&mut dom);
+        // Everything the page will need first starts on its way now, all at once.
+        let preload = std::sync::Arc::new(Preload::default());
+        if let Some(fetch) = host.background() {
+            preload.start(subresources(&dom, url), url, fetch);
+        }
+        let host: Rc<dyn Host> = Rc::new(Preloading { inner: host, preload: preload.clone() });
         let state = Rc::new(RefCell::new(State {
             dom,
             url: url.to_string(),
@@ -3301,7 +3602,17 @@ impl Runtime {
         if let Err(e) = interp.run(PRELUDE) {
             interp.errors.push(format!("prelude: {e}"));
         }
-        Runtime { interp, state, started: std::time::Instant::now() }
+        Runtime { interp, state, started: std::time::Instant::now(), preload }
+    }
+
+    /// The page's network (preloaded files come from the preload), for its style sheets and the like.
+    pub fn host(&self) -> Rc<dyn Host> {
+        self.state.borrow().host.clone()
+    }
+
+    /// Milliseconds the page has spent waiting for preloaded files.
+    pub fn preload_waited(&self) -> f64 {
+        *self.preload.waited.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The document's scripts, in the order they run (deferred ones last).

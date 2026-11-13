@@ -143,7 +143,7 @@ struct Session {
 struct NetHost;
 
 /// What Volant's engine says it is to web servers (so they send their ordinary pages).
-const PAGE_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15 Volant/1.0";
+const PAGE_UA: &str = script::USER_AGENT;
 
 impl script::Host for NetHost {
     fn request(&self, req: &script::Request) -> Option<script::Reply> {
@@ -173,6 +173,9 @@ impl script::Host for NetHost {
         let u = volant_core::http::Url::parse(url)?;
         let jar = super::net::cookie_jar()?;
         Some(jar.lock().map(|mut j| j.header(&u, volant_core::cookies::now(), true)).unwrap_or_default())
+    }
+    fn background(&self) -> Option<script::Fetch> {
+        Some(std::sync::Arc::new(|url: &str, page: &str| script::Host::get_for(&NetHost, url, page)))
     }
     fn set_cookie(&self, url: &str, cookie: &str) -> bool {
         let (Some(u), Some(jar)) = (volant_core::http::Url::parse(url), super::net::cookie_jar()) else { return false };
@@ -1290,7 +1293,15 @@ fn start_session(e: &mut Inner, tab: TabId, nav: Navigation, width: f32, dark: b
     let spawned = std::thread::Builder::new()
         .name("volant-page".into())
         .stack_size(script::STACK)
-        .spawn(move || run_session(serial, tab, nav, width, dark, judge, rx));
+        .spawn(move || {
+            // A bug in Volant's engine ends this page's session, not the browser: WebKit takes the page.
+            let url = nav.url.clone();
+            let run = std::panic::AssertUnwindSafe(move || run_session(serial, tab, nav, width, dark, judge, rx));
+            if std::panic::catch_unwind(run).is_err() {
+                eprintln!("engine: Simple Page stopped on {url}; WebKit shows it");
+                super::on_main(move || with(move |b| fall_back(b, serial, url, true)));
+            }
+        });
     if spawned.is_err() {
         e.session = None;
         e.loading = false;
@@ -1360,7 +1371,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
             let text = match sheets.iter().find(|(h, _)| *h == href) {
                 Some((_, t)) => t.clone(),
                 None => {
-                    let t = match script::Host::get_for(&NetHost, &href, &snap.url) {
+                    let t = match rt.host().get_for(&href, &snap.url) {
                         Some(r) if r.success() => String::from_utf8_lossy(&r.body).into_owned(),
                         _ => String::new(),
                     };

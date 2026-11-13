@@ -153,6 +153,8 @@ pub(crate) fn lazy_function_prop(i: &Interp, o: &Obj, k: &str) -> Option<Value> 
     }
     let (name, nparams, wants_proto) = match &o.borrow().kind {
         Kind::Function(Callable::Closure(c)) => (c.code.name.clone(), c.code.nparams, !c.code.arrow && !c.code.method),
+        // Built-in functions: a length (their arity isn't recorded) and an empty name if they have none.
+        Kind::Function(Callable::Native(_)) if k != "prototype" => (Some("".into()), 0, false),
         _ => return None,
     };
     let v = match k {

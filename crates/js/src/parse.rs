@@ -57,6 +57,11 @@ impl Lexer<'_> {
         let mut out: Vec<Token> = Vec::new();
         let mut nl = false;
         let mut braces = 0u32;
+        // For telling a regular expression from a division after `)` and `}`:
+        // does each open `(` follow if/for/while/with, and does each `{` open a block?
+        let mut parens: Vec<bool> = Vec::new();
+        let mut blocks: Vec<bool> = Vec::new();
+        let mut slash_starts_regex = false;
         while self.i < s.len() {
             let c = s[self.i];
             if c == '\n' || c == '\u{2028}' || c == '\u{2029}' {
@@ -69,7 +74,9 @@ impl Lexer<'_> {
                 self.i += 1;
                 continue;
             }
-            if c == '/' && s.get(self.i + 1) == Some(&'/') {
+            let html_open = c == '<' && s.get(self.i + 1..self.i + 4) == Some(&['!', '-', '-'][..]);
+            let html_close = c == '-' && (nl || out.is_empty()) && s.get(self.i + 1..self.i + 3) == Some(&['-', '>'][..]);
+            if (c == '/' && s.get(self.i + 1) == Some(&'/')) || (!nested && (html_open || html_close)) {
                 while self.i < s.len() && s[self.i] != '\n' {
                     self.i += 1;
                 }
@@ -98,7 +105,20 @@ impl Lexer<'_> {
                 braces -= 1;
             }
             let (line, at) = (self.line, self.i as u32);
-            let tok = self.token(out.last().map(|t| &t.tok))?;
+            let prev = out.last().map(|t| &t.tok);
+            let tok = self.token(prev, slash_starts_regex)?;
+            slash_starts_regex = false;
+            match &tok {
+                Tok::Punct("(") => parens.push(matches!(prev, Some(Tok::Ident(w)) if matches!(w.as_str(), "if" | "for" | "while" | "with"))),
+                Tok::Punct(")") => slash_starts_regex = parens.pop().unwrap_or(false),
+                Tok::Punct("{") => blocks.push(match prev {
+                    None | Some(Tok::Punct(";" | "{" | "}" | ")" | "=>")) => true,
+                    Some(Tok::Ident(w)) => matches!(w.as_str(), "else" | "do" | "try" | "finally"),
+                    _ => false,
+                }),
+                Tok::Punct("}") => slash_starts_regex = blocks.pop().unwrap_or(true),
+                _ => {}
+            }
             out.push(Token { tok, nl, line, at });
             nl = false;
         }
@@ -110,7 +130,7 @@ impl Lexer<'_> {
     }
 
     /// The token at `i` (not whitespace or a comment).
-    fn token(&mut self, prev: Option<&Tok>) -> Result<Tok, String> {
+    fn token(&mut self, prev: Option<&Tok>, slash_starts_regex: bool) -> Result<Tok, String> {
         let s = self.s;
         let c = s[self.i];
         if c.is_ascii_digit() || (c == '.' && s.get(self.i + 1).map(|d| d.is_ascii_digit()).unwrap_or(false)) {
@@ -162,14 +182,14 @@ impl Lexer<'_> {
             self.i += 1;
             return Ok(Tok::Template(strs, exprs));
         }
-        let private = c == '#' && s.get(self.i + 1).map(|d| d.is_alphabetic() || *d == '_' || *d == '$').unwrap_or(false);
-        if c.is_alphabetic() || c == '_' || c == '$' || private || c == '\\' {
+        let private = c == '#' && s.get(self.i + 1).map(|&d| id_part(d) && !d.is_ascii_digit()).unwrap_or(false);
+        if (id_part(c) && !c.is_ascii_digit()) || private || c == '\\' {
             let mut name = String::new();
             if private {
                 name.push('#');
                 self.i += 1;
             }
-            while self.i < s.len() && (s[self.i].is_alphanumeric() || s[self.i] == '_' || s[self.i] == '$' || s[self.i] == '\\' || s[self.i] == '\u{200c}' || s[self.i] == '\u{200d}') {
+            while self.i < s.len() && (id_part(s[self.i]) || s[self.i] == '\\') {
                 if s[self.i] == '\\' {
                     // A \u escape in a name.
                     self.i += 1;
@@ -181,7 +201,7 @@ impl Lexer<'_> {
             }
             return Ok(Tok::Ident(name));
         }
-        if c == '/' && regex_allowed(prev) {
+        if c == '/' && (slash_starts_regex || regex_allowed(prev)) {
             let mut j = self.i + 1;
             let mut class = false;
             while j < s.len() {
@@ -253,8 +273,17 @@ impl Lexer<'_> {
                 Err(_) => self.err("bad number"),
             };
         }
-        while self.i < s.len() && (s[self.i].is_ascii_digit() || s[self.i] == '.' || s[self.i] == '_') {
+        // Digits, then at most one '.' and its digits: in `1..toString()` and
+        // `1.5.toFixed()` the second dot is a property access.
+        let digits = |i: &mut usize| {
+            while *i < s.len() && (s[*i].is_ascii_digit() || s[*i] == '_') {
+                *i += 1;
+            }
+        };
+        digits(&mut self.i);
+        if s.get(self.i) == Some(&'.') {
             self.i += 1;
+            digits(&mut self.i);
         }
         if self.i < s.len() && (s[self.i] == 'e' || s[self.i] == 'E') {
             self.i += 1;
@@ -273,6 +302,23 @@ impl Lexer<'_> {
             Ok(n) => Ok(Tok::Num(n)),
             Err(_) => self.err(&format!("bad number {text}")),
         }
+    }
+}
+
+/// Can this character be part of a name? Outside strings and comments, the
+/// only non-ASCII characters in working scripts are in names (letters,
+/// combining marks, `℘`), so anything that isn't a space or punctuation is.
+fn id_part(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    }
+    if c.is_whitespace() || c == '\u{feff}' {
+        return false;
+    }
+    match c as u32 {
+        0x200C | 0x200D | 0x203F | 0x2040 | 0xAA | 0xB5 | 0xB7 | 0xBA => true,
+        0xA0..=0xBF | 0xD7 | 0xF7 | 0x2000..=0x206F | 0x2190..=0x23FF | 0x2500..=0x27BF | 0x2E00..=0x2E7F | 0x3000..=0x3003 | 0x3008..=0x3020 | 0xFF01..=0xFF0F => false,
+        _ => true,
     }
 }
 
@@ -411,7 +457,7 @@ pub struct Func {
     pub is_async: bool,
     /// `function*`
     pub is_gen: bool,
-    /// Where it starts in the source (for error messages).
+    /// Where it starts in the source, for error messages (see [`Where::packed`]).
     pub line: u32,
 }
 
@@ -484,10 +530,32 @@ type R<T> = Result<T, String>;
 #[derive(Clone, Copy)]
 pub struct Where(pub u32, pub u32);
 
+impl Where {
+    /// One number for a place: the line, or in a minified script (a few very
+    /// long lines) the character in the file, marked by the top bit.
+    pub fn packed(&self) -> u32 {
+        if self.1 > 2000 {
+            0x8000_0000 | self.1.min(0x7fff_ffff)
+        } else {
+            self.0
+        }
+    }
+
+    /// A packed place, for people: "line 12" or "char 120034".
+    pub fn unpack(p: u32) -> String {
+        if p & 0x8000_0000 != 0 {
+            format!("char {}", p & 0x7fff_ffff)
+        } else {
+            format!("line {p}")
+        }
+    }
+}
+
 impl std::fmt::Display for Where {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0 == 1 && self.1 > 200 {
-            write!(f, "1, char {}", self.1)
+        // Minified scripts are a few very long lines: give the place in the file too.
+        if self.1 > 2000 {
+            write!(f, "{}, char {}", self.0, self.1)
         } else {
             write!(f, "{}", self.0)
         }
@@ -1028,6 +1096,9 @@ impl Parser {
                     decls.push((t, i));
                 }
                 init = Some(Box::new(Stmt::Var(kind, decls)));
+            } else if self.is_word("yield") {
+                // `for (yield x; …)` in a generator.
+                init = Some(Box::new(Stmt::Expr(self.expr()?)));
             } else {
                 let e = self.unary_and_postfix()?;
                 if self.is_word("of") || self.is_word("in") {
@@ -1054,7 +1125,7 @@ impl Parser {
     fn func_rest(&mut self, name: Option<Rc<str>>) -> R<Rc<Func>> {
         let (is_async, is_gen) = (std::mem::take(&mut self.next_async), std::mem::take(&mut self.next_gen));
         let outer = std::mem::replace(&mut self.in_gen, is_gen);
-        let line = self.line().0;
+        let line = self.line().packed();
         let r = (|| {
             self.expect("(")?;
             let params = self.params()?;
@@ -1269,7 +1340,7 @@ impl Parser {
     fn arrow_body(&mut self, params: Vec<Expr>) -> R<Expr> {
         let is_async = std::mem::take(&mut self.next_async);
         let outer = std::mem::replace(&mut self.in_gen, false);
-        let line = self.line().0;
+        let line = self.line().packed();
         let r = (|| {
             if self.is("{") {
                 let body = self.block()?;

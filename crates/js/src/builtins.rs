@@ -579,11 +579,25 @@ pub fn install(i: &mut Interp) {
     def(i, &fp, "bind", |i, t, a| {
         let (f, this) = (t, arg(&a, 0));
         let bound: Vec<Value> = a.into_iter().skip(1).collect();
-        Ok(i.native(move |i, _t, more| {
+        let name = match i.get(&f, "name")? {
+            Value::Str(s) => format!("bound {s}"),
+            _ => "bound ".into(),
+        };
+        let length = match i.get(&f, "length")? {
+            Value::Num(n) => (n - bound.len() as f64).max(0.0),
+            _ => 0.0,
+        };
+        let g = i.native(move |i, _t, more| {
             let mut all = bound.clone();
             all.extend(more);
             i.call(&f, this.clone(), all)
-        }))
+        });
+        if let Value::Obj(o) = &g {
+            let mut b = o.borrow_mut();
+            b.set_hidden("name", Value::Str(name.into()));
+            b.set_hidden("length", Value::Num(length));
+        }
+        Ok(g)
     });
     def(i, &fp, "toString", |i, t, _a| {
         let n = i.get(&t, "name")?;

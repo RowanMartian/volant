@@ -12,5 +12,6 @@ repository = "https://github.com/RowanMartian/volant"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Unwind, so a bug in the page engine ends that page's session instead of the browser.
+panic = "unwind"
 strip = true
