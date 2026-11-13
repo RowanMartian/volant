@@ -336,12 +336,12 @@
     return [String(b), 'text/plain;charset=UTF-8']
   }
   // Volant's request: [status, contentType, text, finalUrl, headers] or null.
-  const send = (method, url, headers, body) => {
+  const send = (method, url, headers, body, credentials, mode) => {
     const [text, type] = encodeBody(body)
     const h = []
     headers.forEach((v, k) => h.push([k, v]))
     if (type && !headers.has('content-type')) h.push(['content-type', type])
-    return __fetch(method, url, text, h)
+    return __fetch(method, url, text, h, credentials || 'same-origin', mode || 'cors')
   }
   const parseHeaders = raw => {
     const h = new Headers()
@@ -358,9 +358,13 @@
     const method = (init.method || (req && req.method) || 'GET').toUpperCase()
     if (init.signal && init.signal.aborted) return Promise.reject(init.signal.reason)
     const headers = new Headers(init.headers || (req && req.headers))
-    const r = send(method, url, headers, init.body !== undefined ? init.body : req && req.body)
+    const credentials = init.credentials || (req && req.credentials) || 'same-origin'
+    const mode = init.mode || (req && req.mode) || 'cors'
+    const r = send(method, url, headers, init.body !== undefined ? init.body : req && req.body, credentials, mode)
     if (!r) return Promise.reject(new TypeError('Failed to fetch'))
     const res = new Response(r[2], { status: r[0], headers: parseHeaders(r[4]), url: r[3] })
+    if (r[0] === 0) { res.type = 'opaque'; res.url = ''; return Promise.resolve(res) }
+    if (__origin(r[3]) !== __origin(location.href)) res.type = 'cors'
     if (!res.headers.has('content-type') && r[1]) res.headers.set('content-type', r[1])
     res.redirected = r[3] !== __resolve(url)
     return Promise.resolve(res)
@@ -381,7 +385,7 @@
     getAllResponseHeaders() { let out = ''; if (this._res) this._res.forEach((v, k) => { out += k + ': ' + v + '\r\n' }); return out }
     abort() { this._aborted = true }
     send(body) {
-      const r = send(this._method || 'GET', this._url, this._headers || new Headers(), body)
+      const r = send(this._method || 'GET', this._url, this._headers || new Headers(), body, this.withCredentials ? 'include' : 'same-origin', 'cors')
       setTimeout(() => {
         if (this._aborted) return
         if (!r) {

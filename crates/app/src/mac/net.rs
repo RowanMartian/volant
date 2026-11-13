@@ -243,6 +243,11 @@ pub fn send(url: &str, opts: &Options) -> Result<Response, String> {
     http::send(&NwTransport, url, opts, cookie_jar().map(|j| j as &dyn http::CookieStore))
 }
 
+/// [`send`] without cookies: none go, none are kept (a cross-origin `fetch` without credentials).
+pub fn send_anonymous(url: &str, opts: &Options) -> Result<Response, String> {
+    http::send(&NwTransport, url, opts, None)
+}
+
 /// Options with Volant's User-Agent (GitHub's API requires one).
 pub fn options() -> Options {
     Options { user_agent: format!("Volant/{}", super::VERSION), ..Default::default() }

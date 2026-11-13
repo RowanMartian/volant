@@ -18,6 +18,26 @@ impl Host for FakeHost {
                 r.headers = vec![("x-answer".into(), "42".into()), ("set-cookie".into(), "hidden=1".into())];
                 Some(r)
             }
+            // Another origin: open to all, closed, open with credentials, and one that needs a preflight.
+            u if u.starts_with("https://api.other.com/") => {
+                let path = &u["https://api.other.com".len()..];
+                let origin = req.headers.iter().find(|(k, _)| k == "Origin").map(|(_, v)| v.clone()).unwrap_or_default();
+                let token = req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-token"));
+                let mut r = Reply::ok(200, "text/plain", format!("{} {path} creds={} origin={origin} token={token}", req.method, req.credentials).into_bytes());
+                let mut h = vec![("x-secret".to_string(), "s".to_string()), ("x-shown".to_string(), "v".to_string())];
+                match path {
+                    "/open" => h.extend([("access-control-allow-origin".into(), "*".into()), ("access-control-expose-headers".into(), "x-shown".into())]),
+                    "/creds" => h.extend([("access-control-allow-origin".into(), "https://example.com".into()), ("access-control-allow-credentials".into(), "true".into())]),
+                    "/put" if req.method == "OPTIONS" => {
+                        h.extend([("access-control-allow-origin".into(), "https://example.com".into()), ("access-control-allow-methods".into(), "PUT".into()), ("access-control-allow-headers".into(), "x-token".into())]);
+                        r.body.clear();
+                    }
+                    "/put" => h.push(("access-control-allow-origin".into(), "https://example.com".into())),
+                    _ => {}
+                }
+                r.headers = h;
+                Some(r)
+            }
             _ => None,
         }
     }
@@ -423,4 +443,39 @@ fn assess_finds_pages_simple_page_cannot_show() {
     assert!(check("<video src=a.mp4></video>", 0).is_some());
     assert!(check("<p>Loading</p><script></script>", 4).is_some());
     assert_eq!(check(&article, 4), None);
+}
+
+#[test]
+fn same_origin_policy_and_cors() {
+    let mut rt = page(
+        "<script>
+           const log = (k, p) => p.then(r => r.text().then(t => console.log(k, r.status, r.type, t, r.headers.get('x-secret'), r.headers.get('x-shown'))), e => console.log(k, 'refused'));
+           log('open', fetch('https://api.other.com/open'));
+           log('closed', fetch('https://api.other.com/closed'));
+           log('creds', fetch('https://api.other.com/creds', { credentials: 'include' }));
+           log('nocreds', fetch('https://api.other.com/creds'));
+           log('put', fetch('https://api.other.com/put', { method: 'PUT', headers: { 'X-Token': '1' } }));
+           log('del', fetch('https://api.other.com/open', { method: 'DELETE' }));
+           log('opaque', fetch('https://api.other.com/closed', { mode: 'no-cors' }));
+           log('same', fetch('https://api.other.com/open', { mode: 'same-origin' }));
+           const x = new XMLHttpRequest(); x.open('GET', 'https://api.other.com/closed');
+           x.onerror = () => console.log('xhr refused'); x.onload = () => console.log('xhr read', x.responseText); x.send();
+         </script>",
+    );
+    rt.tick();
+    let out = console(&mut rt);
+    let line = |k: &str| out.lines().find(|l| l.starts_with(&format!("{k} "))).unwrap_or("").to_string();
+    // Readable when allowed, with only the headers the server exposes; no cookies unless asked.
+    assert_eq!(line("open"), "open 200 cors GET /open creds=false origin=https://example.com token=false null v");
+    assert_eq!(line("closed"), "closed refused");
+    assert_eq!(line("creds"), "creds 200 cors GET /creds creds=true origin=https://example.com token=false null null");
+    assert_eq!(line("nocreds"), "nocreds 200 cors GET /creds creds=false origin=https://example.com token=false null null");
+    // A PUT with a custom header asks first, and goes when the preflight allows it.
+    assert_eq!(line("put"), "put 200 cors PUT /put creds=false origin=https://example.com token=true null null");
+    assert_eq!(line("del"), "del refused");
+    // no-cors: sent, but the page learns nothing.
+    assert_eq!(line("opaque"), "opaque 0 opaque  null null");
+    assert_eq!(line("same"), "same refused");
+    assert_eq!(line("xhr"), "xhr refused");
+    assert!(out.contains("Blocked by CORS"), "{out}");
 }

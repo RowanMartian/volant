@@ -1,6 +1,7 @@
 //! A cookie jar (RFC 6265), written from scratch: `Set-Cookie` parsing,
-//! domain and path matching, expiry, `Secure` and `HttpOnly`, and a plain
-//! line format to keep cookies between launches.
+//! domain and path matching, expiry, `Secure`, `HttpOnly` and `SameSite`
+//! (Lax unless a cookie says otherwise), and a plain line format to keep
+//! cookies between launches.
 //!
 //! Times are Unix seconds, passed in, so the jar is easy to test.
 
@@ -19,6 +20,82 @@ pub struct Cookie {
     pub expires: Option<u64>,
     pub secure: bool,
     pub http_only: bool,
+    pub same_site: SameSite,
+}
+
+/// Whether a cookie goes with requests that another site started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SameSite {
+    /// Only when the request comes from its own site.
+    Strict,
+    /// Also when another site's link or form opens one of its pages with GET.
+    #[default]
+    Lax,
+    /// Always (cross-site requests, `fetch` with credentials); needs `Secure`.
+    None,
+}
+
+/// Who a request is for, to decide which `SameSite` cookies go with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Context {
+    /// The site (see [`site_of`]) of the page that made the request; `None`
+    /// when the person started it (the address bar, a bookmark).
+    pub initiator: Option<String>,
+    /// A top-level navigation (a link, a form, the address bar), not a page's
+    /// own `fetch`, script or picture.
+    pub navigation: bool,
+    /// GET or HEAD.
+    pub safe: bool,
+}
+
+impl Context {
+    /// A request the person made: every cookie for the address goes.
+    pub fn first_party() -> Context {
+        Context { initiator: None, navigation: true, safe: true }
+    }
+
+    /// A page's own request (`fetch`, a script, a picture) to `method`.
+    pub fn subresource(page: &str, method: &str) -> Context {
+        let host = crate::http::Url::parse(page).map(|u| u.connect_host().to_ascii_lowercase()).unwrap_or_default();
+        Context { initiator: Some(site_of(&host)), navigation: false, safe: matches!(method, "GET" | "HEAD") }
+    }
+
+    /// A page's link or form, opening `method` at the top level.
+    pub fn navigation_from(page: Option<&str>, method: &str) -> Context {
+        let initiator = page.and_then(crate::http::Url::parse).map(|u| site_of(&u.connect_host().to_ascii_lowercase()));
+        Context { initiator, navigation: true, safe: matches!(method, "GET" | "HEAD") }
+    }
+
+    fn same_site(&self, host: &str) -> bool {
+        self.initiator.as_deref().map(|i| i == site_of(host)).unwrap_or(true)
+    }
+
+    fn allows(&self, c: &Cookie, host: &str) -> bool {
+        match c.same_site {
+            SameSite::None => true,
+            SameSite::Lax => self.same_site(host) || (self.navigation && self.safe),
+            SameSite::Strict => self.same_site(host),
+        }
+    }
+}
+
+/// The site a host belongs to (its registrable domain, near enough without
+/// the public suffix list): `en.wikipedia.org` → `wikipedia.org`,
+/// `www.bbc.co.uk` → `bbc.co.uk`. Addresses and single names stay as they are.
+pub fn site_of(host: &str) -> String {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
+        return host;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() <= 2 {
+        return host;
+    }
+    let n = labels.len();
+    // Country domains with a second level for companies and the like (co.uk, com.au, ac.jp, …).
+    let second = labels[n - 2];
+    let take = if labels[n - 1].len() == 2 && (second.len() <= 3 || matches!(second, "gouv" | "nhs" | "police")) { 3 } else { 2 };
+    labels[n - take..].join(".")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +129,16 @@ impl Jar {
     /// Stores one `Set-Cookie` header from a response for `url`. From a
     /// script (`document.cookie = …`), `HttpOnly` cookies can't be set or replaced.
     pub fn set(&mut self, url: &Url, header: &str, now: u64, from_script: bool) {
+        self.set_in(url, header, now, from_script, &Context::first_party());
+    }
+
+    /// [`set`](Self::set) for a request made in `ctx`: a response to another
+    /// site's `fetch` or picture may only set `SameSite=None` cookies.
+    pub fn set_in(&mut self, url: &Url, header: &str, now: u64, from_script: bool, ctx: &Context) {
+        let cross = !ctx.navigation && !ctx.same_site(&url.connect_host().to_ascii_lowercase());
+        if cross && !header.split(';').skip(1).any(|a| a.split_once('=').map(|(k, v)| k.trim().eq_ignore_ascii_case("samesite") && v.trim().eq_ignore_ascii_case("none")).unwrap_or(false)) {
+            return;
+        }
         let mut parts = header.split(';');
         let first = parts.next().unwrap_or("");
         let (name, value) = match first.split_once('=') {
@@ -71,6 +158,7 @@ impl Jar {
             expires: None,
             secure: false,
             http_only: false,
+            same_site: SameSite::Lax,
         };
         let mut max_age: Option<i64> = None;
         for attr in parts {
@@ -96,6 +184,13 @@ impl Jar {
                 "expires" if max_age.is_none() => c.expires = parse_date(v).or(Some(0)),
                 "secure" => c.secure = true,
                 "httponly" => c.http_only = true,
+                "samesite" => {
+                    c.same_site = match v.to_ascii_lowercase().as_str() {
+                        "strict" => SameSite::Strict,
+                        "none" => SameSite::None,
+                        _ => SameSite::Lax,
+                    }
+                }
                 _ => {}
             }
         }
@@ -104,6 +199,10 @@ impl Jar {
         }
         if from_script && c.http_only {
             return;
+        }
+        // SameSite=None only on a Secure cookie (as browsers require); otherwise it's Lax.
+        if c.same_site == SameSite::None && !c.secure {
+            c.same_site = SameSite::Lax;
         }
         // Only a secure page may set a Secure cookie.
         if c.secure && !url.https {
@@ -135,6 +234,11 @@ impl Jar {
     /// The `Cookie` header value for a request to `url` (empty if none). For a
     /// script (`document.cookie`), `HttpOnly` cookies are left out.
     pub fn header(&mut self, url: &Url, now: u64, for_script: bool) -> String {
+        self.header_in(url, now, for_script, &Context::first_party())
+    }
+
+    /// [`header`](Self::header) for a request made in `ctx` (which `SameSite` cookies go).
+    pub fn header_in(&mut self, url: &Url, now: u64, for_script: bool, ctx: &Context) -> String {
         self.expire(now);
         let host = url.connect_host().to_ascii_lowercase();
         let path = url.target.split('?').next().unwrap_or("/");
@@ -145,6 +249,7 @@ impl Jar {
             .filter(|c| path_match(path, &c.path))
             .filter(|c| !c.secure || url.https || is_local(&host))
             .filter(|c| !(for_script && c.http_only))
+            .filter(|c| ctx.allows(c, &host))
             .collect();
         // Longer paths first, as browsers send them.
         found.sort_by(|a, b| b.path.len().cmp(&a.path.len()));
@@ -184,7 +289,12 @@ impl Jar {
     pub fn to_text(&self) -> String {
         let mut out = String::from("# Volant cookies\n");
         for c in self.cookies.iter().filter(|c| c.expires.is_some()) {
-            let flags = format!("{}{}{}", if c.host_only { "h" } else { "" }, if c.secure { "s" } else { "" }, if c.http_only { "o" } else { "" });
+            let same = match c.same_site {
+                SameSite::Strict => "x",
+                SameSite::Lax => "",
+                SameSite::None => "n",
+            };
+            let flags = format!("{}{}{}{same}", if c.host_only { "h" } else { "" }, if c.secure { "s" } else { "" }, if c.http_only { "o" } else { "" });
             out.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\n", c.domain, c.path, c.expires.unwrap_or(0), flags, c.name, c.value));
         }
         out
@@ -208,6 +318,13 @@ impl Jar {
                 expires: Some(expires),
                 secure: flags.contains('s'),
                 http_only: flags.contains('o'),
+                same_site: if flags.contains('x') {
+                    SameSite::Strict
+                } else if flags.contains('n') {
+                    SameSite::None
+                } else {
+                    SameSite::Lax
+                },
             });
         }
         jar
@@ -301,6 +418,38 @@ mod tests {
         assert_eq!(parse_date("Wed Oct 21 07:28:00 2015"), Some(1445412480));
         assert_eq!(parse_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
         assert_eq!(parse_date("nonsense"), None);
+    }
+
+    #[test]
+    fn same_site() {
+        assert_eq!(site_of("en.wikipedia.org"), "wikipedia.org");
+        assert_eq!(site_of("www.bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(site_of("example.com"), "example.com");
+        assert_eq!(site_of("127.0.0.1"), "127.0.0.1");
+        let mut j = Jar::new();
+        let now = 1_700_000_000;
+        let bank = u("https://www.bank.com/");
+        j.set(&bank, "lax=1", now, false);
+        j.set(&bank, "strict=1; SameSite=Strict; Max-Age=100", now, false);
+        j.set(&bank, "none=1; SameSite=None; Secure; Max-Age=100", now, false);
+        j.set(&bank, "fake=1; SameSite=None", now, false); // not Secure: Lax
+        let evil = |method: &str| Context::subresource("https://evil.example/page", method);
+        // Another site's fetch only gets SameSite=None cookies.
+        assert_eq!(j.header_in(&bank, now, false, &evil("GET")), "none=1");
+        // Its link (a top-level GET) gets Lax ones too; its POST form doesn't.
+        assert_eq!(j.header_in(&bank, now, false, &Context::navigation_from(Some("https://evil.example/"), "GET")), "lax=1; none=1; fake=1");
+        assert_eq!(j.header_in(&bank, now, false, &Context::navigation_from(Some("https://evil.example/"), "POST")), "none=1");
+        // The bank's own pages get everything, from any subdomain of it.
+        assert_eq!(j.header_in(&bank, now, false, &Context::subresource("https://app.bank.com/", "POST")), "lax=1; strict=1; none=1; fake=1");
+        // A cross-site response can't plant first-party cookies.
+        j.set_in(&bank, "planted=1", now, false, &evil("GET"));
+        j.set_in(&bank, "tracker=1; SameSite=None; Secure", now, false, &evil("GET"));
+        let all = j.header(&bank, now, false);
+        assert!(!all.contains("planted") && all.contains("tracker=1"), "{all}");
+        // Kept between launches.
+        let back = Jar::from_text(&j.to_text(), now);
+        assert_eq!(back.iter().find(|c| c.name == "strict").map(|c| c.same_site), Some(SameSite::Strict));
+        assert_eq!(back.iter().find(|c| c.name == "none").map(|c| c.same_site), Some(SameSite::None));
     }
 
     #[test]

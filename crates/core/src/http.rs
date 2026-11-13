@@ -129,37 +129,39 @@ pub struct Options {
     pub method: String,
     /// The request body (a POST form, a fetch() body); its type goes in `headers`.
     pub body: Option<Vec<u8>>,
+    /// Who the request is for, which decides the `SameSite` cookies sent and kept.
+    pub cookie_context: cookies::Context,
 }
 
 /// Where requests get and leave their cookies (the app shares one jar between threads).
 pub trait CookieStore {
-    fn cookie_header(&self, url: &Url) -> String;
-    fn store(&self, url: &Url, set_cookie: &str);
+    fn cookie_header(&self, url: &Url, ctx: &cookies::Context) -> String;
+    fn store(&self, url: &Url, set_cookie: &str, ctx: &cookies::Context);
 }
 
 impl CookieStore for std::sync::Mutex<Jar> {
-    fn cookie_header(&self, url: &Url) -> String {
-        self.lock().map(|mut j| j.header(url, cookies::now(), false)).unwrap_or_default()
+    fn cookie_header(&self, url: &Url, ctx: &cookies::Context) -> String {
+        self.lock().map(|mut j| j.header_in(url, cookies::now(), false, ctx)).unwrap_or_default()
     }
-    fn store(&self, url: &Url, set_cookie: &str) {
+    fn store(&self, url: &Url, set_cookie: &str, ctx: &cookies::Context) {
         if let Ok(mut j) = self.lock() {
-            j.set(url, set_cookie, cookies::now(), false);
+            j.set_in(url, set_cookie, cookies::now(), false, ctx);
         }
     }
 }
 
 impl CookieStore for std::cell::RefCell<Jar> {
-    fn cookie_header(&self, url: &Url) -> String {
-        self.borrow_mut().header(url, cookies::now(), false)
+    fn cookie_header(&self, url: &Url, ctx: &cookies::Context) -> String {
+        self.borrow_mut().header_in(url, cookies::now(), false, ctx)
     }
-    fn store(&self, url: &Url, set_cookie: &str) {
-        self.borrow_mut().set(url, set_cookie, cookies::now(), false);
+    fn store(&self, url: &Url, set_cookie: &str, ctx: &cookies::Context) {
+        self.borrow_mut().set_in(url, set_cookie, cookies::now(), false, ctx);
     }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { headers: Vec::new(), limit: 32 << 20, deadline: Duration::from_secs(60), max_redirects: 5, user_agent: "Volant".into(), method: "GET".into(), body: None }
+        Self { headers: Vec::new(), limit: 32 << 20, deadline: Duration::from_secs(60), max_redirects: 5, user_agent: "Volant".into(), method: "GET".into(), body: None, cookie_context: cookies::Context::first_party() }
     }
 }
 
@@ -412,7 +414,7 @@ pub fn send<T: Transport>(t: &T, url: &str, opts: &Options, jar: Option<&dyn Coo
     for _ in 0..=opts.max_redirects {
         let r = match jar {
             Some(jar) => {
-                let cookie = jar.cookie_header(&url);
+                let cookie = jar.cookie_header(&url, &opts.cookie_context);
                 let mut o = opts.clone().into_owned();
                 o.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cookie"));
                 if !cookie.is_empty() {
@@ -421,7 +423,7 @@ pub fn send<T: Transport>(t: &T, url: &str, opts: &Options, jar: Option<&dyn Coo
                 let r = exchange(t, &url, &o, until)?;
                 for (k, v) in &r.headers {
                     if k == "set-cookie" {
-                        jar.store(&url, v);
+                        jar.store(&url, v, &opts.cookie_context);
                     }
                 }
                 r
@@ -439,6 +441,7 @@ pub fn send<T: Transport>(t: &T, url: &str, opts: &Options, jar: Option<&dyn Coo
                     let o = opts.to_mut();
                     o.method = "GET".into();
                     o.body = None;
+                    o.cookie_context.safe = true;
                     o.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-type"));
                 }
                 url = next;

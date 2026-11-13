@@ -130,7 +130,15 @@ impl script::Host for NetHost {
         opts.method = req.method.to_string();
         opts.body = req.body.map(<[u8]>::to_vec);
         opts.headers = req.headers.to_vec();
-        let r = super::net::send(req.url, &opts).ok()?;
+        opts.cookie_context = if req.navigation {
+            volant_core::cookies::Context::navigation_from(req.initiator, req.method)
+        } else {
+            match req.initiator {
+                Some(page) => volant_core::cookies::Context::subresource(page, req.method),
+                None => volant_core::cookies::Context::first_party(),
+            }
+        };
+        let r = if req.credentials { super::net::send(req.url, &opts) } else { super::net::send_anonymous(req.url, &opts) }.ok()?;
         let content_type = r.header("content-type").unwrap_or("").to_string();
         Some(script::Reply { status: r.status, content_type, body: r.body, url: r.url, headers: r.headers })
     }
@@ -971,6 +979,19 @@ pub fn handles(b: &Browser, tab: TabId) -> bool {
 /// Opens a page in Simple Page (a link, a form, the address bar), as a new history entry.
 pub fn open(b: &mut Browser, nav: Navigation) {
     let Some(tab) = b.tabs.active else { return };
+    // A page can't take the tab to Volant's own pages, files or scripts in an address;
+    // mail and other app links go to their apps.
+    let scheme = nav.url.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        if !matches!(scheme.as_str(), "volant" | "file" | "javascript" | "data" | "blob" | "about" | "") {
+            if let Some(u) = objc2_foundation::NSURL::URLWithString(&super::ns(&nav.url)) {
+                objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&u);
+            }
+        } else {
+            eprintln!("engine: blocked a page's navigation to {}", nav.url.chars().take(80).collect::<String>());
+        }
+        return;
+    }
     // A link to a web app, or a site the person keeps in WebKit: WebKit takes the tab.
     let to_webkit = nav.method == "GET" && b.sites.choose(&nav.url, true, super::now()) == volant_core::sites::Engine::WebKit;
     if to_webkit {
@@ -1111,7 +1132,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
     if let Some(r) = &nav.referrer {
         script::request_context(&mut headers, r, &nav.method);
     }
-    let req = script::Request { method: &nav.method, url: &nav.url, headers: &headers, body: nav.body.as_deref() };
+    let req = script::Request { method: &nav.method, url: &nav.url, headers: &headers, body: nav.body.as_deref(), credentials: true, initiator: nav.referrer.as_deref(), navigation: true };
     let Some(reply) = script::Host::request(&host, &req) else {
         eprintln!("engine: couldn't load {}", nav.url);
         if nav.method == "GET" {
@@ -1153,7 +1174,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
             let text = match sheets.iter().find(|(h, _)| *h == href) {
                 Some((_, t)) => t.clone(),
                 None => {
-                    let t = match script::Host::get(&NetHost, &href) {
+                    let t = match script::Host::get_for(&NetHost, &href, &snap.url) {
                         Some(r) if r.success() => String::from_utf8_lossy(&r.body).into_owned(),
                         _ => String::new(),
                     };

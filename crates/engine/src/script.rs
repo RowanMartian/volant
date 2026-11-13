@@ -31,6 +31,20 @@ pub struct Request<'a> {
     /// Request headers the page set (`Content-Type`, …); cookies are the host's to add.
     pub headers: &'a [(String, String)],
     pub body: Option<&'a [u8]>,
+    /// Send and keep cookies (a cross-origin `fetch` only does with `credentials: 'include'`).
+    pub credentials: bool,
+    /// The page that made the request, which decides the `SameSite` cookies
+    /// that go with it; `None` when the person did (the address bar).
+    pub initiator: Option<&'a str>,
+    /// A top-level navigation (a link, a form), not a page's own request.
+    pub navigation: bool,
+}
+
+impl<'a> Request<'a> {
+    /// A GET the person or the browser makes, with all its cookies.
+    pub fn get(url: &'a str) -> Request<'a> {
+        Request { method: "GET", url, headers: &[], body: None, credentials: true, initiator: None, navigation: false }
+    }
 }
 
 /// What came back.
@@ -60,7 +74,11 @@ pub trait Host {
     fn request(&self, req: &Request) -> Option<Reply>;
     /// A plain GET.
     fn get(&self, url: &str) -> Option<Reply> {
-        self.request(&Request { method: "GET", url, headers: &[], body: None })
+        self.request(&Request::get(url))
+    }
+    /// A GET for `page` (its scripts, style sheets, pictures).
+    fn get_for(&self, url: &str, page: &str) -> Option<Reply> {
+        self.request(&Request { initiator: Some(page), ..Request::get(url) })
     }
     /// `document.cookie` for a page (None: the host keeps no cookies, so the page keeps its own).
     fn cookie(&self, _url: &str) -> Option<String> {
@@ -1047,7 +1065,7 @@ fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
         (s.dom.attr(id, "src").map(|x| resolve_url(&s.url, x)), s.dom.text(id), s.url.clone(), s.host.clone())
     };
     match src {
-        Some(abs) => match host.get(&abs) {
+        Some(abs) => match host.get_for(&abs, &url) {
             Some(r) if r.success() => Ok((String::from_utf8_lossy(&r.body).into_owned(), abs)),
             _ => Err(format!("couldn't load {abs}")),
         },
@@ -1323,6 +1341,129 @@ pub fn request_context(headers: &mut Vec<(String, String)>, page: &str, method: 
             headers.push(("Origin".into(), u.origin()));
         }
     }
+}
+
+/// The origin of a web address (`https://example.com:8443`), or `null`.
+pub fn origin_of(url: &str) -> String {
+    volant_core::http::Url::parse(url).map(|u| u.origin()).unwrap_or_else(|| "null".into())
+}
+
+/// Request headers a page may send anywhere without asking first (CORS "safelisted").
+fn safelisted(name: &str, value: &str) -> bool {
+    match name.to_ascii_lowercase().as_str() {
+        "accept" | "accept-language" | "content-language" => value.len() <= 128,
+        "content-type" => {
+            let mime = value.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            matches!(mime.as_str(), "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain")
+        }
+        _ => false,
+    }
+}
+
+/// Did the server let `origin` read this answer?
+fn cors_allows(headers: &[(String, String)], origin: &str, include: bool) -> bool {
+    let h = |n: &str| headers.iter().find(|(k, _)| k == n).map(|(_, v)| v.trim());
+    let allowed = match h("access-control-allow-origin") {
+        Some("*") => !include,
+        Some(o) => o == origin,
+        None => false,
+    };
+    allowed && (!include || h("access-control-allow-credentials") == Some("true"))
+}
+
+/// A page's `fetch`/XHR, under the same-origin policy: another origin's answer
+/// is only readable if it allows it (CORS, with a preflight when the request
+/// isn't a simple one), and cookies go to other origins only with
+/// `credentials: 'include'`. `Err` says why it was refused, as the console shows it.
+#[allow(clippy::too_many_arguments)]
+pub fn cors_fetch(
+    host: &dyn Host,
+    page: &str,
+    method: &str,
+    url: &str,
+    mut headers: Vec<(String, String)>,
+    body: Option<&[u8]>,
+    credentials: &str,
+    mode: &str,
+) -> Result<Reply, String> {
+    let fail = || format!("TypeError: Failed to fetch {url}");
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(fail());
+    }
+    // Pages can't set the headers that carry the browser's own word.
+    headers.retain(|(k, _)| {
+        let k = k.to_ascii_lowercase();
+        !(matches!(k.as_str(), "cookie" | "cookie2" | "host" | "origin" | "referer" | "connection" | "content-length" | "transfer-encoding" | "keep-alive" | "te" | "trailer" | "upgrade" | "via" | "expect" | "date" | "dnt") || k.starts_with("proxy-") || k.starts_with("sec-"))
+    });
+    let origin = origin_of(page);
+    let same = origin_of(url) == origin;
+    let include = credentials == "include";
+    let cookies = match credentials {
+        "omit" => false,
+        "include" => true,
+        _ => same,
+    };
+    let simple_method = matches!(method, "GET" | "HEAD" | "POST");
+    if !same {
+        match mode {
+            "same-origin" => return Err(format!("Blocked: {url} isn't on this page's origin (mode: same-origin)")),
+            "no-cors" => {
+                // Sent, but nothing about the answer reaches the page.
+                if !simple_method {
+                    return Err(fail());
+                }
+                headers.retain(|(k, v)| safelisted(k, v));
+                request_context(&mut headers, page, method);
+                let req = Request { method, url, headers: &headers, body, credentials: cookies, initiator: Some(page), navigation: false };
+                host.request(&req).ok_or_else(fail)?;
+                return Ok(Reply::ok(0, "", Vec::new()));
+            }
+            _ => {}
+        }
+        // Anything beyond a simple request needs the server's permission first.
+        let mut extra: Vec<String> = headers.iter().filter(|(k, v)| !safelisted(k, v)).map(|(k, _)| k.to_ascii_lowercase()).collect();
+        extra.sort();
+        extra.dedup();
+        if !simple_method || !extra.is_empty() {
+            let mut pre = vec![("Origin".to_string(), origin.clone()), ("Access-Control-Request-Method".to_string(), method.to_string())];
+            if !extra.is_empty() {
+                pre.push(("Access-Control-Request-Headers".into(), extra.join(",")));
+            }
+            request_context(&mut pre, page, "OPTIONS");
+            let req = Request { method: "OPTIONS", url, headers: &pre, body: None, credentials: false, initiator: Some(page), navigation: false };
+            let r = host.request(&req).ok_or_else(fail)?;
+            let list = |n: &str| -> Vec<String> {
+                r.headers.iter().filter(|(k, _)| k == n).flat_map(|(_, v)| v.split(',').map(|x| x.trim().to_ascii_lowercase()).collect::<Vec<_>>()).collect()
+            };
+            let methods = list("access-control-allow-methods");
+            let allowed_headers = list("access-control-allow-headers");
+            let ok = r.success()
+                && cors_allows(&r.headers, &origin, include)
+                && (simple_method || methods.iter().any(|m| m.eq_ignore_ascii_case(method)) || (!include && methods.iter().any(|m| m == "*")))
+                && extra.iter().all(|h| allowed_headers.contains(h) || (!include && h != "authorization" && allowed_headers.iter().any(|a| a == "*")));
+            if !ok {
+                return Err(format!("Blocked by CORS: {origin} may not {method} {url} (the server's preflight didn't allow it)"));
+            }
+        }
+        headers.push(("Origin".into(), origin.clone()));
+    }
+    request_context(&mut headers, page, method);
+    let req = Request { method, url, headers: &headers, body, credentials: cookies, initiator: Some(page), navigation: false };
+    let mut r = host.request(&req).ok_or_else(fail)?;
+    // Where it ended up (a same-origin request may have been redirected away).
+    let landed = if r.url.is_empty() { url.to_string() } else { r.url.clone() };
+    if origin_of(&landed) != origin {
+        if !cors_allows(&r.headers, &origin, include) {
+            return Err(format!("Blocked by CORS: {landed} didn't allow {origin} to read it"));
+        }
+        // Only the headers the server chose to show.
+        let expose: Vec<String> = r.headers.iter().filter(|(k, _)| k == "access-control-expose-headers").flat_map(|(_, v)| v.split(',').map(|x| x.trim().to_ascii_lowercase()).collect::<Vec<_>>()).collect();
+        let all = !include && expose.iter().any(|e| e == "*");
+        r.headers.retain(|(k, _)| {
+            matches!(k.as_str(), "cache-control" | "content-language" | "content-length" | "content-type" | "expires" | "last-modified" | "pragma") || (all && k != "set-cookie") || expose.contains(k)
+        });
+    }
+    Ok(r)
 }
 
 /// `application/x-www-form-urlencoded` (spaces as `+`).
@@ -2877,8 +3018,17 @@ fn install(i: &mut Interp, st: &S) {
     };
     let st2 = st.clone();
     let f = i.native(move |i, _t, a| {
-        // __fetch(method, url, body, [[name, value]…]) → [status, contentType, text, finalUrl, headers] or null
+        // __fetch(method, url, body, [[name, value]…], credentials, mode)
+        //   → [status, contentType, text, finalUrl, headers], or null if it failed or wasn't allowed
         let method = i.to_str(&arg(&a, 0))?.to_ascii_uppercase();
+        let credentials = match arg(&a, 4) {
+            Value::Undefined => "same-origin".to_string(),
+            v => i.to_str(&v)?.to_string(),
+        };
+        let mode = match arg(&a, 5) {
+            Value::Undefined => "cors".to_string(),
+            v => i.to_str(&v)?.to_string(),
+        };
         let url = i.to_str(&arg(&a, 1))?;
         let body = match arg(&a, 2) {
             Value::Undefined | Value::Null => None,
@@ -2899,17 +3049,17 @@ fn install(i: &mut Interp, st: &S) {
             let s = st2.borrow();
             (s.host.clone(), resolve_url(&s.url, &url), s.url.clone())
         };
-        request_context(&mut headers, &page, &method);
-        let req = Request { method: &method, url: &abs, headers: &headers, body: body.as_deref().map(str::as_bytes) };
-        Ok(match host.request(&req) {
-            Some(r) => {
-                let text = String::from_utf8_lossy(&r.body).into_owned();
-                let head: String = r.headers.iter().filter(|(k, _)| k != "set-cookie").map(|(k, v)| format!("{k}: {v}\r\n")).collect();
-                let final_url = if r.url.is_empty() { abs } else { r.url };
-                i.array(vec![Value::Num(r.status as f64), str_val(&r.content_type), str_val(&text), str_val(&final_url), str_val(&head)])
+        let r = match cors_fetch(&*host, &page, &method, &abs, headers, body.as_deref().map(str::as_bytes), &credentials, &mode) {
+            Ok(r) => r,
+            Err(why) => {
+                i.output.push(format!("{why}"));
+                return Ok(Value::Null);
             }
-            None => Value::Null,
-        })
+        };
+        let text = String::from_utf8_lossy(&r.body).into_owned();
+        let head: String = r.headers.iter().filter(|(k, _)| k != "set-cookie" && k != "set-cookie2").map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+        let final_url = if r.url.is_empty() { abs } else { r.url };
+        Ok(i.array(vec![Value::Num(r.status as f64), str_val(&r.content_type), str_val(&text), str_val(&final_url), str_val(&head)]))
     });
     hook(i, "__fetch", f);
     let st2 = st.clone();
@@ -2939,6 +3089,11 @@ fn install(i: &mut Interp, st: &S) {
         Ok(str_val(&resolve_url(&base, &u)))
     });
     hook(i, "__resolve", f);
+    let f = i.native(move |i, _t, a| {
+        let u = i.to_str(&arg(&a, 0))?;
+        Ok(str_val(&origin_of(&u)))
+    });
+    hook(i, "__origin", f);
     let st2 = st.clone();
     let f = i.native(move |i, _t, a| {
         let u = i.to_str(&arg(&a, 0))?;
