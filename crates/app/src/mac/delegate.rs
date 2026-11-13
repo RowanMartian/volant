@@ -363,7 +363,7 @@ pub fn smoke_test(b: &mut Browser) {
     let since_exec = super::SHOWN.with(|t| t.get()).unwrap_or_default();
     report.lock().unwrap().push_str(&format!("window shown {:.0} ms after the process started\n", since_exec.as_secs_f64() * 1000.0));
     let (s1, s2, s3, s4, s5, s6, s7, s8) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone());
-    let (s9, s10, s11, s12, s13, s14, s15) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot);
+    let (s9, s10, s11, s12, s13, s14, s15) = (shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone(), shot.clone());
     let (m1, m2) = (mem.clone(), mem);
     let rep = report.clone();
     let dir2 = dir.clone();
@@ -493,7 +493,47 @@ pub fn smoke_test(b: &mut Browser) {
         let webkit = id.and_then(|id| b.webs.get(&id)).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string()).unwrap_or_default();
         rep5.lock().unwrap().push_str(&format!("simple page after Back: {url} (WebKit: {:?})\n", webkit));
     }));
-    step(78.0, Box::new(move |_b| {
+    // A local page (CI serves scripts/smoke on port 8765) for what Wikipedia doesn't show:
+    // canvas, cookies, typing, same-origin and cross-origin fetch, a web font, sticky and fixed boxes.
+    const LOCAL: &str = "http://127.0.0.1:8765/simple.html";
+    step(77.5, Box::new(|b| actions::navigate(b, LOCAL)));
+    step(82.0, Box::new(|b| {
+        super::engine_view::eval(b, "document.getElementById('q').focus()");
+        super::engine_view::type_and_press(b, "volant", "Enter");
+    }));
+    let (s16, s17) = (shot.clone(), shot.clone());
+    let rep7 = report.clone();
+    step(84.0, Box::new(move |b| {
+        let title = b.tabs.active.and_then(|id| b.tabs.get(id)).map(|t| t.title.clone()).unwrap_or_default();
+        let simple = b.tabs.active.map(|id| super::engine_view::handles(b, id)).unwrap_or(false);
+        let (layers, fonts, _) = super::engine_view::probe(b);
+        rep7.lock().unwrap().push_str(&format!("simple page local: simple {simple}, {layers} fixed/sticky layers, {fonts} web font faces, title {title:?}\n"));
+        s16("16-simple-local");
+        super::engine_view::scroll_to(b, 900.0);
+    }));
+    // Scrolled: the header is held at the top and the badge in the corner.
+    step(85.0, Box::new(move |_b| s17("17-simple-sticky")));
+    // A second tab in front; the first one's page is kept alive behind it, and comes back as it was.
+    let first = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let f2 = first.clone();
+    step(85.5, Box::new(move |b| {
+        *f2.lock().unwrap() = b.tabs.active;
+        actions::open_tab(b, "http://127.0.0.1:8765/simple.html?second", true);
+    }));
+    let (rep8, f3) = (report.clone(), first.clone());
+    step(89.0, Box::new(move |b| {
+        let (_, _, live) = super::engine_view::probe(b);
+        rep8.lock().unwrap().push_str(&format!("simple page background tabs kept alive: {live}\n"));
+        if let Some(id) = *f3.lock().unwrap() {
+            actions::select(b, id);
+        }
+    }));
+    let rep9 = report.clone();
+    step(90.5, Box::new(move |b| {
+        let title = b.tabs.active.and_then(|id| b.tabs.get(id)).map(|t| t.title.clone()).unwrap_or_default();
+        rep9.lock().unwrap().push_str(&format!("simple page back to the first tab: {}\n", if title.contains("typed volant") { "resumed as it was" } else { "reloaded" }));
+    }));
+    step(91.0, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         app.terminate(None);

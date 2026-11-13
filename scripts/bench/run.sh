@@ -59,16 +59,20 @@ quit_all() {
 }
 
 # Per-browser details (plain functions: macOS ships bash 3.2, which has no maps).
-app_of() { case "$1" in Volant) echo "dist/Volant.app";; Safari) echo "/Applications/Safari.app";; Chrome) echo "/Applications/Google Chrome.app";; Firefox) echo "/Applications/Firefox.app";; esac; }
-exe_of() { case "$1" in Volant) echo "dist/Volant.app/Contents/MacOS/Volant";; Safari) echo "/Applications/Safari.app/Contents/MacOS/Safari";; Chrome) echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";; Firefox) echo "/Applications/Firefox.app/Contents/MacOS/firefox";; esac; }
-owner_of() { case "$1" in Chrome) echo "Google Chrome";; *) echo "$1";; esac; }
-pattern_of() { case "$1" in Volant) echo 'Volant|com\.apple\.WebKit';; Safari) echo 'Safari|com\.apple\.WebKit';; Chrome) echo 'Google Chrome';; Firefox) echo 'firefox|plugin-container|Firefox';; esac; }
+app_of() { case "$1" in Volant|Simple) echo "dist/Volant.app";; Safari) echo "/Applications/Safari.app";; Chrome) echo "/Applications/Google Chrome.app";; Firefox) echo "/Applications/Firefox.app";; esac; }
+exe_of() { case "$1" in Volant|Simple) echo "dist/Volant.app/Contents/MacOS/Volant";; Safari) echo "/Applications/Safari.app/Contents/MacOS/Safari";; Chrome) echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";; Firefox) echo "/Applications/Firefox.app/Contents/MacOS/firefox";; esac; }
+owner_of() { case "$1" in Chrome) echo "Google Chrome";; Simple) echo "Volant";; *) echo "$1";; esac; }
+pattern_of() { case "$1" in Volant|Simple) echo 'Volant|com\.apple\.WebKit';; Safari) echo 'Safari|com\.apple\.WebKit';; Chrome) echo 'Google Chrome';; Firefox) echo 'firefox|plugin-container|Firefox';; esac; }
 
 args_for() {
   local b="$1"; shift
   case "$b" in
     Volant)
       mkdir -p "$TMP/volant"; printf 'onboarded=1\nrestore_session=0\nsimple_default=0\n' > "$TMP/volant/settings.txt"
+      echo "$@" ;;
+    Simple)
+      # The same app, with pages drawn by Volant's own engine (Simple Page) where it can.
+      mkdir -p "$TMP/volant"; printf 'onboarded=1\nrestore_session=0\nsimple_default=1\n' > "$TMP/volant/settings.txt"
       echo "$@" ;;
     Safari) echo "$*" ;;
     Chrome) echo "--user-data-dir=$TMP/chrome --no-first-run --no-default-browser-check --disable-search-engine-choice-screen $*" ;;
@@ -91,7 +95,9 @@ JS
   echo "| --- | --- | --- | --- | --- | --- |"
 } > "$OUT/table.md"
 
-for b in Volant Safari Chrome Firefox; do
+label_of() { case "$1" in Simple) echo "Volant (Simple Page)";; *) echo "$1";; esac; }
+
+for b in Volant Simple Safari Chrome Firefox; do
   [ -e "$(app_of "$b")" ] || { echo "skip $b (not installed)"; continue; }
   echo "== $b"
   # Safari.app is a link into the system volume on recent macOS; follow it only there.
@@ -120,7 +126,7 @@ for b in Volant Safari Chrome Firefox; do
   mem="${mem1} MB"
   echo "  size ${size}, launch ${launch} ms, memory $mem in $n2 processes, idle CPU $idle"
   [[ "$size" =~ ^[0-9]+$ ]] && size="$size MB"
-  echo "| $b | ${size} | ${launch} ms | $mem | $n2 | $idle |" >> "$OUT/table.md"
+  echo "| $(label_of "$b") | ${size} | ${launch} ms | $mem | $n2 | $idle |" >> "$OUT/table.md"
   quit_all
 done
 
@@ -133,6 +139,7 @@ done
   cat "$OUT/table.md"
   echo
   echo "Memory is each process's memory footprint (the figure Activity Monitor shows), summed over every process the browser started: app, web content, GPU and networking helpers."
+  echo "Volant (Simple Page) is the same app drawing pages with its own engine where it can (WebKit takes the rest); plain Volant hands every page to WebKit."
   echo "Safari and Volant render with the WebKit built into macOS, so their app sizes don't include an engine; Chrome and Firefox ship their own."
 } > "$OUT/results.md"
 cat "$OUT/results.md"

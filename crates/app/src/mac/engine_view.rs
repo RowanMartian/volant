@@ -1132,6 +1132,26 @@ pub fn handles(b: &Browser, tab: TabId) -> bool {
     b.engine.0.try_borrow().map(|e| e.sticky == Some(tab) || e.parked.contains_key(&tab)).unwrap_or(false)
 }
 
+/// For the smoke test: the shown page's fixed and sticky layers, the web font
+/// faces registered, and the background tabs whose pages are kept alive.
+pub fn probe(b: &Browser) -> (usize, usize, usize) {
+    let Ok(e) = b.engine.0.try_borrow() else { return (0, 0, 0) };
+    let layers = e.view.as_ref().and_then(|v| v.ivars().page.borrow().as_ref().map(|p| p.layers.len())).unwrap_or(0);
+    let fonts = WEB_FONTS.with(|w| w.borrow().values().map(Vec::len).sum());
+    let live = e.parked.values().filter(|p| p.live.is_some()).count();
+    (layers, fonts, live)
+}
+
+/// Scrolls the shown page to `y`, as the scroll wheel would.
+pub fn scroll_to(b: &Browser, y: f64) {
+    let Ok(e) = b.engine.0.try_borrow() else { return };
+    if let Some(s) = &e.scroll {
+        let clip = s.contentView();
+        clip.scrollToPoint(NSPoint::new(0.0, y));
+        s.reflectScrolledClipView(&clip);
+    }
+}
+
 /// Opens a page in Simple Page (a link, a form, the address bar), as a new history entry.
 pub fn open(b: &mut Browser, nav: Navigation) {
     let Some(tab) = b.tabs.active else { return };

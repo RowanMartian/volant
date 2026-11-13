@@ -53,11 +53,15 @@ jobs:
         run: |
           export VOLANT_DATA_DIR="$RUNNER_TEMP/volant-data" VOLANT_SMOKE_DIR="$PWD/smoke"
           mkdir -p "$VOLANT_SMOKE_DIR"
+          # A local page for the Simple Page checks, with a font of the system's as its web font.
+          SITE="$RUNNER_TEMP/smoke-site"; mkdir -p "$SITE"; cp scripts/smoke/* "$SITE/"
+          cp "$(ls /System/Library/Fonts/Supplemental/*.ttf | head -1)" "$SITE/face.ttf"
+          python3 -m http.server 8765 --bind :: --directory "$SITE" > smoke/server-log.txt 2>&1 &
           START=$(date +%s)
           ( dist/Volant.app/Contents/MacOS/Volant --smoke-test > smoke/log.txt 2>&1; echo "exit $?" >> smoke/log.txt ) &
           PID=$!
-          for i in $(seq 1 100); do kill -0 $PID 2>/dev/null || break; sleep 1; done
-          kill -0 $PID 2>/dev/null && { echo "still running after 100s" >> smoke/log.txt; pkill -f "Volant --smoke-test" || true; }
+          for i in $(seq 1 120); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          kill -0 $PID 2>/dev/null && { echo "still running after 120s" >> smoke/log.txt; pkill -f "Volant --smoke-test" || true; }
           echo "ran for $(( $(date +%s) - START ))s" >> smoke/log.txt
           cat smoke/log.txt smoke/report.txt 2>/dev/null || true
           ls -la smoke
@@ -108,7 +112,7 @@ jobs:
       - name: Benchmark against Safari, Chrome and Firefox
         if: github.event_name != 'pull_request'
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: |
           bash scripts/bench/run.sh
           cat bench/results.md >> "$GITHUB_STEP_SUMMARY"

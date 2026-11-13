@@ -58,7 +58,9 @@ Today: CSS parsing (selectors with descendant/child/sibling combinators, attribu
 properties and `var()`, `calc()`/`min()`/`max()`/`clamp()`, the cascade with a user-agent sheet and a rule index
 (by id, class and tag), inheritance and `em`/`rem`/`%` units; flexbox (direction, wrap, grow/shrink/basis, justify,
 align, gaps, auto margins, order) and grid (track lists, `fr`, `repeat()`, auto-fill, areas, spans, explicit columns);
-`position` relative/absolute/fixed against positioned ancestors, and the visually-hidden pattern; block layout
+`position` relative/absolute against positioned ancestors, `fixed` and `sticky` boxes drawn as layers that hold
+their place as the page scrolls, and the visually-hidden pattern; `@font-face` web fonts (WOFF 1 unpacked by
+`woff.rs`, registered with CoreText); block layout
 (margins with sibling collapsing, padding, borders, `width`/`max-width`, auto-margin centring) and inline layout
 (whitespace collapsing, `pre`/`pre-wrap`/`nowrap`, wrapping with long-word breaking, baselines from font metrics,
 `vertical-align`, `text-align`, list markers, links) with real inline boxes (padding, backgrounds, radius); images as
@@ -89,8 +91,12 @@ volant-core picks the engine per site: WebKit for web apps (video, maps, office 
 sites the person switched with **View → Simple Page (⌥⌘E)** (remembered in `sites.txt`), and for two weeks after
 Simple Page couldn't show a site. A page falls back to WebKit when the fetch fails, when it isn't HTML, when it
 redirects to a web app, or when `script::assess` finds it came out empty, framed, plug-in only or broken by script
-errors. Only one Simple Page runs at a time; other Simple Page tabs keep their history and reload when brought to
-the front. Cookies (`cookies.rs`) and history are Volant's own, and WebKit doesn't load the page as well.
+errors. The two most recent background Simple Page tabs stay alive, frozen (no timers, no work), and come back as
+they were; older ones keep their history and reload when brought to the front. Cookies (`cookies.rs`, with
+SameSite) and history are Volant's own, and WebKit doesn't load the page as well. Scripts get the same-origin
+policy: `fetch` and `XMLHttpRequest` follow CORS (preflights, credentials modes, opaque `no-cors` replies, exposed
+headers). Volant's HTTP keeps connections alive in a pool and has an HTTP cache (`httpcache.rs`: freshness,
+revalidation, `Vary`), one for requests with cookies and one without.
 It's also used for an opt-in Reader. Simple Page shows a page with nothing but Volant: a session thread fetches the HTML, scripts and style sheets over Volant's own HTTP,
 runs the page's JavaScript, and sends snapshots to be laid out and drawn natively (a first paint before the scripts,
 then after them and after every change). Clicks are hit-tested and sent to the page's scripts, typing goes to its
@@ -175,12 +181,14 @@ cargo run --release -p volant-core --example compile_lists -- easylist.txt easyp
 `.github/workflows/build-macos.yml`, on every push to `main`:
 
 1. Run core tests, build the app, and render its icon as macOS draws it.
-2. Smoke test: launch, browse, screenshot ten views, and record memory.
+2. Smoke test: launch, browse, screenshot seventeen views, and record memory; Simple Page opens Wikipedia, searches
+   it, goes Back, then a local page (`scripts/smoke`) checks canvas, cookies, typing, same-origin and CORS fetches, a
+   web font, sticky and fixed boxes, and a background tab kept alive.
 3. uBlock self-test: sync with uBO's latest release, download the default lists, compile them into WebKit, then check
    network, generic and site cosmetic, procedural, and uBO scriptlets in the page and isolated worlds on a live page,
    and check that trusting the site disables all of it.
 4. Updater test: install the current release over a copy of this build and verify it relaunches.
-5. Benchmark against Safari, Chrome and Firefox, then publish the `latest` release if this commit is still the tip.
+5. Benchmark (Volant with WebKit, Volant with Simple Page) against Safari, Chrome and Firefox, then publish the `latest` release if this commit is still the tip.
 
 The website is `site/` → `cargo run -p volant-tools -- site` → `docs/`, deployed by `.github/workflows/pages.yml`.
 
