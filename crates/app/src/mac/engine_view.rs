@@ -55,10 +55,14 @@ struct Inner {
     page: Option<SimplePage>,
     /// The tab Simple Page is on for (it stays on across navigations).
     sticky: Option<TabId>,
-    /// Other tabs in Simple Page, waiting in the background: their history and
-    /// where they are. One page runs at a time; a parked tab reloads when it
-    /// comes to the front.
-    parked: HashMap<TabId, (Vec<String>, usize)>,
+    /// Other tabs in Simple Page, waiting in the background: their history,
+    /// where they are, and for the most recent few, the page itself (frozen,
+    /// so it comes back at once); the others reload when they come to the front.
+    parked: HashMap<TabId, Parked>,
+    /// Numbers sessions (each page load gets a new one).
+    counter: u64,
+    /// A scroll position to return to once the page is laid out (a tab brought back).
+    pending_scroll: Option<f64>,
     /// The page's script thread.
     session: Option<Session>,
     /// Simple Page's own history for the tab: addresses, and where we are.
@@ -83,6 +87,27 @@ struct Inner {
 }
 
 /// A page loaded and run by Volant's own engine: its latest snapshot and linked style sheets.
+/// A Simple Page tab in the background.
+#[derive(Default)]
+struct Parked {
+    trail: Vec<String>,
+    at: usize,
+    live: Option<Live>,
+}
+
+/// A background tab's page, kept running (frozen) so switching back is instant.
+struct Live {
+    session: Session,
+    serial: u64,
+    page: Option<SimplePage>,
+    scroll_y: f64,
+    /// When it was parked (the oldest is let go first).
+    parked_at: u64,
+}
+
+/// How many background Simple Page tabs keep their page alive.
+const LIVE_PARKED: usize = 2;
+
 struct SimplePage {
     /// The tab's address it belongs to.
     url: String,
@@ -95,6 +120,8 @@ use volant_engine::script::{self, Navigation, Snapshot};
 /// What the view sends the session thread.
 enum Cmd {
     Click(u32),
+    /// The tab went to the background (true) or came back (false).
+    Freeze(bool),
     /// The pointer is over this node (or off the page).
     Hover(Option<u32>),
     /// A `<select>`'s menu: the option picked (by index among its options).
@@ -764,9 +791,11 @@ pub fn sync(b: &Browser) {
     let active = b.tabs.active;
     // A parked Simple Page tab came to the front: its page runs again.
     if let Some(tab) = active.filter(|t| e.parked.contains_key(t)) {
-        adopt(&mut e, tab);
-        if let Some(url) = e.trail.get(e.at).cloned() {
-            start_session(&mut e, tab, Navigation::get(url), b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm), false);
+        let resumed = adopt(&mut e, tab) && e.session.is_some();
+        if !resumed {
+            if let Some(url) = e.trail.get(e.at).cloned() {
+                start_session(&mut e, tab, Navigation::get(url), b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm), false);
+            }
         }
     }
     let on_tab = e.tab.is_some() && e.tab == active;
@@ -877,6 +906,13 @@ pub fn sync(b: &Browser) {
         view.set_selection(None);
         view.setFrameSize(NSSize::new(width as f64, height));
         view.setNeedsDisplay(true);
+        // A tab brought back: where it was.
+        if let Some(y) = e.pending_scroll.take() {
+            let clip = scroll.contentView();
+            let max = (height - clip.bounds().size.height).max(0.0);
+            clip.scrollToPoint(NSPoint::new(0.0, y.clamp(0.0, max)));
+            scroll.reflectScrolledClipView(&clip);
+        }
         // A #fragment: scroll its target to the top.
         if let (Some(frag), Some(p), Some(laid)) = (e.pending_anchor.take(), e.page.as_ref(), view.ivars().page.borrow().as_ref()) {
             if let Some(y) = script::anchor_y(&p.snap, laid, &frag) {
@@ -1070,8 +1106,8 @@ pub fn travel(b: &mut Browser, step: i32) -> bool {
 /// For the toolbar: (can go back, can go forward, loading), if Simple Page runs this tab.
 pub fn nav_state(b: &Browser, tab: TabId) -> Option<(bool, bool, bool)> {
     let e = b.engine.0.try_borrow().ok()?;
-    if let Some((trail, at)) = e.parked.get(&tab) {
-        return Some((*at > 0, at + 1 < trail.len(), false));
+    if let Some(p) = e.parked.get(&tab) {
+        return Some((p.at > 0, p.at + 1 < p.trail.len(), false));
     }
     (e.sticky == Some(tab)).then(|| (e.at > 0, e.at + 1 < e.trail.len(), e.loading))
 }
@@ -1100,7 +1136,8 @@ pub fn type_and_press(b: &Browser, text: &str, key: &'static str) {
 /// Starts a page's session thread. With `judge`, the page is checked once its
 /// scripts have run, and handed to WebKit if Simple Page can't show it.
 fn start_session(e: &mut Inner, tab: TabId, nav: Navigation, width: f32, dark: bool, judge: bool) {
-    e.serial += 1;
+    e.counter += 1;
+    e.serial = e.counter;
     let serial = e.serial;
     let (tx, rx) = std::sync::mpsc::channel();
     e.session = Some(Session { tx, url: nav.url.clone() });
@@ -1165,6 +1202,8 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
     let mut shown = 0u64;
     let mut logged = 0usize;
     let mut errors = 0usize;
+    // In a background tab: no timers, no work, until it comes back.
+    let mut frozen = false;
     // Simple Page judges the page a moment after its scripts ran (they may still be fetching).
     let mut judge_at = judge.then(|| std::time::Instant::now() + std::time::Duration::from_millis(1500));
     let publish = |rt: &mut script::Runtime, sheets: &mut Vec<(String, String)>| {
@@ -1216,7 +1255,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
                 })
             });
         }
-        if judge_at.is_some_and(|t| std::time::Instant::now() >= t) {
+        if !frozen && judge_at.is_some_and(|t| std::time::Instant::now() >= t) {
             judge_at = None;
             if let Some(why) = script::assess(&rt.snapshot(), errors) {
                 eprintln!("engine: {url}: {why}; WebKit shows it");
@@ -1225,7 +1264,13 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
                 return;
             }
         }
-        let mut wait = if rt.has_timers() { 150 } else { 1000 };
+        let mut wait = if frozen {
+            3_600_000
+        } else if rt.has_timers() {
+            150
+        } else {
+            1000
+        };
         if let Some(t) = judge_at {
             wait = wait.min(t.saturating_duration_since(std::time::Instant::now()).as_millis() as u64 + 1);
         }
@@ -1253,7 +1298,17 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
                     eprintln!("page eval: {e}");
                 }
             }
-            Err(RecvTimeoutError::Timeout) => rt.tick(),
+            Ok(Cmd::Freeze(f)) => {
+                frozen = f;
+                if !f {
+                    shown = u64::MAX; // back in front: show where it got to
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if !frozen {
+                    rt.tick()
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
         if rt.generation() != shown {
@@ -1366,19 +1421,51 @@ fn leave(e: &mut Inner) {
 
 /// Brings a parked tab's history into the running slot (parking the tab that had it).
 /// Doesn't start its page; the caller does.
+/// If the tab's page was kept alive, it's running again afterwards (`e.session` is set).
 fn adopt(e: &mut Inner, tab: TabId) -> bool {
-    let Some((trail, at)) = e.parked.remove(&tab) else { return e.sticky == Some(tab) };
+    let Some(p) = e.parked.remove(&tab) else { return e.sticky == Some(tab) };
     if let Some(old) = e.sticky.filter(|&o| o != tab) {
-        let t = std::mem::take(&mut e.trail);
-        if !t.is_empty() {
-            e.parked.insert(old, (t, e.at));
+        let trail = std::mem::take(&mut e.trail);
+        if !trail.is_empty() {
+            // The page stays alive, frozen, with where it was scrolled to.
+            let scroll_y = e.scroll.as_ref().map(|s| s.contentView().bounds().origin.y).unwrap_or(0.0);
+            e.counter += 1;
+            let parked_at = e.counter;
+            let live = e.session.take().map(|session| {
+                let _ = session.tx.send(Cmd::Freeze(true));
+                Live { session, serial: e.serial, page: e.page.take(), scroll_y, parked_at }
+            });
+            e.parked.insert(old, Parked { trail, at: e.at, live });
+            // Only the most recent few stay alive.
+            loop {
+                let alive: Vec<(TabId, u64)> = e.parked.iter().filter_map(|(t, p)| p.live.as_ref().map(|l| (*t, l.parked_at))).collect();
+                if alive.len() <= LIVE_PARKED {
+                    break;
+                }
+                let Some(&(oldest, _)) = alive.iter().min_by_key(|(_, at)| *at) else { break };
+                if let Some(p) = e.parked.get_mut(&oldest) {
+                    p.live = None; // its thread ends
+                }
+            }
         }
     }
     leave(e);
     e.sticky = Some(tab);
     e.tab = Some(tab);
-    e.trail = trail;
-    e.at = at.min(e.trail.len().saturating_sub(1));
+    e.trail = p.trail;
+    e.at = p.at.min(e.trail.len().saturating_sub(1));
+    if let Some(live) = p.live.filter(|l| l.page.is_some()) {
+        let _ = live.session.tx.send(Cmd::Freeze(false));
+        e.session = Some(live.session);
+        e.serial = live.serial;
+        e.page = live.page;
+        e.laid = None;
+        e.pending_scroll = Some(live.scroll_y);
+        e.images.clear();
+        if let Some(v) = &e.view {
+            v.ivars().images.borrow_mut().clear();
+        }
+    }
     true
 }
 
@@ -1405,10 +1492,11 @@ pub fn claim(b: &mut Browser, tab: TabId, url: &str) {
     if b.tabs.active != Some(tab) {
         if let Ok(mut e) = b.engine.0.try_borrow_mut() {
             let entry = e.parked.entry(tab).or_default();
-            let keep = (entry.1 + 1).min(entry.0.len());
-            entry.0.truncate(keep);
-            entry.0.push(url.to_string());
-            entry.1 = entry.0.len() - 1;
+            let keep = (entry.at + 1).min(entry.trail.len());
+            entry.trail.truncate(keep);
+            entry.trail.push(url.to_string());
+            entry.at = entry.trail.len() - 1;
+            entry.live = None; // a new page: the old one goes
         }
         return;
     }
@@ -1420,7 +1508,7 @@ pub fn claim(b: &mut Browser, tab: TabId, url: &str) {
     let (width, dark) = (b.ui.content.bounds().size.width as f32, theme::is_dark(b.mtm));
     {
         let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
-        e.parked.insert(tab, (vec![url.to_string()], 0));
+        e.parked.insert(tab, Parked { trail: vec![url.to_string()], at: 0, live: None });
         adopt(&mut e, tab);
         start_session(&mut e, tab, Navigation::get(url.to_string()), width, dark, judge);
     }
