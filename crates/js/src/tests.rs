@@ -490,3 +490,27 @@ fn syntax_from_real_sites() {
     // A repeated lookahead.
     assert_eq!(out("console.log(/((?=lg)?[vl]k-?\\d{3}) bui/i.exec('LK-123 build')[1])"), "LK-123");
 }
+
+#[test]
+fn typed_arrays() {
+    // Views over one buffer share its bytes, little-endian.
+    let src = "
+        var b = new ArrayBuffer(8), u8 = new Uint8Array(b), u32 = new Uint32Array(b);
+        u32[0] = 0x01020304;
+        console.log(u8[0], u8[3], u8.length, u32.length, b.byteLength, u8.buffer === b);
+        var s = u8.subarray(2, 6); s[0] = 255;
+        console.log(s.length, s.byteOffset, u8[2], Array.from(s).join(','));
+        var c = new Uint8ClampedArray([300, -5, 1.5, 2.5]), i8 = new Int8Array([200, -129]);
+        console.log(c.join(' '), i8.join(' '), new Float32Array([0.5])[0]);
+        var dv = new DataView(b); dv.setUint16(0, 0x1234); dv.setUint16(2, 0x1234, true);
+        console.log(u8[0].toString(16), u8[2].toString(16), dv.getUint16(0), dv.getInt8(1));
+        var m = new Uint8Array([3, 1, 2]).map(x => x * 2);
+        console.log(m instanceof Uint8Array, m.join(), new Int16Array([10, -2, 1]).sort().join(), [...new Uint8Array([7, 8])].join());
+        console.log(Object.prototype.toString.call(u8), ArrayBuffer.isView(u8), ArrayBuffer.isView([]), Array.isArray(u8), u8[99], Uint8Array.BYTES_PER_ELEMENT);
+        var t = new Uint8Array(4); t.set([9, 9], 1); console.log(t.join(), t.slice(1, 3).join(), t.indexOf(9), t.includes(0), Object.keys(t).length);
+    ";
+    assert_eq!(
+        out(src),
+        "4 1 8 2 8 true\n4 2 255 255,1,0,0\n255 0 2 2 -56 127 0.5\n12 34 4660 52\ntrue 6,2,4 -2,1,10 7,8\n[object Uint8Array] true false false undefined 1\n0,9,9,0 9,9 1 true 4"
+    );
+}

@@ -99,8 +99,10 @@ fn with_array<T>(i: &mut Interp, this: &Value, f: impl FnOnce(&mut Vec<Value>) -
 pub fn items(i: &mut Interp, this: &Value) -> Res<Vec<Value>> {
     match this {
         Value::Obj(o) => {
-            if let Kind::Array(a) = &o.borrow().kind {
-                return Ok(a.clone());
+            match &o.borrow().kind {
+                Kind::Array(a) => return Ok(a.clone()),
+                Kind::Typed(t) if !t.data_view => return Ok(t.values().into_iter().map(Value::Num).collect()),
+                _ => {}
             }
             let len = i.get(this, "length")?;
             let n = i.to_number(&len)?;
@@ -1573,7 +1575,38 @@ pub fn install(i: &mut Interp) {
     def(i, &dp, "getTime", move |i, t, _a| Ok(Value::Num(this_time(i, &t)?)));
     def(i, &dp, "valueOf", move |i, t, _a| Ok(Value::Num(this_time(i, &t)?)));
     def(i, &dp, "toISOString", move |i, t, _a| Ok(Value::Str(date_string(this_time(i, &t)?).into())));
-    def(i, &dp, "toString", move |i, t, _a| Ok(Value::Str(date_string(this_time(i, &t)?).into())));
+    // Browser-style text: "Fri Nov 13 2026 10:00:00 GMT+0000 (Coordinated Universal Time)".
+    fn human(ms: f64, part: u8) -> String {
+        if ms.is_nan() {
+            return "Invalid Date".into();
+        }
+        let s = date_string(ms);
+        const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let day = DAYS[((ms / 86_400_000.0).floor() + 4.0).rem_euclid(7.0) as usize];
+        let month = MONTHS[s.get(5..7).and_then(|m| m.parse::<usize>().ok()).unwrap_or(1).clamp(1, 12) - 1];
+        let (year, date, time) = (s.get(0..4).unwrap_or(""), s.get(8..10).unwrap_or(""), s.get(11..19).unwrap_or(""));
+        match part {
+            0 => format!("{day} {month} {date} {year} {time} GMT+0000 (Coordinated Universal Time)"),
+            1 => format!("{day} {month} {date} {year}"),
+            2 => format!("{time} GMT+0000 (Coordinated Universal Time)"),
+            _ => format!("{day}, {date} {month} {year} {time} GMT"),
+        }
+    }
+    for (name, part) in [("toString", 0u8), ("toDateString", 1), ("toTimeString", 2), ("toUTCString", 3), ("toGMTString", 3)] {
+        def(i, &dp, name, move |i, t, _a| Ok(Value::Str(human(this_time(i, &t)?, part).into())));
+    }
+    def(i, &dp, "getYear", move |i, t, _a| {
+        let f = i.get(&t, "getFullYear")?;
+        let y = i.call(&f, t, vec![])?;
+        Ok(Value::Num(i.to_number(&y)? - 1900.0))
+    });
+    def(i, &dp, "setYear", move |i, t, a| {
+        let y = i.to_number(&arg(&a, 0))?;
+        let y = if (0.0..=99.0).contains(&y.trunc()) { y.trunc() + 1900.0 } else { y };
+        let f = i.get(&t, "setFullYear")?;
+        i.call(&f, t, vec![Value::Num(y)])
+    });
     def(i, &dp, "toJSON", move |i, t, _a| Ok(Value::Str(date_string(this_time(i, &t)?).into())));
     for (name, field) in [("getUTCFullYear", 0), ("getUTCMonth", 1), ("getUTCDate", 2), ("getUTCHours", 3), ("getUTCMinutes", 4), ("getUTCSeconds", 5), ("getUTCDay", 6)] {
         for n in [name.to_string(), name.replace("UTC", "")] {
@@ -1639,6 +1672,7 @@ pub fn install(i: &mut Interp) {
     crate::promise::install(i);
     crate::proxy::install(i);
     crate::regexp::install(i);
+    crate::typed::install(i);
 
     // ---------------------------------------------------------- misc
     let structured = i.native(|i, _t, a| {

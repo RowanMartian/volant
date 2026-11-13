@@ -77,7 +77,9 @@ impl Interp {
                     return Ok(true);
                 }
                 let b = o.borrow();
-                b.get_own(k).is_some() || matches!(&b.kind, Kind::Array(arr) if k.parse::<usize>().map(|x| x < arr.len()).unwrap_or(false) || k == "length")
+                b.get_own(k).is_some()
+                    || matches!(&b.kind, Kind::Array(arr) if k.parse::<usize>().map(|x| x < arr.len()).unwrap_or(false) || k == "length")
+                    || matches!(&b.kind, Kind::Typed(t) if !t.data_view && k.parse::<usize>().map(|x| x < t.len).unwrap_or(false))
             }
             Value::Str(s) => k.parse::<usize>().map(|x| x < s.chars().count()).unwrap_or(false) || k == "length",
             _ => false,

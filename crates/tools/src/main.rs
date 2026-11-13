@@ -67,14 +67,14 @@ impl volant_engine::script::Host for CurlHost {
             }
         }
         let mut cmd = std::process::Command::new("curl");
-        cmd.args(["-sL", "--compressed", "--max-time", "20", "-A", &user_agent(), "-X", method, "-w", "\n%{http_code} %{url_effective} %{content_type}", url]);
+        cmd.args(["-sL", "--compressed", "--max-time", "20", "-A", &user_agent(), "-D", "/dev/stderr", "-X", method, "-w", "\n%{http_code} %{url_effective} %{content_type}", url]);
         for (k, v) in req.headers {
             cmd.args(["-H", &format!("{k}: {v}")]);
         }
         let out = match req.body {
             Some(b) => {
                 use std::io::Write;
-                cmd.args(["--data-binary", "@-"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
+                cmd.args(["--data-binary", "@-"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
                 let mut child = cmd.spawn().ok()?;
                 child.stdin.take()?.write_all(b).ok()?;
                 child.wait_with_output().ok()?
@@ -99,6 +99,10 @@ impl volant_engine::script::Host for CurlHost {
             let _ = std::fs::write(c, rec);
         }
         let mut reply = Reply::ok(code.parse().ok()?, ty, body);
+        // The headers (curl writes one block per redirect; the last is the answer's).
+        let head = String::from_utf8_lossy(&out.stderr);
+        let last = head.trim_end().rsplit("\r\n\r\n").next().unwrap_or("");
+        reply.headers = last.lines().skip(1).filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string())).collect();
         if final_url != url {
             reply.url = final_url.to_string();
         }

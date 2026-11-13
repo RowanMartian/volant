@@ -1340,13 +1340,15 @@ impl Interp {
             let i = *n as usize;
             if i as f64 == *n {
                 match o {
-                    Value::Obj(ob) => {
-                        if let Kind::Array(a) = &ob.borrow().kind {
+                    Value::Obj(ob) => match &ob.borrow().kind {
+                        Kind::Array(a) => {
                             if let Some(v) = a.get(i) {
                                 return Ok(v.clone());
                             }
                         }
-                    }
+                        Kind::Typed(t) if !t.data_view => return Ok(t.get(i).map(Value::Num).unwrap_or(Value::Undefined)),
+                        _ => {}
+                    },
                     Value::Str(s) => return Ok(string_at(s, i)),
                     _ => {}
                 }
@@ -1363,6 +1365,12 @@ impl Interp {
         if let (Value::Num(n), Value::Obj(ob)) = (k, o) {
             let i = *n as usize;
             if i as f64 == *n {
+                if let (Kind::Typed(t), Value::Num(x)) = (&ob.borrow().kind, &v) {
+                    if !t.data_view {
+                        t.put(i, *x);
+                        return Ok(());
+                    }
+                }
                 if let Kind::Array(a) = &mut ob.borrow_mut().kind {
                     if i < a.len() {
                         a[i] = v;
@@ -1443,6 +1451,7 @@ impl Interp {
             Value::Str(s) => Some(s.chars().map(|c| Value::Str(c.to_string().into())).collect()),
             Value::Obj(o) => match &o.borrow().kind {
                 Kind::Array(_) => return Ok(self.obj(Kind::Iter(IterState::Array(o.clone(), 0)))),
+                Kind::Typed(t) if !t.data_view => Some(t.values().into_iter().map(Value::Num).collect()),
                 Kind::Set(s) => Some(s.clone()),
                 Kind::Map(m) => Some(m.iter().map(|(k, v)| self.array(vec![k.clone(), v.clone()])).collect()),
                 _ => None,

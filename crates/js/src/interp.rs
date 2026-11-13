@@ -58,6 +58,10 @@ pub enum Kind {
     Generator(Rc<RefCell<crate::vm::GenState>>),
     /// The VM's own iterators, for `for of` and spreads over built-in collections.
     Iter(crate::vm::IterState),
+    /// An ArrayBuffer's bytes.
+    Buffer(Vec<u8>),
+    /// A typed array or DataView onto an ArrayBuffer.
+    Typed(crate::typed::View),
 }
 
 #[derive(Clone)]
@@ -145,6 +149,7 @@ impl Object {
     pub fn all_keys(&self) -> Vec<Rc<str>> {
         let mut out: Vec<Rc<str>> = match &self.kind {
             Kind::Array(a) => (0..a.len()).map(|i| i.to_string().into()).collect(),
+            Kind::Typed(t) if !t.data_view => (0..t.len).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
         out.extend(self.props.iter().filter(|e| !e.key.starts_with('\0')).map(|e| e.key.clone()));
@@ -228,6 +233,7 @@ impl Object {
         let mut out: Vec<Rc<str>> = match &self.kind {
             Kind::Array(a) => (0..a.len()).map(|i| i.to_string().into()).collect(),
             Kind::Boxed(Value::Str(s)) => (0..s.chars().count()).map(|i| i.to_string().into()).collect(),
+            Kind::Typed(t) if !t.data_view => (0..t.len).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
         out.extend(self.props.iter().filter(|e| e.flags & HIDDEN == 0 && !e.key.starts_with('\0')).map(|e| e.key.clone()));
@@ -321,6 +327,11 @@ pub struct Interp {
     pub promise_proto: Obj,
     pub generator_proto: Obj,
     pub iterator_proto: Obj,
+    pub buffer_proto: Obj,
+    /// %TypedArray%.prototype, and each typed array's own prototype (in `typed::ELEMS` order).
+    pub typed_proto: Obj,
+    pub typed_protos: Vec<Obj>,
+    pub data_view_proto: Obj,
     /// What `console.log` printed.
     pub output: Vec<String>,
     /// Uncaught exceptions from callbacks (timers, promise jobs, events).
@@ -382,6 +393,10 @@ impl Interp {
             promise_proto: mk(Kind::Plain),
             generator_proto: mk(Kind::Plain),
             iterator_proto: mk(Kind::Plain),
+            buffer_proto: mk(Kind::Plain),
+            typed_proto: mk(Kind::Plain),
+            typed_protos: (0..crate::typed::ELEMS.len()).map(|_| mk(Kind::Plain)).collect(),
+            data_view_proto: mk(Kind::Plain),
             global_obj,
             object_proto,
             function_proto,
@@ -661,6 +676,14 @@ impl Interp {
                             return Ok(a.get(i).cloned().unwrap_or(Value::Undefined));
                         }
                     }
+                    Kind::Typed(t) if !t.data_view => {
+                        if k == "length" {
+                            return Ok(Value::Num(t.len as f64));
+                        }
+                        if let Some(i) = index_of(k) {
+                            return Ok(t.get(i).map(Value::Num).unwrap_or(Value::Undefined));
+                        }
+                    }
                     Kind::Map(m) if k == "size" => return Ok(Value::Num(m.len() as f64)),
                     Kind::Set(s) if k == "size" => return Ok(Value::Num(s.len() as f64)),
                     Kind::Boxed(Value::Str(s)) if k == "length" => return Ok(Value::Num(utf16_len(s) as f64)),
@@ -734,6 +757,18 @@ impl Interp {
                     let (t, h) = Self::proxy_parts(v).expect("a proxy");
                     return self.proxy_set(t, h, k, val, v);
                 }
+                Kind::Typed(t) if !t.data_view => {
+                    if let Some(i) = index_of(k) {
+                        let t = t.clone();
+                        drop(b);
+                        let n = match &val {
+                            Value::Num(n) => *n,
+                            v => self.to_number(v)?,
+                        };
+                        t.put(i, n);
+                        return Ok(());
+                    }
+                }
                 Kind::Array(a) => {
                     if k == "length" {
                         let n = match &val {
@@ -801,10 +836,10 @@ impl Interp {
     }
 
     pub fn has_property(&self, o: &Obj, k: &str) -> bool {
-        if let Kind::Array(a) = &o.borrow().kind {
-            if k == "length" || k.parse::<usize>().map(|i| i < a.len()).unwrap_or(false) {
-                return true;
-            }
+        match &o.borrow().kind {
+            Kind::Array(a) if k == "length" || k.parse::<usize>().map(|i| i < a.len()).unwrap_or(false) => return true,
+            Kind::Typed(t) if !t.data_view && k.parse::<usize>().map(|i| i < t.len).unwrap_or(false) => return true,
+            _ => {}
         }
         let mut cur = Some(o.clone());
         while let Some(c) = cur {
@@ -876,6 +911,7 @@ impl Interp {
             Value::Obj(o) => {
                 let kind_list = match &o.borrow().kind {
                     Kind::Array(a) => Some(a.clone()),
+                    Kind::Typed(t) if !t.data_view => Some(t.values().into_iter().map(Value::Num).collect()),
                     Kind::Set(s) => Some(s.clone()),
                     Kind::Map(m) => Some(m.iter().map(|(k, v)| self.array(vec![k.clone(), v.clone()])).collect()),
                     _ => None,

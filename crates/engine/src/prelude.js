@@ -293,7 +293,7 @@
     text() { this.bodyUsed = true; return Promise.resolve(this._body) }
     json() { this.bodyUsed = true; try { return Promise.resolve(JSON.parse(this._body)) } catch (e) { return Promise.reject(e) } }
     blob() { return Promise.resolve(new Blob([this._body], { type: this.headers.get('content-type') || '' })) }
-    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body)) }
+    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body).buffer) }
     formData() { return Promise.resolve(new FormData()) }
     clone() { return new Response(this._body, { status: this.status, headers: this.headers, url: this.url }) }
     static json(data, init) { return new Response(JSON.stringify(data), Object.assign({ headers: { 'content-type': 'application/json' } }, init)) }
@@ -462,33 +462,20 @@
     }
     return out
   }
-  // Typed arrays are plain arrays here (no binary data yet).
-  for (const name of ['Uint8Array', 'Int8Array', 'Uint8ClampedArray', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array']) {
-    const T = function (x) {
-      if (typeof x === 'number') return new Array(x).fill(0)
-      if (x && typeof x.byteLength === 'number' && !Array.isArray(x)) return new Array(x.byteLength).fill(0)
-      return Array.from(x || [])
-    }
-    T.from = (a, f) => Array.from(a, f)
-    T.of = (...a) => a
-    T.BYTES_PER_ELEMENT = 1
-    g[name] = T
-  }
-  g.ArrayBuffer = function (n) { this.byteLength = n || 0 }
-  g.ArrayBuffer.isView = () => false
-  g.DataView = function (b) { this.buffer = b; this.byteLength = b ? b.byteLength : 0 }
   g.TextEncoder = class TextEncoder {
     get encoding() { return 'utf-8' }
     encode(s) {
       const out = []
       for (const ch of unescape(encodeURIComponent(String(s === undefined ? '' : s)))) out.push(ch.charCodeAt(0))
-      return out
+      return new Uint8Array(out)
     }
   }
   g.TextDecoder = class TextDecoder {
     constructor(label) { this.encoding = label || 'utf-8' }
     decode(bytes) {
       if (!bytes) return ''
+      if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes)
+      else if (bytes instanceof DataView) bytes = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
       let s = ''
       for (const b of Array.from(bytes)) s += '%' + (b < 16 ? '0' : '') + b.toString(16)
       try { return decodeURIComponent(s) } catch (_) { return Array.from(bytes).map(b => String.fromCharCode(b)).join('') }
@@ -499,7 +486,7 @@
   g.Blob = class Blob {
     constructor(parts, opts) { this._t = (parts || []).map(String).join(''); this.type = (opts && opts.type) || ''; this.size = this._t.length }
     text() { return Promise.resolve(this._t) }
-    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._t)) }
+    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._t).buffer) }
     slice(a, b) { return new Blob([this._t.slice(a, b)], { type: this.type }) }
   }
   g.File = class File extends g.Blob { constructor(parts, name, opts) { super(parts, opts); this.name = name; this.lastModified = Date.now() } }
@@ -563,13 +550,6 @@
       return f
     },
   })
-  document.createTreeWalker = (root) => {
-    const nodes = []
-    const walk = n => { for (const c of n.childNodes) { nodes.push(c); walk(c) } }
-    walk(root)
-    let i = -1
-    return { currentNode: root, nextNode() { i++; this.currentNode = nodes[i] || null; return this.currentNode } }
-  }
   document.implementation = { hasFeature: () => true, createHTMLDocument: () => new DOMParser().parseFromString('', 'text/html') }
   g.Image = function (w, h) { const i = document.createElement('img'); if (w) i.width = w; if (h) i.height = h; return i }
   g.Audio = function (src) { const a = document.createElement('audio'); if (src) a.src = src; return a }
@@ -833,7 +813,11 @@
       configurable: true, enumerable: true,
       get() {
         const m = Object.create(NamedNodeMap.prototype), list = pairs.call(this)
-        list.forEach((a, i) => { m[i] = new Attr(a.name, a.value, this) })
+        list.forEach((a, i) => {
+          const at = new Attr(a.name, a.value, this)
+          m[i] = at
+          if (!(a.name in m)) Object.defineProperty(m, a.name, { value: at, configurable: true })
+        })
         Object.defineProperty(m, 'length', { value: list.length })
         Object.defineProperty(m, '_el', { value: this })
         return m
@@ -891,4 +875,183 @@
   iface('Screen', g.screen)
   iface('Location', g.location)
   iface('Window', null, EventTarget)
+  g.HTMLCollection = g.NodeList
+
+  // ------------------------------------------------- tree walking
+  const NodeFilter = {
+    FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+    SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 0x1, SHOW_ATTRIBUTE: 0x2, SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8,
+    SHOW_PROCESSING_INSTRUCTION: 0x40, SHOW_COMMENT: 0x80, SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200, SHOW_DOCUMENT_FRAGMENT: 0x400,
+  }
+  g.NodeFilter = NodeFilter
+  const judge = (w, n) => {
+    if (!(w.whatToShow & (1 << (n.nodeType - 1)))) return 3
+    const f = w.filter
+    if (!f) return 1
+    return (typeof f === 'function' ? f(n) : f.acceptNode(n)) || 1
+  }
+  const following = (n, root, skipKids) => {
+    if (!skipKids && n.firstChild) return n.firstChild
+    for (; n && n !== root; n = n.parentNode) if (n.nextSibling) return n.nextSibling
+    return null
+  }
+  const preceding = (n, root) => {
+    if (n === root) return null
+    let p = n.previousSibling
+    if (!p) return n.parentNode
+    while (p.lastChild) p = p.lastChild
+    return p
+  }
+  class TreeWalker {
+    constructor(root, what, filter) { this.root = root; this.whatToShow = what === undefined ? 0xFFFFFFFF : what >>> 0; this.filter = filter || null; this.currentNode = root }
+    nextNode() {
+      let n = this.currentNode
+      for (let skip = false; (n = following(n, this.root, skip));) {
+        const r = judge(this, n)
+        if (r === 1) return (this.currentNode = n)
+        skip = r === 2
+      }
+      return null
+    }
+    previousNode() {
+      for (let n = this.currentNode; (n = preceding(n, this.root));) if (judge(this, n) === 1) return (this.currentNode = n)
+      return null
+    }
+    parentNode() {
+      for (let n = this.currentNode; n && n !== this.root;) { n = n.parentNode; if (n && judge(this, n) === 1) return (this.currentNode = n) }
+      return null
+    }
+    firstChild() { for (let n = this.currentNode.firstChild; n; n = n.nextSibling) if (judge(this, n) === 1) return (this.currentNode = n); return null }
+    lastChild() { for (let n = this.currentNode.lastChild; n; n = n.previousSibling) if (judge(this, n) === 1) return (this.currentNode = n); return null }
+    nextSibling() { for (let n = this.currentNode.nextSibling; n; n = n.nextSibling) if (judge(this, n) === 1) return (this.currentNode = n); return null }
+    previousSibling() { for (let n = this.currentNode.previousSibling; n; n = n.previousSibling) if (judge(this, n) === 1) return (this.currentNode = n); return null }
+  }
+  class NodeIterator {
+    constructor(root, what, filter) { this.root = root; this.whatToShow = what === undefined ? 0xFFFFFFFF : what >>> 0; this.filter = filter || null; this.referenceNode = root; this.pointerBeforeReferenceNode = true }
+    nextNode() {
+      let n = this.referenceNode
+      if (this.pointerBeforeReferenceNode) { this.pointerBeforeReferenceNode = false; if (judge(this, n) === 1) return n }
+      while ((n = following(n, this.root, false))) { this.referenceNode = n; if (judge(this, n) === 1) return n }
+      return null
+    }
+    previousNode() {
+      let n = this.referenceNode
+      if (!this.pointerBeforeReferenceNode) { this.pointerBeforeReferenceNode = true; if (judge(this, n) === 1) return n }
+      while ((n = preceding(n, this.root))) { this.referenceNode = n; if (judge(this, n) === 1) return n }
+      return null
+    }
+    detach() {}
+  }
+  g.TreeWalker = TreeWalker
+  g.NodeIterator = NodeIterator
+  Document.prototype.createTreeWalker = (root, what, filter) => new TreeWalker(root, what, filter)
+  Document.prototype.createNodeIterator = (root, what, filter) => new NodeIterator(root, what, filter)
+
+  // ------------------------------------------------- node comparisons, hit tests
+  Node.prototype.isEqualNode = function (o) {
+    if (!o || o.nodeType !== this.nodeType || o.nodeName !== this.nodeName) return false
+    if (this.nodeType !== 1) return o.nodeValue === this.nodeValue && (this.nodeType !== 11 && this.nodeType !== 9 || sameKids(this, o))
+    const a = this.attributes, b = o.attributes
+    if (a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) if (o.getAttribute(a[i].name) !== a[i].value) return false
+    return sameKids(this, o)
+  }
+  const sameKids = (x, y) => {
+    const a = x.childNodes, b = y.childNodes
+    if (a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) if (!a[i].isEqualNode(b[i])) return false
+    return true
+  }
+  // Without a laid-out hit test from scripts yet, the body is what's at any point on the page.
+  Document.prototype.elementFromPoint = function (x, y) { return x >= 0 && y >= 0 && x <= g.innerWidth && y <= g.innerHeight ? this.body : null }
+  Document.prototype.elementsFromPoint = function (x, y) { const e = this.elementFromPoint(x, y); return e ? [e, this.documentElement] : [] }
+  Document.prototype.caretRangeFromPoint = () => null
+  if (g.HTMLSelectElement) {
+    const SP = HTMLSelectElement.prototype
+    if (typeof SP.add !== 'function') SP.add = function (o, before) {
+      const ref = typeof before === 'number' ? this.options[before] : before
+      ref && ref.parentNode ? ref.parentNode.insertBefore(o, ref) : this.appendChild(o)
+    }
+  }
+
+  // ------------------------------------------------- messaging
+  class MessagePort extends EventTarget {
+    constructor() { super(); this._other = null; this._open = false; this._queue = []; this.onmessage = null }
+    postMessage(data) {
+      const to = this._other
+      if (!to) return
+      const copy = typeof structuredClone === 'function' ? structuredClone(data) : data
+      setTimeout(() => {
+        if (!to._open && !to.onmessage) { to._queue.push(copy); return }
+        to._deliver(copy)
+      }, 0)
+    }
+    _deliver(data) { const e = new Event('message'); e.data = data; e.ports = []; this.dispatchEvent(e); if (typeof this.onmessage === 'function') this.onmessage(e) }
+    start() { this._open = true; const q = this._queue; this._queue = []; for (const d of q) this._deliver(d) }
+    close() { this._other = null }
+    addEventListener(t, f, o) { super.addEventListener(t, f, o); if (t === 'message') this.start() }
+  }
+  g.MessagePort = MessagePort
+  g.MessageChannel = class MessageChannel {
+    constructor() { this.port1 = new MessagePort(); this.port2 = new MessagePort(); this.port1._other = this.port2; this.port2._other = this.port1 }
+  }
+  const channels = {}
+  g.BroadcastChannel = class BroadcastChannel extends EventTarget {
+    constructor(name) { super(); this.name = String(name); this.onmessage = null; (channels[this.name] = channels[this.name] || []).push(this) }
+    postMessage(data) {
+      for (const c of channels[this.name] || []) if (c !== this) setTimeout(() => { const e = new Event('message'); e.data = data; c.dispatchEvent(e); if (typeof c.onmessage === 'function') c.onmessage(e) }, 0)
+    }
+    close() { const l = channels[this.name] || []; const k = l.indexOf(this); if (k >= 0) l.splice(k, 1) }
+  }
+
+  // ------------------------------------------------- constructable style sheets
+  class CSSRule { constructor(text, sheet) { this.cssText = text; this.parentStyleSheet = sheet; const m = /^\s*([^{]+)\{/.exec(text); this.selectorText = m ? m[1].trim() : ''; this.type = 1 } }
+  g.CSSRule = CSSRule
+  g.CSSStyleRule = CSSRule
+  g.CSSStyleSheet = class CSSStyleSheet {
+    constructor(opts) { this.cssRules = []; this.disabled = !!(opts && opts.disabled); this.media = { mediaText: (opts && opts.media) || '' }; this.ownerNode = null; this.href = null }
+    get rules() { return this.cssRules }
+    insertRule(text, at) { at = at === undefined ? 0 : at; this.cssRules.splice(at, 0, new CSSRule(String(text), this)); this._sync(); return at }
+    deleteRule(at) { this.cssRules.splice(at, 1); this._sync() }
+    addRule(sel, body, at) { return this.insertRule(sel + '{' + body + '}', at === undefined ? this.cssRules.length : at) }
+    removeRule(at) { this.deleteRule(at || 0) }
+    replaceSync(text) {
+      this.cssRules = []
+      let depth = 0, start = 0
+      text = String(text)
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === '{') depth++
+        else if (text[i] === '}' && --depth === 0) { this.cssRules.push(new CSSRule(text.slice(start, i + 1).trim(), this)); start = i + 1 }
+      }
+      this._sync()
+    }
+    replace(text) { this.replaceSync(text); return Promise.resolve(this) }
+    // An adopted sheet is shown through a <style> Volant keeps for it.
+    _sync() { if (this._style) this._style.textContent = this.disabled ? '' : this.cssRules.map(r => r.cssText).join('\n') }
+  }
+  {
+    let adopted = []
+    Object.defineProperty(Document.prototype, 'adoptedStyleSheets', {
+      configurable: true,
+      get() { return adopted },
+      set(list) {
+        for (const s of adopted) if (s._style && !list.includes(s)) { s._style.remove(); s._style = null }
+        adopted = Array.from(list)
+        for (const s of adopted) if (!s._style) { s._style = document.createElement('style'); (document.head || document.documentElement).appendChild(s._style); s._sync() }
+      },
+    })
+  }
+
+  // <a> and <area> expose the parts of their address, like location does.
+  for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement]) {
+    if (!C) continue
+    for (const k of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) {
+      if (Object.getOwnPropertyDescriptor(C.prototype, k)) continue
+      Object.defineProperty(C.prototype, k, {
+        configurable: true, enumerable: true,
+        get() { const h = this.href; if (!h) return k === 'origin' ? 'null' : ''; try { return new URL(h)[k] } catch (_) { return '' } },
+        set(v) { if (k === 'origin') return; try { const u = new URL(this.href); u[k] = v; this.setAttribute('href', u.href) } catch (_) {} },
+      })
+    }
+  }
 })(window)

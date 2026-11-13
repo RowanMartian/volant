@@ -13,6 +13,7 @@
 //!   JSON, the Error types, Map, Set, Date, console and timers.
 //!
 //! * [`regex`] and [`regexp`]: regular expressions and the methods using them.
+//! * [`typed`]: ArrayBuffer, the typed arrays and DataView.
 //! * [`promise`]: the event loop, Promises, async/await, timers, generators,
 //!   iterators and Symbols.
 //!
@@ -27,6 +28,7 @@ pub mod promise;
 pub mod proxy;
 pub mod regex;
 pub mod regexp;
+pub mod typed;
 pub mod vm;
 
 pub use interp::{Interp, Value};

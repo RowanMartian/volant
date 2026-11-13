@@ -414,6 +414,8 @@ struct Protos {
     class_list: Obj,
     style: Obj,
     event: Obj,
+    /// NodeList.prototype: lists are arrays underneath, with `item()` on top.
+    node_list: Obj,
 }
 
 pub struct State {
@@ -904,7 +906,9 @@ fn wrap_opt(i: &Interp, st: &S, id: Option<NodeId>) -> Value {
 fn wrap_list(i: &Interp, st: &S, ids: Vec<NodeId>) -> Value {
     let items = ids.into_iter().map(|id| wrap(i, st, id)).collect();
     let arr = i.array(items);
-    // `item(k)` as on NodeList / HTMLCollection.
+    if let (Value::Obj(o), Some(p)) = (&arr, st.borrow().protos.as_ref().map(|p| p.node_list.clone())) {
+        o.borrow_mut().proto = Some(p);
+    }
     arr
 }
 
@@ -1787,6 +1791,7 @@ fn install(i: &mut Interp, st: &S) {
     let event = mk(i, Some(i.object_proto.clone()));
     let html_element = mk(i, Some(element.clone()));
     let html_document = mk(i, Some(document.clone()));
+    let node_list = mk(i, Some(i.array_proto.clone()));
     // Each element interface: (name, its tags, the interface it extends).
     let mut by_tag: HashMap<&'static str, Obj> = HashMap::new();
     let mut ifaces: Vec<(&'static str, Obj)> = Vec::new();
@@ -1825,6 +1830,7 @@ fn install(i: &mut Interp, st: &S) {
         class_list: class_list.clone(),
         style: style_p.clone(),
         event: event.clone(),
+        node_list: node_list.clone(),
     });
 
     // Constructors, for instanceof.
@@ -1852,6 +1858,26 @@ fn install(i: &mut Interp, st: &S) {
     let _ = element_ctor;
     ctor(i, "HTMLElement", &html_element);
     ctor(i, "HTMLDocument", &html_document);
+    ctor(i, "NodeList", &node_list);
+    node_list.borrow_mut().set_own("\0@toStringTag", str_val("NodeList"));
+    def(i, &node_list, "item", |i, t, a| {
+        let n = i.to_number(&arg(&a, 0))?;
+        let v = i.get(&t, &(if n.is_finite() && n >= 0.0 { n as usize } else { usize::MAX }).to_string())?;
+        Ok(if matches!(v, Value::Undefined) { Value::Null } else { v })
+    });
+    def(i, &node_list, "namedItem", |i, t, a| {
+        let name = i.to_str(&arg(&a, 0))?;
+        for el in volant_js::builtins::items(i, &t)? {
+            for k in ["id", "name"] {
+                if let Value::Str(v) = i.get(&el, k)? {
+                    if *v == *name {
+                        return Ok(el);
+                    }
+                }
+            }
+        }
+        Ok(Value::Null)
+    });
     for (name, proto) in &ifaces {
         ctor(i, name, proto);
         proto.borrow_mut().set_own("\0@toStringTag", str_val(name));
@@ -1884,7 +1910,19 @@ fn install(i: &mut Interp, st: &S) {
             }
             Ok(Value::Undefined)
         });
-        html_element.borrow_mut().set_slot(&format!("on{ev}"), Slot::Accessor(Some(get), Some(set)));
+        html_element.borrow_mut().set_slot(&format!("on{ev}"), Slot::Accessor(Some(get.clone()), Some(set.clone())));
+        html_document.borrow_mut().set_slot(&format!("on{ev}"), Slot::Accessor(Some(get), Some(set)));
+        // On window they're plain properties, so `onload = f` works as a global too.
+        let mut g = i.global_obj.borrow_mut();
+        if g.get_own(&format!("on{ev}")).is_none() {
+            g.set_own(&format!("on{ev}"), Value::Null);
+        }
+    }
+    for ev in ["message", "messageerror", "popstate", "hashchange", "beforeunload", "unload", "pageshow", "pagehide", "online", "offline", "storage", "languagechange", "unhandledrejection", "rejectionhandled", "orientationchange", "devicemotion", "deviceorientation"] {
+        let mut g = i.global_obj.borrow_mut();
+        if g.get_own(&format!("on{ev}")).is_none() {
+            g.set_own(&format!("on{ev}"), Value::Null);
+        }
     }
 
     // Object.prototype.toString tags (libraries tell plain objects from host objects by these).
@@ -3374,7 +3412,7 @@ const EVENT_HANDLERS: &[&str] = &[
     "abort", "blur", "cancel", "change", "click", "close", "contextmenu", "dblclick", "drag", "dragend", "dragenter", "dragleave", "dragover", "dragstart", "drop",
     "error", "focus", "focusin", "focusout", "input", "invalid", "keydown", "keypress", "keyup", "load", "mousedown", "mouseenter", "mouseleave", "mousemove",
     "mouseout", "mouseover", "mouseup", "pointerdown", "pointermove", "pointerup", "pointercancel", "pointerover", "pointerout", "pointerenter", "pointerleave",
-    "reset", "resize", "scroll", "select", "submit", "toggle", "wheel", "touchstart", "touchmove", "touchend", "touchcancel", "animationend", "transitionend",
+    "reset", "resize", "scroll", "select", "submit", "toggle", "wheel", "animationend", "transitionend",
     "loadstart", "loadeddata", "loadedmetadata", "canplay", "play", "pause", "ended", "timeupdate", "volumechange", "beforeinput", "copy", "cut", "paste",
 ];
 
