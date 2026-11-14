@@ -148,12 +148,12 @@
     dispatchEvent(e) {
       try { e.target = this; e.currentTarget = this } catch (_) {}
       const h = this['on' + e.type]
-      if (typeof h === 'function') h.call(this, e)
+      if (typeof h === 'function' && g.__fullyActive(h)) h.call(this, e)
       const l = (this.__listeners && this.__listeners[e.type]) || []
       for (const x of l.slice()) {
         if (x.once) this.removeEventListener(e.type, x.f)
-        if (typeof x.f === 'function') x.f.call(this, e)
-        else if (x.f && x.f.handleEvent) x.f.handleEvent(e)
+        if (typeof x.f === 'function') { if (g.__fullyActive(x.f)) x.f.call(this, e) }
+        else if (x.f && x.f.handleEvent) { const he = x.f.handleEvent; if (g.__fullyActive(he)) he.call(x.f, e) }
       }
       return !e.defaultPrevented
     }
@@ -3434,6 +3434,7 @@
     let cdHint = null
     const isCD = t => t === 3 || t === 4 || t === 7 || t === 8
     const nodeLength = n => isCD(n.nodeType) ? n.data.length : n.nodeType === 10 ? 0 : n.childNodes.length
+    const isTxt = n => n.nodeType === 3 || n.nodeType === 4
     const indexOf = n => { let i = 0; for (let c = n.previousSibling; c; c = c.previousSibling) i++; return i }
     const rootOf = n => { while (n.parentNode) n = n.parentNode; return n }
     const inclusiveAncestor = (a, b) => { for (; b; b = b.parentNode) if (a === b) return true; return false }
@@ -3562,11 +3563,11 @@
       detach() {}
       toString() {
         const { _sc: sc, _so: so, _ec: ec, _eo: eo } = this
-        if (sc === ec && sc.nodeType === 3) return sc.data.slice(so, eo)
-        let s = sc.nodeType === 3 ? sc.data.slice(so) : ''
+        if (sc === ec && isTxt(sc)) return sc.data.slice(so, eo)
+        let s = isTxt(sc) ? sc.data.slice(so) : ''
         const root = this.commonAncestorContainer
-        for (let n = root.firstChild; n; n = nextIn(n, root)) if (n.nodeType === 3 && contained(n, this)) s += n.data
-        if (ec.nodeType === 3) s += ec.data.slice(0, eo)
+        for (let n = root.firstChild; n; n = nextIn(n, root)) if (isTxt(n) && contained(n, this)) s += n.data
+        if (isTxt(ec)) s += ec.data.slice(0, eo)
         return s
       }
       // Where the range collapses to once its contents are taken out.
@@ -3635,14 +3636,14 @@
       insertNode(node) {
         need(arguments.length, 1, 'Range.insertNode'); wantNode(node, 'Range.insertNode')
         const sc = this._sc, t = sc.nodeType
-        if (t === 7 || t === 8 || (t === 3 && !sc.parentNode) || sc === node) throw bad('HierarchyRequestError', "a node can't be inserted there")
-        let ref = t === 3 ? sc : sc.childNodes[this._so] || null
+        if (t === 7 || t === 8 || ((t === 3 || t === 4) && !sc.parentNode) || sc === node) throw bad('HierarchyRequestError', "a node can't be inserted there")
+        let ref = (t === 3 || t === 4) ? sc : sc.childNodes[this._so] || null
         const parent = ref ? ref.parentNode : sc
         // What insertBefore would refuse, checked before the text is split.
         const nt = node.nodeType
         if (isCD(parent.nodeType) || parent.nodeType === 10 || inclusiveAncestor(node, parent) || nt === 9 || (nt === 10 && parent.nodeType !== 9) || (nt === 3 && parent.nodeType === 9))
           throw bad('HierarchyRequestError', "the node can't be inserted there")
-        if (t === 3) ref = sc.splitText(this._so)
+        if ((t === 3 || t === 4)) ref = sc.splitText(this._so)
         if (node === ref) ref = ref.nextSibling
         if (node.parentNode) node.parentNode.removeChild(node)
         let at = ref ? indexOf(ref) : nodeLength(parent)
@@ -3653,8 +3654,8 @@
       surroundContents(np) {
         need(arguments.length, 1, 'Range.surroundContents'); wantNode(np, 'Range.surroundContents')
         const common = this.commonAncestorContainer
-        for (let n = this._sc; n !== common; n = n.parentNode) if (n.nodeType !== 3 && !inclusiveAncestor(n, this._ec)) throw bad('InvalidStateError', 'the range partly selects a non-text node')
-        for (let n = this._ec; n !== common; n = n.parentNode) if (n.nodeType !== 3 && !inclusiveAncestor(n, this._sc)) throw bad('InvalidStateError', 'the range partly selects a non-text node')
+        for (let n = this._sc; n !== common; n = n.parentNode) if (!isTxt(n) && !inclusiveAncestor(n, this._ec)) throw bad('InvalidStateError', 'the range partly selects a non-text node')
+        for (let n = this._ec; n !== common; n = n.parentNode) if (!isTxt(n) && !inclusiveAncestor(n, this._sc)) throw bad('InvalidStateError', 'the range partly selects a non-text node')
         if (np.nodeType === 9 || np.nodeType === 10 || np.nodeType === 11) throw bad('InvalidNodeTypeError', "that node can't surround a range")
         const frag = this.extractContents()
         while (np.firstChild) np.removeChild(np.firstChild)
@@ -3674,12 +3675,12 @@
         const rects = [], seen = new Set()
         const add = el => { if (!el || seen.has(el)) return; seen.add(el); const r = el.getBoundingClientRect(); if (r.width || r.height) rects.push(r) }
         const { _sc: sc, _ec: ec } = this
-        if (sc.nodeType === 3) add(sc.parentElement)
+        if (isTxt(sc)) add(sc.parentElement)
         const root = this.commonAncestorContainer
         for (let n = root.firstChild; n;) {
-          if (contained(n, this)) { if (n.nodeType === 1) add(n); else if (n.nodeType === 3) add(n.parentElement); n = skipIn(n, root) } else n = nextIn(n, root)
+          if (contained(n, this)) { if (n.nodeType === 1) add(n); else if (isTxt(n)) add(n.parentElement); n = skipIn(n, root) } else n = nextIn(n, root)
         }
-        if (ec.nodeType === 3) add(ec.parentElement)
+        if (isTxt(ec)) add(ec.parentElement)
         return rects
       }
       getBoundingClientRect() {
@@ -4119,65 +4120,98 @@
 
   // ---------------------------------------------------------------- frames
   // Each iframe gets a document of its own: about:blank, its srcdoc, or its
-  // src when that's same-origin (scripts in it don't run). Its window shares
-  // this one's globals, with its own document and location.
+  // src when that's same-origin. Its window is a realm of its own: the frame's
+  // scripts run with it as their global (built-ins are shared with this one).
   {
-    const frames = new WeakMap()
-    const frameOf = el => {
-      let f = frames.get(el)
-      if (f) return f
-      f = { el, url: 'about:blank', doc: __parseDocument(''), blocked: false, gen: 0 }
+    const frames = new WeakMap(), docOf = new WeakMap()
+    const makeWin = f => {
       const win = Object.create(g)
       const loc = {
         get href() { return f.url },
         set href(v) { navigate(f, v) },
         get origin() { const p = __urlParse(f.url); return p ? p[1] : 'null' },
         get protocol() { const p = __urlParse(f.url); return p ? p[2] : '' },
+        get host() { const p = __urlParse(f.url); return p ? p[1].replace(/^[a-z]+:\/\//, '') : '' },
+        get hostname() { const p = __urlParse(f.url); return p ? p[1].replace(/^[a-z]+:\/\//, '').replace(/:\d+$/, '') : '' },
         get pathname() { const p = __urlParse(f.url); return p ? p[8] : '' },
         get search() { const p = __urlParse(f.url); return p ? p[9] : '' },
         get hash() { const p = __urlParse(f.url); return p ? p[10] : '' },
         assign(v) { navigate(f, v) }, replace(v) { navigate(f, v) }, reload() {},
         toString() { return f.url },
       }
+      const own = v => ({ value: v, writable: true, configurable: true })
       Object.defineProperties(win, {
-        document: { get: () => (f.blocked ? null : f.doc), configurable: true },
+        document: { get: () => (f.blocked && f.win === win ? null : docOf.get(win)), configurable: true },
         window: { get: () => win, configurable: true },
-        self: { get: () => win, configurable: true },
+        self: { get: () => win, set(v) { Object.defineProperty(win, 'self', own(v)) }, configurable: true },
+        globalThis: own(win),
         frames: { get: () => win, configurable: true },
         parent: { get: () => g, configurable: true },
         top: { get: () => g.top, configurable: true },
-        frameElement: { get: () => el, configurable: true },
+        frameElement: { get: () => f.el, configurable: true },
         location: { get: () => loc, set: v => navigate(f, v), configurable: true },
+        length: { get: () => win.document ? win.document.getElementsByTagName('iframe').length : 0, configurable: true },
+        onload: own(null), onerror: own(null), onmessage: own(null),
       })
-      f.win = win
+      return win
+    }
+    // `f.doc` is now the frame's document: the window that goes with it (a new
+    // one, except that the first document after the initial about:blank keeps it).
+    const attach = f => {
+      if (!f.win || !f.initial) f.win = makeWin(f)
+      f.initial = false
+      docOf.set(f.win, f.doc)
+      f.realm = __frameWindow(f.win, f.doc, f.el)
+    }
+    const frameOf = el => {
+      let f = frames.get(el)
+      if (f) return f
+      f = { el, url: 'about:blank', doc: __parseDocument(''), blocked: false, gen: 0, win: null, initial: false }
+      attach(f)
+      f.initial = true
       frames.set(el, f)
       return f
     }
-    const fireLoad = f => setTimeout(() => f.el.dispatchEvent(new Event('load')), 0)
+    // Runs the document's scripts in order (fetching external ones), then its
+    // DOMContentLoaded, its window's load and the iframe's load.
+    const finish = async (f, gen) => {
+      const doc = f.doc, win = f.win
+      for (const s of Array.from(doc.getElementsByTagName('script'))) {
+        if (gen !== f.gen) return
+        __runFrameScript(f.realm, s)
+      }
+      if (gen !== f.gen) return
+      doc.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }))
+      setTimeout(() => {
+        if (gen !== f.gen) return
+        win.dispatchEvent(new Event('load'))
+        f.el.dispatchEvent(new Event('load'))
+      }, 0)
+    }
+    const fireLoad = f => { const gen = f.gen; setTimeout(() => { if (gen === f.gen) f.el.dispatchEvent(new Event('load')) }, 0) }
     const navigate = (f, v) => {
       v = String(v)
       const p = __urlParse(v, document.baseURI)
       if (!p) throw new DOMException(v + ' is not a valid URL.', 'SyntaxError')
       load(f, p[0])
     }
+    const show = (f, doc, url, gen) => { f.url = url; f.blocked = false; f.doc = doc; attach(f); finish(f, gen) }
     const load = (f, href) => {
       const gen = ++f.gen
-      if (href === 'about:blank') { f.url = href; f.blocked = false; f.doc = __parseDocument(''); fireLoad(f); return }
+      if (href === 'about:blank') { show(f, __parseDocument(''), href, gen); return }
       const p = __urlParse(href)
       if (!p || p[1] !== location.origin) { f.url = href; f.blocked = true; fireLoad(f); return }
       fetch(href).then(r => r.text().then(t => {
         if (gen !== f.gen) return
         const ty = (r.headers.get('content-type') || 'text/html').split(';')[0].trim().toLowerCase()
-        f.url = r.url || href
-        f.blocked = false
-        f.doc = __parseDocument(t, ty, f.url)
-        f.el.dispatchEvent(new Event('load'))
+        const url = r.url || href
+        show(f, __parseDocument(t, ty, url), url, gen)
       })).catch(() => { if (gen === f.gen) fireLoad(f) })
     }
     const start = el => {
       const f = frameOf(el)
       const sd = el.getAttribute('srcdoc')
-      if (sd !== null) { f.gen++; f.url = 'about:srcdoc'; f.blocked = false; f.doc = __parseDocument(sd); fireLoad(f); return }
+      if (sd !== null) { show(f, __parseDocument(sd, 'text/html', 'about:srcdoc'), 'about:srcdoc', ++f.gen); return }
       const src = el.getAttribute('src')
       const p = src && src.trim() ? __urlParse(src, document.baseURI) : null
       load(f, p ? p[0] : 'about:blank')

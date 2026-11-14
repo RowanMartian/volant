@@ -313,7 +313,7 @@ pub fn structured_clone(i: &mut Interp, v: &Value, memo: &mut Vec<(Obj, Value)>)
             // The clone keeps the standard error type.
             let proto = ["EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", "URIError"]
                 .contains(&&*name)
-                .then(|| i.global_obj.borrow().get_own(&name).cloned())
+                .then(|| i.realms[0].0.borrow().get_own(&name).cloned())
                 .flatten();
             if let (Value::Obj(co), Some(Slot::Data(ctor))) = (&c, proto) {
                 let p = i.get(&ctor, "prototype")?;

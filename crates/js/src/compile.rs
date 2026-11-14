@@ -272,6 +272,18 @@ pub struct Code {
     pub call_names: Vec<(u32, Rc<str>)>,
     /// Its source text, for `toString`.
     pub src: Option<crate::parse::SrcSpan>,
+    /// The realm (global object) it was compiled in: 0 is the page's, others are frames'.
+    pub realm: Cell<u32>,
+}
+
+impl Code {
+    /// Marks this code and the functions inside it as belonging to `realm`.
+    pub fn set_realm(&self, realm: u32) {
+        self.realm.set(realm);
+        for f in &self.funcs {
+            f.set_realm(realm);
+        }
+    }
 }
 
 impl std::fmt::Debug for Code {
@@ -3147,6 +3159,7 @@ fn finish(st: FnState, name: Option<Rc<str>>, nparams: u32, method: bool, class_
         class_ctor,
         line,
         src: None,
+        realm: Cell::new(0),
     }
 }
 

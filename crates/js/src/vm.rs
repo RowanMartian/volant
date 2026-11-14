@@ -280,12 +280,24 @@ impl Interp {
     fn enter(&mut self, code: &Rc<Code>) {
         self.frames += 1;
         self.call_stack.push(code.clone());
+        // A function runs with the globals of the realm it was made in.
+        let r = code.realm.get();
+        if r != self.realm {
+            self.switch_realm(r);
+        }
     }
 
     #[inline]
     fn leave(&mut self) {
         self.frames = self.frames.saturating_sub(1);
         self.call_stack.pop();
+        let r = match self.call_stack.last() {
+            Some(c) => c.realm.get(),
+            None => self.base_realm,
+        };
+        if r != self.realm {
+            self.switch_realm(r);
+        }
     }
 
     /// A frame for `code` whose arguments are already on the stack at `bp`.
@@ -293,7 +305,9 @@ impl Interp {
     /// `nullish_this`: `this` (at bp - 2) is undefined or null.
     fn make_frame(&self, stack: &mut Vec<Value>, code: Rc<Code>, env: Option<Rc<Env>>, nullish_this: bool, bp: usize, argc: usize, construct: bool) -> Frame {
         if nullish_this && !code.strict && !code.arrow {
-            stack[bp - 2] = Value::Obj(self.global_obj.clone());
+            let r = code.realm.get();
+            let g = if r == self.realm { self.global_obj.clone() } else { self.realms[r as usize].0.clone() };
+            stack[bp - 2] = Value::Obj(g);
         }
         let lp = bp + argc;
         let need = lp + code.nlocals as usize;

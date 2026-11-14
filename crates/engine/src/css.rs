@@ -457,11 +457,22 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
         let start = *i;
         while *i < s.len() && (ident_char(s[*i]) || s[*i] == '\\') {
             if s[*i] == '\\' {
+                // An escape: up to six hex digits and one space after, or one character.
                 *i += 1;
+                let h = *i;
+                while *i < s.len() && *i - h < 6 && s[*i].is_ascii_hexdigit() {
+                    *i += 1;
+                }
+                if *i > h {
+                    if *i < s.len() && s[*i].is_whitespace() {
+                        *i += 1;
+                    }
+                    continue;
+                }
             }
             *i += 1;
         }
-        s[start..(*i).min(s.len())].iter().filter(|&&c| c != '\\').collect()
+        unescape(&s[start..(*i).min(s.len())].iter().collect::<String>())
     };
     while i < s.len() {
         let c = s[i];
@@ -534,6 +545,12 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
                     ("only-child", None) => Pseudo::OnlyChild,
                     ("first-of-type", None) => Pseudo::Nth(0, 1, false, true),
                     ("last-of-type", None) => Pseudo::Nth(0, 1, true, true),
+                    ("only-of-type", None) => {
+                        cur.pseudos.push(Pseudo::Nth(0, 1, false, true));
+                        cur.pseudos.push(Pseudo::Nth(0, 1, true, true));
+                        has = true;
+                        continue;
+                    }
                     ("root", None) => Pseudo::Root,
                     ("scope", None) => Pseudo::Scope,
                     ("link" | "any-link", None) => Pseudo::Link,
@@ -699,18 +716,54 @@ pub fn nth_matches(a: i32, b: i32, pos: i32) -> bool {
     }
 }
 
+/// Undoes CSS escapes: `\e9 ` (hex, then one optional space) and `\x`.
+fn unescape(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] == '\\' && i + 1 < c.len() {
+            let start = i + 1;
+            let mut j = start;
+            while j < c.len() && j - start < 6 && c[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            if j > start {
+                let n = u32::from_str_radix(&c[start..j].iter().collect::<String>(), 16).unwrap_or(0xFFFD);
+                out.push(char::from_u32(n).filter(|_| n != 0 && !(0xD800..0xE000).contains(&n)).unwrap_or('\u{FFFD}'));
+                if j < c.len() && c[j].is_whitespace() {
+                    j += 1;
+                }
+                i = j;
+            } else {
+                out.push(c[start]);
+                i = start + 1;
+            }
+        } else {
+            out.push(c[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 fn parse_attr(inner: &str) -> Option<(String, AttrOp)> {
     let inner = inner.trim();
+    // `[*|name]` and `[|name]`: any namespace, or none; matched by name here.
+    let inner = inner.strip_prefix("*|").or_else(|| inner.strip_prefix('|').filter(|r| !r.starts_with('='))).unwrap_or(inner);
     let ops = ["~=", "^=", "$=", "*=", "|=", "="];
     for op in ops {
         if let Some((name, value)) = inner.split_once(op) {
-            let name = name.trim().to_ascii_lowercase();
+            let name = unescape(name.trim()).to_ascii_lowercase();
             let mut v = value.trim();
             // `[type=text i]`: case flags are ignored.
             if let Some(stripped) = v.strip_suffix(" i").or_else(|| v.strip_suffix(" s")) {
                 v = stripped.trim();
             }
-            let v = v.trim_matches(|c| c == '"' || c == '\'').to_string();
+            let v = unescape(v.trim_matches(|c| c == '"' || c == '\''));
             let op = match op {
                 "~=" => AttrOp::Word(v),
                 "^=" => AttrOp::Prefix(v),

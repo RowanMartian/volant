@@ -542,3 +542,26 @@ fn live_ranges_and_mutation_observers() {
         "llo bold wo a\n4\n4\nllo bold wo <i></i>XXherld true\ncdef 2 e\nattributes:0/0:null characterData:0/0:x childList:2/1:null childList:1/0:null childList:1/0:null characterData:0/0:abcdef"
     );
 }
+
+#[test]
+fn frames_run_scripts_in_their_own_realm() {
+    let mut rt = page(r#"<body><script>
+        var where = 'page'
+        const f = document.createElement('iframe')
+        f.srcdoc = '<title>t</title><body onload="loaded = document.title"><p id=q>frame</p><script>var where = "frame"; function hi() { return where + " " + document.getElementById("q").textContent + " " + (document.defaultView === window) }<\/script>'
+        f.onload = () => {
+            const w = f.contentWindow
+            console.log(where, w.where, w.hi(), w.loaded, w.eval('where'), f.contentDocument.head.childNodes.length)
+            const cb = w.eval('(() => { window.parent.count++ })')
+            window.count = 0
+            document.body.addEventListener('x', cb)
+            document.body.dispatchEvent(new Event('x'))
+            f.remove()
+            document.body.dispatchEvent(new Event('x'))
+            console.log(count)
+        }
+        document.body.appendChild(f)
+    </script>"#);
+    rt.tick();
+    assert_eq!(console(&mut rt), "page frame frame frame true t frame 1\n1");
+}

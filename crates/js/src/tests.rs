@@ -678,3 +678,17 @@ fn async_arrow_with_defaults() {
 fn promise_subclasses() {
     assert_eq!(out("class P extends Promise {} const r = P.resolve(1); console.log(r instanceof P, r.then() instanceof P, P.all([]) instanceof P, P.race([1]) instanceof P, P.resolve(r) === r, P[Symbol.species] === P); function F(ex) { ex(() => {}, () => {}) } const q = Promise.resolve(1); q.constructor = { [Symbol.species]: F }; console.log(q.then() instanceof F); P.all([1, P.resolve(2)]).then(v => console.log(v.join()))"), "true true true true true true\ntrue\n1,2");
 }
+
+#[test]
+fn realms_keep_their_own_globals() {
+    use crate::interp::{Kind, Object, Value};
+    use std::{cell::RefCell, rc::Rc};
+    let mut i = crate::Interp::new();
+    let g2 = Rc::new(RefCell::new(Object::new(Some(i.global_obj.clone()), Kind::Plain)));
+    let r = i.new_realm(g2.clone());
+    i.global_obj.borrow_mut().set_own("frame", Value::Obj(g2.clone()));
+    i.run("var x = 'page'; let y = 'page lex'; function who() { return x }").unwrap();
+    i.run_in_realm(r, "var x = 'frame'; let y = 'frame lex'; function who() { return x + ' ' + y + ' ' + (this === globalThis) } function run(s) { return eval(s) } Promise.resolve().then(() => { seen = x })", None).unwrap();
+    let v = i.run("[who(), frame.who(), frame.run('x + y'), typeof seen, frame.seen, x, y, [1].map(frame.who)[0]].join('|')").unwrap();
+    assert_eq!(i.to_str(&v).unwrap().to_string(), "page|frame frame lex false|frameframe lex|undefined|frame|page|page lex|frame frame lex false");
+}

@@ -395,6 +395,12 @@ pub struct Interp {
     pub global_obj: Obj,
     /// The global `let`, `const` and `class` declarations of scripts.
     pub global_lex: Obj,
+    /// Every realm's global object and lexical globals (0 is the page's), and
+    /// the one code is running in now: a frame's functions run with its globals.
+    pub realms: Vec<(Obj, Obj)>,
+    pub realm: u32,
+    /// The realm in effect when no script code is on the stack.
+    pub base_realm: u32,
     pub object_proto: Obj,
     pub function_proto: Obj,
     pub array_proto: Obj,
@@ -480,6 +486,9 @@ impl Interp {
         let global_obj = mk(Kind::Plain);
         let global_lex = Rc::new(RefCell::new(Object::new(None, Kind::Plain)));
         let mut i = Interp {
+            realms: vec![(global_obj.clone(), global_lex.clone())],
+            realm: 0,
+            base_realm: 0,
             global_lex,
             array_proto: mk(Kind::Array(Vec::new())),
             string_proto: mk(Kind::Plain),
@@ -579,7 +588,7 @@ impl Interp {
                 None => (name, false),
             };
             if name != "Error" {
-                let proto = if dom { None } else { match self.global_obj.borrow().get_own(name) {
+                let proto = if dom { None } else { match self.realms[0].0.borrow().get_own(name) {
                     Some(Slot::Data(Value::Obj(c))) => match c.borrow().get_own("prototype") {
                         Some(Slot::Data(Value::Obj(p))) => Some(p.clone()),
                         _ => None,
@@ -590,7 +599,7 @@ impl Interp {
                     o.borrow_mut().proto = proto;
                 } else if let Some(code) = dom_exception_code(name) {
                     // HierarchyRequestError and the rest: DOMExceptions, with their legacy codes.
-                    if let Some(Slot::Data(Value::Obj(c))) = self.global_obj.borrow().get_own("DOMException") {
+                    if let Some(Slot::Data(Value::Obj(c))) = self.realms[0].0.borrow().get_own("DOMException") {
                         if let Some(Slot::Data(Value::Obj(p))) = c.borrow().get_own("prototype") {
                             o.borrow_mut().proto = Some(p.clone());
                         }
@@ -1142,11 +1151,54 @@ impl Interp {
             None => crate::compile::Compiler::script(&prog),
         }
         .map_err(|e| format!("SyntaxError: {e}"))?;
+        if self.realm != 0 {
+            code.set_realm(self.realm);
+        }
         let this = Value::Obj(self.global_obj.clone());
         let r = self.run_code(code, this);
         // Promise reactions run as soon as the script ends; timers wait for the caller's event loop.
         self.run_microtasks();
         r.map_err(|v| self.describe(&v))
+    }
+
+    /// A new realm whose global object is `global` (a frame's window); its id.
+    pub fn new_realm(&mut self, global: Obj) -> u32 {
+        let lex = Rc::new(RefCell::new(Object::new(None, Kind::Plain)));
+        self.realms.push((global, lex));
+        (self.realms.len() - 1) as u32
+    }
+
+    /// Makes `realm` the one code runs in (its globals become the globals).
+    pub fn switch_realm(&mut self, realm: u32) {
+        if realm != self.realm {
+            if let Some((g, l)) = self.realms.get(realm as usize) {
+                self.global_obj = g.clone();
+                self.global_lex = l.clone();
+                self.realm = realm;
+            }
+        }
+    }
+
+    /// The realm a function was made in (built-ins and natives: the page's, 0).
+    pub fn realm_of(f: &Value) -> u32 {
+        match f {
+            Value::Obj(o) => match &o.borrow().kind {
+                Kind::Function(Callable::Closure(c)) => c.code.realm.get(),
+                _ => 0,
+            },
+            _ => 0,
+        }
+    }
+
+    /// Runs a classic script in `realm` (as `run_at` does in the current one).
+    pub fn run_in_realm(&mut self, realm: u32, src: &str, url: Option<&str>) -> Result<Value, String> {
+        let (was, base) = (self.realm, self.base_realm);
+        self.switch_realm(realm);
+        self.base_realm = realm;
+        let r = self.run_at(src, url);
+        self.base_realm = base;
+        self.switch_realm(was);
+        r
     }
 
     /// "TypeError: message" for an exception value.

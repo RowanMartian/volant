@@ -465,6 +465,42 @@ pub struct State {
     /// the page has live ranges: what tree changes scripts are told about.
     watched: HashMap<NodeId, u32>,
     ranges_live: bool,
+    /// Frames' windows: by document, the node standing for the window (as an
+    /// event target) and the window's script realm; and each window node's document.
+    frame_windows: HashMap<NodeId, (NodeId, u32)>,
+    window_docs: HashMap<NodeId, NodeId>,
+    /// Each frame realm's iframe and document, and each iframe's current document:
+    /// a realm whose document isn't its iframe's current one (or whose iframe
+    /// was removed) isn't fully active, and its callbacks don't run.
+    realm_frames: HashMap<u32, (NodeId, NodeId)>,
+    frame_docs: HashMap<NodeId, NodeId>,
+}
+
+impl State {
+    /// Whether listeners on `node` may run: not when it's in (or is the window
+    /// of) a frame's document that is no longer fully active.
+    fn target_active(&self, node: NodeId) -> bool {
+        if self.frame_windows.is_empty() || node == WINDOW {
+            return true;
+        }
+        let doc = match self.window_docs.get(&node) {
+            Some(&d) => d,
+            None => owner_doc(self, node),
+        };
+        doc == ROOT || self.frame_windows.get(&doc).is_none_or(|w| self.fully_active(w.1))
+    }
+
+    /// Whether code from `realm` may run: the page's always; a frame's while
+    /// its document is the one shown in an iframe that's in the page.
+    fn fully_active(&self, realm: u32) -> bool {
+        if realm == 0 {
+            return true;
+        }
+        match self.realm_frames.get(&realm) {
+            Some(&(el, doc)) => self.frame_docs.get(&el) == Some(&doc) && connected(&self.dom, el),
+            None => true,
+        }
+    }
 }
 
 /// The document a node belongs to: the document at the root of its tree, or
@@ -993,6 +1029,23 @@ fn ensure_structure(dom: &mut Dom) {
             }
         }
         let _ = insert(dom, html, b, None);
+    } else {
+        // Head content written before `<body>` without a `<head>` tag goes
+        // into the head the parser implied (`<title>…<body>`).
+        let head_like = |d: &Dom, n: NodeId| {
+            matches!(d.tag(n), Some("title" | "meta" | "link" | "base" | "style" | "script" | "noscript" | "template"))
+                || matches!(&d.nodes[n as usize].data, Data::Text(t) if t.trim().is_empty())
+                || matches!(&d.nodes[n as usize].data, Data::Comment(_))
+        };
+        let kids = dom.children(html).to_vec();
+        if let Some(at) = kids.iter().position(|&c| c == head) {
+            for &c in &kids[at + 1..] {
+                if !head_like(dom, c) {
+                    break;
+                }
+                let _ = insert(dom, head, c, None);
+            }
+        }
     }
 }
 
@@ -1123,22 +1176,42 @@ fn descendants(dom: &Dom, id: NodeId) -> Vec<NodeId> {
 /// Splits a selector list at top-level commas.
 fn selector_list(text: &str) -> Option<Vec<css::Selector>> {
     let mut parts = Vec::new();
-    let (mut depth, mut start, mut quote) = (0i32, 0usize, None);
+    let (mut start, mut quote) = (0usize, None);
+    let mut open: Vec<char> = Vec::new();
+    let mut escaped = false;
     for (k, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match (quote, c) {
+            (_, '\\') => escaped = true,
             (Some(q), c) if c == q => quote = None,
             (Some(_), _) => {}
             (None, '"' | '\'') => quote = Some(c),
-            (None, '(' | '[') => depth += 1,
-            (None, ')' | ']') => depth -= 1,
-            (None, ',') if depth == 0 => {
+            (None, '(') => open.push(')'),
+            (None, '[') => open.push(']'),
+            (None, ')' | ']') => {
+                open.pop();
+            }
+            (None, ',') if open.is_empty() => {
                 parts.push(&text[start..k]);
                 start = k + 1;
             }
             _ => {}
         }
     }
-    parts.push(&text[start..]);
+    // What's still open at the end is closed there, as CSS does at the end of a style sheet.
+    let closed;
+    if quote.is_some() || !open.is_empty() {
+        let mut t = text[start..].to_string();
+        t.extend(quote);
+        t.extend(open.iter().rev());
+        closed = t;
+        parts.push(&closed);
+    } else {
+        parts.push(&text[start..]);
+    }
     parts.iter().map(|p| css::parse_selector(p.trim())).collect()
 }
 
@@ -1221,7 +1294,8 @@ fn selector_syntax_error(text: &str) -> bool {
             }
             j += 1;
         }
-        None
+        // The end of the text closes what's open (as CSS's end of file does).
+        Some(n + 1)
     };
     let mut i = 0;
     let mut compound = false; // something since the last combinator
@@ -1279,7 +1353,7 @@ fn selector_syntax_error(text: &str) -> bool {
             },
             '[' => {
                 let Some(e) = close(i, '[', ']') else { return true };
-                let inner: String = c[i + 1..e - 1].iter().collect();
+                let inner: String = c[i + 1..(e - 1).min(n)].iter().collect();
                 if attr_syntax_error(inner.trim()) {
                     return true;
                 }
@@ -1300,6 +1374,13 @@ fn selector_syntax_error(text: &str) -> bool {
                 i = e;
                 if c.get(i) == Some(&'(') {
                     let Some(e) = close(i, '(', ')') else { return true };
+                    // Selector lists inside: checked the same way.
+                    if !double && matches!(name.as_str(), "not" | "is" | "where" | "matches") {
+                        let inner: String = c[i + 1..(e - 1).min(n)].iter().collect();
+                        if !(matches!(name.as_str(), "is" | "where") && inner.trim().is_empty()) && selector_syntax_error(&inner) {
+                            return true;
+                        }
+                    }
                     i = e;
                 }
                 compound = true;
@@ -1624,7 +1705,7 @@ fn deliver_changes(i: &mut Interp, st: &S) -> Res<()> {
     if picked.is_empty() {
         return Ok(());
     }
-    let hook = i.global_obj.borrow().get_own("__domChanged").cloned();
+    let hook = i.realms[0].0.borrow().get_own("__domChanged").cloned();
     let Some(Slot::Data(hook)) = hook else { return Ok(()) };
     let opt = |i: &Interp, n: Option<NodeId>| wrap_opt(i, st, n);
     let mut recs = Vec::with_capacity(picked.len());
@@ -1766,7 +1847,7 @@ pub fn make_event(i: &mut Interp, st: &S, ty: &str, bubbles: bool, cancelable: b
     let own = if iface.is_empty() {
         None
     } else {
-        let ctor = i.global_obj.borrow().get_own(iface).cloned();
+        let ctor = i.realms[0].0.borrow().get_own(iface).cloned();
         match ctor {
             Some(Slot::Data(Value::Obj(c))) => match c.borrow().get_own("prototype") {
                 Some(Slot::Data(Value::Obj(p))) => Some(p.clone()),
@@ -1793,7 +1874,7 @@ pub fn make_event(i: &mut Interp, st: &S, ty: &str, bubbles: bool, cancelable: b
 /// The handler from an `on<type>` property or attribute.
 fn inline_handler(i: &mut Interp, st: &S, node: NodeId, ty: &str) -> Option<Value> {
     let key = format!("on{ty}");
-    let target = if node == WINDOW { Some(Value::Obj(i.global_obj.clone())) } else { st.borrow().wrappers.get(&node).cloned() };
+    let target = if node == WINDOW { Some(Value::Obj(i.realms[0].0.clone())) } else { st.borrow().wrappers.get(&node).cloned() };
     if let Some(Value::Obj(o)) = &target {
         let o = o.borrow();
         for k in [key.clone(), format!("\0{key}")] {
@@ -1806,12 +1887,26 @@ fn inline_handler(i: &mut Interp, st: &S, node: NodeId, ty: &str) -> Option<Valu
     }
     // Window's own events can be handled from attributes on <body> (`<body onload>`).
     let window_event = matches!(ty, "load" | "unload" | "beforeunload" | "pageshow" | "pagehide" | "resize" | "hashchange" | "popstate" | "message" | "online" | "offline" | "storage");
-    if node == WINDOW && !window_event {
+    let frame_doc = st.borrow().window_docs.get(&node).copied();
+    if (node == WINDOW || frame_doc.is_some()) && !window_event {
         return None;
     }
-    let code = if node == WINDOW {
+    // The handler is compiled in the realm of the window whose document it's in.
+    let realm = {
         let s = st.borrow();
-        let body = s.dom.find("body")?;
+        let doc = match frame_doc {
+            Some(d) => d,
+            None if node == WINDOW => ROOT,
+            None => owner_doc(&s, node),
+        };
+        if doc == ROOT { 0 } else { s.frame_windows.get(&doc).map_or(0, |w| w.1) }
+    };
+    let code = if node == WINDOW || frame_doc.is_some() {
+        let s = st.borrow();
+        let body = match frame_doc {
+            Some(d) => html_child(&s.dom, d, &["body"])?,
+            None => s.dom.find("body")?,
+        };
         s.dom.attr(body, &key).map(str::to_string)?
     } else {
         if window_event && st.borrow().dom.tag(node) == Some("body") {
@@ -1822,7 +1917,8 @@ fn inline_handler(i: &mut Interp, st: &S, node: NodeId, ty: &str) -> Option<Valu
     if let Some(f) = st.borrow().handlers.get(&(node, code.clone())) {
         return Some(f.clone());
     }
-    let f = i.run(&format!("(function(event) {{\n{code}\n}})")).ok()?;
+    let src = format!("(function(event) {{\n{code}\n}})");
+    let f = if realm == 0 { i.run(&src) } else { i.run_in_realm(realm, &src, None) }.ok()?;
     st.borrow_mut().handlers.insert((node, code), f.clone());
     Some(f)
 }
@@ -1832,7 +1928,7 @@ fn call_listeners(i: &mut Interp, st: &S, node: NodeId, ev: &Value, phase: u8) {
         Ok(Value::Str(s)) => s.to_string(),
         _ => return,
     };
-    let current = if node == WINDOW { Value::Obj(i.global_obj.clone()) } else { wrap(i, st, node) };
+    let current = if node == WINDOW { Value::Obj(i.realms[0].0.clone()) } else { wrap(i, st, node) };
     let _ = i.set(ev, "currentTarget", current.clone());
     let _ = i.set(ev, "eventPhase", Value::Num(phase as f64));
     let list: Vec<(Value, bool)> = st
@@ -1848,6 +1944,11 @@ fn call_listeners(i: &mut Interp, st: &S, node: NodeId, ev: &Value, phase: u8) {
         }
     }
     for (f, once) in fns {
+        // A callback from a frame that's gone (or moved on) doesn't run, nor
+        // do listeners on that frame's nodes.
+        if !st.borrow().fully_active(Interp::realm_of(&f)) || !st.borrow().target_active(node) {
+            continue;
+        }
         if once {
             if let Some(l) = st.borrow_mut().listeners.get_mut(&node) {
                 l.retain(|x| !(x.ty == ty && Interp::strict_eq(&x.f, &f)));
@@ -1857,6 +1958,7 @@ fn call_listeners(i: &mut Interp, st: &S, node: NodeId, ev: &Value, phase: u8) {
             i.call(&f, current.clone(), vec![ev.clone()])
         } else {
             match i.get(&f, "handleEvent") {
+                Ok(h) if !st.borrow().fully_active(Interp::realm_of(&h)) => Ok(Value::Undefined),
                 Ok(h) if Interp::is_callable(&h) => i.call(&h, f.clone(), vec![ev.clone()]),
                 _ => Ok(Value::Undefined),
             }
@@ -1882,15 +1984,49 @@ fn call_listeners(i: &mut Interp, st: &S, node: NodeId, ev: &Value, phase: u8) {
 pub fn dispatch(i: &mut Interp, st: &S, target: NodeId, ev: &Value) -> bool {
     // `window.event` is the event being dispatched, while its listeners run
     // (kept hidden; the prelude's `event` accessor reads it until a page replaces it).
-    let prev = i.global_obj.borrow().get_own("\0event").cloned();
-    i.global_obj.borrow_mut().set_hidden("\0event", ev.clone());
+    let prev = i.realms[0].0.borrow().get_own("\0event").cloned();
+    i.realms[0].0.borrow_mut().set_hidden("\0event", ev.clone());
     let r = dispatch_path(i, st, target, ev);
     let prev = match prev {
         Some(Slot::Data(v)) => v,
         _ => Value::Undefined,
     };
-    i.global_obj.borrow_mut().set_hidden("\0event", prev);
+    i.realms[0].0.borrow_mut().set_hidden("\0event", prev);
     r
+}
+
+/// EventTarget's addEventListener and removeEventListener, on `node`.
+fn add_listener(i: &mut Interp, st: &S, node: NodeId, a: &[Value]) -> Res<Value> {
+    let ty = i.to_str(&arg(a, 0))?.to_string();
+    let f = arg(a, 1);
+    if matches!(f, Value::Undefined | Value::Null) {
+        return Ok(Value::Undefined);
+    }
+    let opts = arg(a, 2);
+    let (capture, once) = match &opts {
+        Value::Bool(b) => (*b, false),
+        Value::Obj(_) => (Interp::truthy(&i.get(&opts, "capture")?), Interp::truthy(&i.get(&opts, "once")?)),
+        _ => (false, false),
+    };
+    let mut s = st.borrow_mut();
+    let list = s.listeners.entry(node).or_default();
+    if !list.iter().any(|l| l.ty == ty && l.capture == capture && Interp::strict_eq(&l.f, &f)) {
+        list.push(Listener { ty, f, capture, once });
+    }
+    Ok(Value::Undefined)
+}
+fn remove_listener(i: &mut Interp, st: &S, node: NodeId, a: &[Value]) -> Res<Value> {
+    let ty = i.to_str(&arg(a, 0))?.to_string();
+    let f = arg(a, 1);
+    let capture = match arg(a, 2) {
+        Value::Bool(b) => b,
+        o @ Value::Obj(_) => Interp::truthy(&i.get(&o, "capture")?),
+        _ => false,
+    };
+    if let Some(l) = st.borrow_mut().listeners.get_mut(&node) {
+        l.retain(|x| !(x.ty == ty && x.capture == capture && Interp::strict_eq(&x.f, &f)));
+    }
+    Ok(Value::Undefined)
 }
 
 fn dispatch_path(i: &mut Interp, st: &S, target: NodeId, ev: &Value) -> bool {
@@ -1914,14 +2050,17 @@ fn dispatch_path(i: &mut Interp, st: &S, target: NodeId, ev: &Value) -> bool {
                 p.push(parent);
                 id = parent;
             }
-            (p, id == ROOT)
+            let win = if id == ROOT { Some(WINDOW) } else { s.frame_windows.get(&id).map(|w| w.0) };
+            (p, win)
         };
         path.extend(dom_path.0);
-        if dom_path.1 && !matches!(i.get(ev, "type"), Ok(Value::Str(t)) if &*t == "load") {
-            path.push(WINDOW);
+        if let Some(w) = dom_path.1 {
+            if !matches!(i.get(ev, "type"), Ok(Value::Str(t)) if &*t == "load") {
+                path.push(w);
+            }
         }
     }
-    let tv = if target == WINDOW { Value::Obj(i.global_obj.clone()) } else { wrap(i, st, target) };
+    let tv = if target == WINDOW { Value::Obj(i.realms[0].0.clone()) } else { wrap(i, st, target) };
     let _ = i.set(ev, "target", tv.clone());
     let _ = i.set(ev, "srcElement", tv);
     let stopped = |i: &mut Interp| matches!(i.get(ev, "\0stop"), Ok(Value::Bool(true)));
@@ -1988,7 +2127,9 @@ fn decode_text(body: &[u8], content_type: &str) -> String {
 fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
     let (src, text, url, host) = {
         let s = st.borrow();
-        (s.dom.attr(id, "src").map(|x| resolve_url(&s.base(), x)), s.dom.text(id), s.url.clone(), s.host.clone())
+        let doc = owner_doc(&s, id);
+        let (base, url) = if doc == ROOT { (s.base(), s.url.clone()) } else { let u = doc_url(&s, doc); (base_url_in(&s.dom, doc, &u), u) };
+        (s.dom.attr(id, "src").map(|x| resolve_url(&base, x)), s.dom.text(id), url, s.host.clone())
     };
     match src {
         Some(abs) => match host.get_for(&abs, &url) {
@@ -2001,6 +2142,11 @@ fn script_source(st: &S, id: NodeId) -> Result<(String, String), String> {
 
 /// Runs one script element now (fetching it if needed), then fires load or error at it.
 fn execute(i: &mut Interp, st: &S, id: NodeId) {
+    execute_in(i, st, id, 0)
+}
+
+/// [`execute`] in a realm: a frame's scripts run with its window as their global.
+fn execute_in(i: &mut Interp, st: &S, id: NodeId, realm: u32) {
     let (kind, external) = {
         let s = st.borrow();
         (script_kind(&s.dom, id), s.dom.attr(id, "src").is_some())
@@ -2009,6 +2155,7 @@ fn execute(i: &mut Interp, st: &S, id: NodeId) {
     let ok = match i.waiting(|| script_source(st, id)) {
         Ok((code, origin)) => {
             let r = match kind {
+                ScriptKind::ImportMap | ScriptKind::Module if realm != 0 => return,
                 ScriptKind::ImportMap => {
                     st.borrow().loader.add_map(&code, &origin);
                     return;
@@ -2020,7 +2167,7 @@ fn execute(i: &mut Interp, st: &S, id: NodeId) {
                 }
                 ScriptKind::Classic => {
                     let prev = st.borrow_mut().current_script.replace(id);
-                    let r = i.run_at(&code, external.then_some(origin.as_str())).map(|_| ());
+                    let r = if realm == 0 { i.run_at(&code, external.then_some(origin.as_str())) } else { i.run_in_realm(realm, &code, external.then_some(origin.as_str())) }.map(|_| ());
                     st.borrow_mut().current_script = prev;
                     r
                 }
@@ -2109,7 +2256,7 @@ fn inserted(i: &mut Interp, st: &S, node: NodeId) {
     let (frames, new): (Vec<NodeId>, Vec<NodeId>) = new.into_iter().partition(|&n| st.borrow().dom.tag(n) == Some("iframe"));
     let new: Vec<NodeId> = new.into_iter().filter(|&n| is_js(&st.borrow().dom, n)).collect();
     if !frames.is_empty() {
-        let hook = i.global_obj.borrow().get_own("__frameInserted").cloned();
+        let hook = i.realms[0].0.borrow().get_own("__frameInserted").cloned();
         if let Some(Slot::Data(hook)) = hook {
             for f in frames {
                 let el = wrap(i, st, f);
@@ -2680,7 +2827,7 @@ fn install(i: &mut Interp, st: &S) {
             fo.borrow_mut().set_own("name", str_val(name));
         }
         proto.borrow_mut().set_own("constructor", f.clone());
-        i.global_obj.borrow_mut().set_own(name, f.clone());
+        i.realms[0].0.borrow_mut().set_own(name, f.clone());
         f
     };
     let node_ctor = ctor(i, "Node", &node);
@@ -2742,20 +2889,30 @@ fn install(i: &mut Interp, st: &S) {
             fo.borrow_mut().set_own("prototype", Value::Obj(node.clone()));
             fo.borrow_mut().set_own("name", str_val(name));
         }
-        i.global_obj.borrow_mut().set_own(name, f);
+        i.realms[0].0.borrow_mut().set_own(name, f);
     }
     // Event handler properties (`el.onclick = f`), on HTMLElement's prototype as in browsers.
     for ev in EVENT_HANDLERS {
         let key = format!("\0on{ev}");
         let k2 = key.clone();
-        let get = i.native(move |_i, t, _a| {
-            Ok(match &t {
+        let st2 = st.clone();
+        let get = i.native(move |i, t, _a| {
+            let own = match &t {
                 Value::Obj(o) => match o.borrow().get_own(&k2) {
-                    Some(Slot::Data(v)) => v.clone(),
-                    _ => Value::Null,
+                    Some(Slot::Data(v)) => Some(v.clone()),
+                    _ => None,
                 },
-                _ => Value::Undefined,
-            })
+                _ => return Ok(Value::Undefined),
+            };
+            if let Some(v) = own {
+                return Ok(v);
+            }
+            // From its content attribute (`<div onclick="…">`), compiled when first asked for.
+            let n = match node_of(&t) {
+                Some(n) if st2.borrow().dom.attr(n, &format!("on{ev}")).is_some() => n,
+                _ => return Ok(Value::Null),
+            };
+            Ok(inline_handler(i, &st2, n, ev).unwrap_or(Value::Null))
         });
         let set = i.native(move |_i, t, a| {
             if let Value::Obj(o) = &t {
@@ -2767,13 +2924,13 @@ fn install(i: &mut Interp, st: &S) {
         html_element.borrow_mut().set_slot(&format!("on{ev}"), Slot::accessor(Some(get.clone()), Some(set.clone())));
         html_document.borrow_mut().set_slot(&format!("on{ev}"), Slot::accessor(Some(get), Some(set)));
         // On window they're plain properties, so `onload = f` works as a global too.
-        let mut g = i.global_obj.borrow_mut();
+        let mut g = i.realms[0].0.borrow_mut();
         if g.get_own(&format!("on{ev}")).is_none() {
             g.set_own(&format!("on{ev}"), Value::Null);
         }
     }
     for ev in ["message", "messageerror", "popstate", "hashchange", "beforeunload", "unload", "pageshow", "pagehide", "online", "offline", "storage", "languagechange", "unhandledrejection", "rejectionhandled", "orientationchange", "devicemotion", "deviceorientation"] {
-        let mut g = i.global_obj.borrow_mut();
+        let mut g = i.realms[0].0.borrow_mut();
         if g.get_own(&format!("on{ev}")).is_none() {
             g.set_own(&format!("on{ev}"), Value::Null);
         }
@@ -2783,7 +2940,7 @@ fn install(i: &mut Interp, st: &S) {
     for (o, tag) in [(&comment, "Comment"), (&doctype, "DocumentType"), (&pi, "ProcessingInstruction"), (&cdata, "CDATASection"), (&fragment, "DocumentFragment"), (&character_data, "CharacterData"), (&element, "Element"), (&html_element, "HTMLElement"), (&text, "Text"), (&document, "Document"), (&html_document, "HTMLDocument"), (&node, "Node"), (&event, "Event"), (&class_list, "DOMTokenList"), (&style_p, "CSSStyleDeclaration")] {
         o.borrow_mut().set_own("\0@toStringTag", str_val(tag));
     }
-    i.global_obj.borrow_mut().set_own("\0@toStringTag", str_val("Window"));
+    i.realms[0].0.borrow_mut().set_own("\0@toStringTag", str_val("Window"));
 
     // ---------------------------------------------------------- events
     def(i, &event, "preventDefault", |i, t, _a| {
@@ -2824,41 +2981,9 @@ fn install(i: &mut Interp, st: &S) {
         }
         Ok(e)
     });
-    i.global_obj.borrow_mut().set_own("__makeEvent", make);
+    i.realms[0].0.borrow_mut().set_own("__makeEvent", make);
 
     // EventTarget methods on nodes (and on window, below).
-    fn add_listener(i: &mut Interp, st: &S, node: NodeId, a: &[Value]) -> Res<Value> {
-        let ty = i.to_str(&arg(a, 0))?.to_string();
-        let f = arg(a, 1);
-        if matches!(f, Value::Undefined | Value::Null) {
-            return Ok(Value::Undefined);
-        }
-        let opts = arg(a, 2);
-        let (capture, once) = match &opts {
-            Value::Bool(b) => (*b, false),
-            Value::Obj(_) => (Interp::truthy(&i.get(&opts, "capture")?), Interp::truthy(&i.get(&opts, "once")?)),
-            _ => (false, false),
-        };
-        let mut s = st.borrow_mut();
-        let list = s.listeners.entry(node).or_default();
-        if !list.iter().any(|l| l.ty == ty && l.capture == capture && Interp::strict_eq(&l.f, &f)) {
-            list.push(Listener { ty, f, capture, once });
-        }
-        Ok(Value::Undefined)
-    }
-    fn remove_listener(i: &mut Interp, st: &S, node: NodeId, a: &[Value]) -> Res<Value> {
-        let ty = i.to_str(&arg(a, 0))?.to_string();
-        let f = arg(a, 1);
-        let capture = match arg(a, 2) {
-            Value::Bool(b) => b,
-            o @ Value::Obj(_) => Interp::truthy(&i.get(&o, "capture")?),
-            _ => false,
-        };
-        if let Some(l) = st.borrow_mut().listeners.get_mut(&node) {
-            l.retain(|x| !(x.ty == ty && x.capture == capture && Interp::strict_eq(&x.f, &f)));
-        }
-        Ok(Value::Undefined)
-    }
     // Called without a `this` (`const on = document.addEventListener; on(...)`),
     // or on the window, these act on the window, as WebIDL says.
     fn target_method(i: &Interp, st: &S, o: &Obj, name: &str, f: impl Fn(&mut Interp, &S, NodeId, Vec<Value>) -> Res<Value> + 'static) {
@@ -2866,7 +2991,11 @@ fn install(i: &mut Interp, st: &S) {
         def(i, o, name, move |i, t, a| {
             let id = match &t {
                 Value::Undefined | Value::Null => WINDOW,
-                Value::Obj(o) if Rc::ptr_eq(o, &i.global_obj) => WINDOW,
+                Value::Obj(o) if Rc::ptr_eq(o, &i.realms[0].0) => WINDOW,
+                Value::Obj(o) if matches!(hidden(o, "\0windowNode"), Some(Value::Num(_))) => match hidden(o, "\0windowNode") {
+                    Some(Value::Num(n)) => n as NodeId,
+                    _ => WINDOW,
+                },
                 _ => this_node(i, &t)?,
             };
             f(i, &st, id, a)
@@ -2879,7 +3008,7 @@ fn install(i: &mut Interp, st: &S) {
         let _ = i.set(&ev, "isTrusted", Value::Bool(false));
         Ok(Value::Bool(dispatch(i, st, id, &ev)))
     });
-    let g = Value::Obj(i.global_obj.clone());
+    let g = Value::Obj(i.realms[0].0.clone());
     let st2 = st.clone();
     let wadd = i.native(move |i, _t, a| add_listener(i, &st2, WINDOW, &a));
     let st2 = st.clone();
@@ -3097,13 +3226,30 @@ fn install(i: &mut Interp, st: &S) {
         if is_inclusive_ancestor(&s.dom, other, id) {
             return Ok(Value::Num(8.0 + 2.0)); // contains, preceding
         }
-        let order = descendants(&s.dom, ROOT);
-        let (a, b) = (order.iter().position(|&n| n == id), order.iter().position(|&n| n == other));
-        Ok(Value::Num(match (a, b) {
-            (Some(a), Some(b)) if b > a => 4.0,
-            (Some(_), Some(_)) => 2.0,
-            _ => 1.0,
-        }))
+        // Each node's ancestors, from its root down.
+        let chain = |mut n: NodeId| {
+            let mut c = vec![n];
+            loop {
+                let p = s.dom.nodes[n as usize].parent;
+                if p == n {
+                    break;
+                }
+                c.push(p);
+                n = p;
+            }
+            c.reverse();
+            c
+        };
+        let (ca, cb) = (chain(id), chain(other));
+        // In different trees: disconnected, in an order that is arbitrary but consistent.
+        if ca[0] != cb[0] {
+            return Ok(Value::Num(1.0 + 32.0 + if ca[0] < cb[0] { 4.0 } else { 2.0 }));
+        }
+        let k = ca.iter().zip(&cb).take_while(|(x, y)| x == y).count();
+        let parent = ca[k - 1];
+        let kids = s.dom.children(parent);
+        let (pa, pb) = (kids.iter().position(|&n| n == ca[k]), kids.iter().position(|&n| n == cb[k]));
+        Ok(Value::Num(if pb > pa { 4.0 } else { 2.0 }))
     });
     fn insert_js(i: &mut Interp, st: &S, parent: NodeId, child: &Value, before: Option<NodeId>, replacing: bool) -> Res<Value> {
         let Some(c) = node_of(child) else { return i.throw("TypeError", "the argument is not a Node") };
@@ -3307,10 +3453,10 @@ fn install(i: &mut Interp, st: &S) {
     // Queries (on documents, fragments and elements).
     fn query(i: &mut Interp, st: &S, scope: NodeId, sel: &Value, all: bool) -> Res<Value> {
         let text = i.to_str(sel)?;
+        if selector_syntax_error(&text) {
+            return i.throw("DOM:SyntaxError", &format!("'{text}' is not a valid selector"));
+        }
         let Some(sels) = selector_list(&text) else {
-            if selector_syntax_error(&text) {
-                return i.throw("SyntaxError", &format!("'{text}' is not a valid selector"));
-            }
             // A valid selector Canard can't match yet matches nothing.
             return Ok(if all { i.array(Vec::new()) } else { Value::Null });
         };
@@ -3815,8 +3961,8 @@ fn install(i: &mut Interp, st: &S) {
             return i.throw("TypeError", "matches: 1 argument required, but only 0 present.");
         }
         let text = i.to_str(&arg(&a, 0))?;
-        if selector_list(&text).is_none() && selector_syntax_error(&text) {
-            return i.throw("SyntaxError", &format!("'{text}' is not a valid selector"));
+        if selector_syntax_error(&text) {
+            return i.throw("DOM:SyntaxError", &format!("'{text}' is not a valid selector"));
         }
         flush(i, st);
         let s = st.borrow();
@@ -3827,8 +3973,8 @@ fn install(i: &mut Interp, st: &S) {
             return i.throw("TypeError", "closest: 1 argument required, but only 0 present.");
         }
         let text = i.to_str(&arg(&a, 0))?;
-        if selector_list(&text).is_none() && selector_syntax_error(&text) {
-            return i.throw("SyntaxError", &format!("'{text}' is not a valid selector"));
+        if selector_syntax_error(&text) {
+            return i.throw("DOM:SyntaxError", &format!("'{text}' is not a valid selector"));
         }
         flush(i, st);
         let found = {
@@ -3842,6 +3988,7 @@ fn install(i: &mut Interp, st: &S) {
         let slot = format!("\0tl:{attr}");
         if let Value::Obj(w) = el {
             if let Some(v) = hidden(w, &slot) {
+                sync_indices(st, &v, id, attr);
                 return v;
             }
         }
@@ -3855,7 +4002,26 @@ fn install(i: &mut Interp, st: &S) {
         if let Value::Obj(w) = el {
             w.borrow_mut().set_own(&slot, o.clone());
         }
+        sync_indices(st, &o, id, attr);
         o
+    }
+    /// `list[0]`, `list[1]`, …: the tokens as numbered properties, kept up to
+    /// date as the list is read and changed.
+    fn sync_indices(st: &S, list: &Value, id: NodeId, attr: &str) {
+        let Value::Obj(o) = list else { return };
+        let toks = tokens(st, id, attr);
+        let mut o = o.borrow_mut();
+        let had = match o.get_own("\0count") {
+            Some(Slot::Data(Value::Num(n))) => *n as usize,
+            _ => 0,
+        };
+        for k in toks.len()..had {
+            o.delete(&k.to_string());
+        }
+        for (k, t) in toks.iter().enumerate() {
+            o.set_own(&k.to_string(), str_val(t));
+        }
+        o.set_own("\0count", Value::Num(toks.len() as f64));
     }
     getter(i, st, &element, "classList", |i, st, id| {
         let el = wrap(i, st, id);
@@ -3869,7 +4035,7 @@ fn install(i: &mut Interp, st: &S) {
             let attr = i.to_str(&arg(&a, 1))?.to_string();
             Ok(token_list(i, &st2, &el, id, &attr))
         });
-        i.global_obj.borrow_mut().set_own("__tokenList", f);
+        i.realms[0].0.borrow_mut().set_own("__tokenList", f);
     }
     {
         // URL Standard natives behind URL and URLSearchParams.
@@ -3909,7 +4075,7 @@ fn install(i: &mut Interp, st: &S) {
                 None => Value::Null,
             })
         });
-        i.global_obj.borrow_mut().set_own("__urlParse", f);
+        i.realms[0].0.borrow_mut().set_own("__urlParse", f);
         let f = i.native(|i, _t, a| {
             let href = i.to_str(&arg(&a, 0))?.to_string();
             let which = i.to_str(&arg(&a, 1))?.to_string();
@@ -3918,18 +4084,18 @@ fn install(i: &mut Interp, st: &S) {
             u.set(&which, &value);
             Ok(parts(i, &u))
         });
-        i.global_obj.borrow_mut().set_own("__urlSet", f);
+        i.realms[0].0.borrow_mut().set_own("__urlSet", f);
         let f = i.native(|i, _t, a| {
             let input = i.to_str(&arg(&a, 0))?.to_string();
             let pairs = volant_core::url::form_parse(&input).into_iter().map(|(k, v)| i.array(vec![str_val(&k), str_val(&v)])).collect();
             Ok(i.array(pairs))
         });
-        i.global_obj.borrow_mut().set_own("__formParse", f);
+        i.realms[0].0.borrow_mut().set_own("__formParse", f);
         let f = i.native(|i, _t, a| {
             let input = i.to_str(&arg(&a, 0))?.to_string();
             Ok(str_val(&volant_core::url::form_encode(&input)))
         });
-        i.global_obj.borrow_mut().set_own("__formEncode", f);
+        i.realms[0].0.borrow_mut().set_own("__formEncode", f);
     }
     {
         // Encoding Standard natives behind TextDecoder and TextEncoder.
@@ -3937,7 +4103,7 @@ fn install(i: &mut Interp, st: &S) {
             let l = i.to_str(&arg(&a, 0))?;
             Ok(volant_core::encoding::for_label(&l).map(str_val).unwrap_or(Value::Null))
         });
-        i.global_obj.borrow_mut().set_own("__encodingFor", f);
+        i.realms[0].0.borrow_mut().set_own("__encodingFor", f);
         let f = i.native(|i, _t, a| {
             let enc = i.to_str(&arg(&a, 0))?;
             let bytes = volant_js::typed::bytes_of(&arg(&a, 1)).unwrap_or_default();
@@ -3946,12 +4112,12 @@ fn install(i: &mut Interp, st: &S) {
                 Err(()) => i.throw("TypeError", "The encoded data was not valid"),
             }
         });
-        i.global_obj.borrow_mut().set_own("__decode", f);
+        i.realms[0].0.borrow_mut().set_own("__decode", f);
         let f = i.native(|i, _t, a| {
             let t = i.to_str(&arg(&a, 0))?;
             Ok(volant_js::typed::new_bytes(i, t.as_bytes().to_vec()))
         });
-        i.global_obj.borrow_mut().set_own("__encode", f);
+        i.realms[0].0.borrow_mut().set_own("__encode", f);
     }
     /// The element and attribute a DOMTokenList stands for.
     fn list_of(i: &Interp, this: &Value) -> Res<(NodeId, String)> {
@@ -4000,7 +4166,10 @@ fn install(i: &mut Interp, st: &S) {
         let st = st_tl.clone();
         def(i, &tl_proto, name, move |i, t, a| {
             let (id, attr) = list_of(i, &t)?;
-            f(i, &st, id, &attr, a)
+            let r = f(i, &st, id, &attr, a);
+            sync_indices(&st, &t, id, &attr);
+            deliver_changes(i, &st)?;
+            r
         });
     };
     tl_method(i, "add", |i, st, id, attr, a| {
@@ -4052,11 +4221,18 @@ fn install(i: &mut Interp, st: &S) {
         Ok(Value::Bool(tokens(st, id, attr).contains(&t)))
     });
     tl_method(i, "replace", |i, st, id, attr, a| {
+        // Either one empty is a SyntaxError before either's whitespace is looked at.
+        let (o, n) = (i.to_str(&arg(&a, 0))?, i.to_str(&arg(&a, 1))?);
+        if o.is_empty() || n.is_empty() {
+            return i.throw("DOM:SyntaxError", "a token can't be empty");
+        }
         let old = token(i, &arg(&a, 0))?;
         let new = token(i, &arg(&a, 1))?;
         let mut c = tokens(st, id, attr);
         let Some(p) = c.iter().position(|x| *x == old) else { return Ok(Value::Bool(false)) };
-        if c.contains(&new) {
+        if old == new {
+            // Nothing moves, but the attribute is still written (and observers told).
+        } else if c.contains(&new) {
             c.remove(p);
             let q = c.iter().position(|x| *x == new).unwrap_or(0);
             // The new token takes the earlier of the two places.
@@ -4365,7 +4541,7 @@ fn install(i: &mut Interp, st: &S) {
         flush(i, st);
         let [x, y, w, h] = geometry(st).boxes.get(&id).copied().unwrap_or_default().map(|v| v as f64);
         let proto = {
-            let c = i.global_obj.borrow().get_own("DOMRect").cloned();
+            let c = i.realms[0].0.borrow().get_own("DOMRect").cloned();
             match c {
                 Some(Slot::Data(c)) => match i.get(&c, "prototype")? {
                     Value::Obj(p) => Some(p),
@@ -4532,7 +4708,7 @@ fn install(i: &mut Interp, st: &S) {
             st2.borrow_mut().documents.insert(d, ty);
             Ok(wrap(i, &st2, d))
         });
-        i.global_obj.borrow_mut().set_own("__newDocument", f);
+        i.realms[0].0.borrow_mut().set_own("__newDocument", f);
         let st3 = st.clone();
         let f = i.native(move |i, _t, a| {
             let markup = i.to_str(&arg(&a, 0))?;
@@ -4570,11 +4746,93 @@ fn install(i: &mut Interp, st: &S) {
             drop(s);
             Ok(wrap(i, &st3, d))
         });
-        i.global_obj.borrow_mut().set_own("__parseDocument", f);
+        i.realms[0].0.borrow_mut().set_own("__parseDocument", f);
     }
     getter(i, st, &document, "visibilityState", |_i, _st, _id| Ok(str_val("visible")));
     getter(i, st, &document, "hidden", |_i, _st, _id| Ok(Value::Bool(false)));
-    getter(i, st, &document, "defaultView", |i, _st, _id| Ok(Value::Obj(i.global_obj.clone())));
+    getter(i, st, &document, "defaultView", |i, st, id| {
+        if id == ROOT {
+            return Ok(Value::Obj(i.realms[0].0.clone()));
+        }
+        let s = st.borrow();
+        Ok(s.frame_windows.get(&id).and_then(|w| s.wrappers.get(&w.0).cloned()).unwrap_or(Value::Null))
+    });
+    {
+        // __frameWindow(win, doc): `win` becomes the window of `doc` (a frame's
+        // document), with a realm of its own; its realm id.
+        let st2 = st.clone();
+        let f = i.native(move |i, _t, a| {
+            let (Value::Obj(win), Some(doc)) = (arg(&a, 0), node_of(&arg(&a, 1))) else { return Ok(Value::Undefined) };
+            let known = match hidden(&win, "\0windowNode") {
+                Some(Value::Num(n)) => Some(n as NodeId),
+                _ => None,
+            };
+            let (wn, realm) = match known {
+                Some(wn) => {
+                    let realm = st2.borrow().frame_windows.values().find(|w| w.0 == wn).map_or(0, |w| w.1);
+                    (wn, realm)
+                }
+                None => {
+                    let realm = i.new_realm(win.clone());
+                    let wn = new_node(&mut st2.borrow_mut().dom, Data::Comment(String::new()));
+                    win.borrow_mut().set_hidden("\0windowNode", Value::Num(wn as f64));
+                    st2.borrow_mut().wrappers.insert(wn, Value::Obj(win.clone()));
+                    for (name, which) in [("addEventListener", 0), ("removeEventListener", 1), ("dispatchEvent", 2)] {
+                        let st3 = st2.clone();
+                        def(i, &win, name, move |i, _t, a| match which {
+                            0 => add_listener(i, &st3, wn, &a),
+                            1 => remove_listener(i, &st3, wn, &a),
+                            _ => {
+                                let ev = arg(&a, 0);
+                                let _ = i.set(&ev, "isTrusted", Value::Bool(false));
+                                Ok(Value::Bool(dispatch(i, &st3, wn, &ev)))
+                            }
+                        });
+                    }
+                    // Its own eval, which runs code with the frame's globals.
+                    def(i, &win, "eval", move |i, _t, a| match arg(&a, 0) {
+                        Value::Str(code) => match i.run_in_realm(realm, &code, None) {
+                            Ok(v) => Ok(v),
+                            Err(e) => {
+                                let (name, msg) = e.split_once(": ").unwrap_or(("Error", &e));
+                                let name = if ["SyntaxError", "TypeError", "ReferenceError", "RangeError"].contains(&name) { name.to_string() } else { "Error".to_string() };
+                                i.throw(&name, msg)
+                            }
+                        },
+                        other => Ok(other),
+                    });
+                    (wn, realm)
+                }
+            };
+            let mut s = st2.borrow_mut();
+            s.frame_windows.retain(|_, w| w.0 != wn);
+            s.frame_windows.insert(doc, (wn, realm));
+            s.window_docs.insert(wn, doc);
+            if let Some(el) = node_of(&arg(&a, 2)) {
+                s.realm_frames.insert(realm, (el, doc));
+                s.frame_docs.insert(el, doc);
+            }
+            Ok(Value::Num(realm as f64))
+        });
+        i.realms[0].0.borrow_mut().set_own("__frameWindow", f);
+        // __runFrameScript(realm, script): runs a frame's script element in its realm.
+        let st2 = st.clone();
+        let f = i.native(move |i, _t, a| {
+            let realm = i.to_number(&arg(&a, 0))? as u32;
+            if let Some(n) = node_of(&arg(&a, 1)) {
+                if st2.borrow_mut().ran.insert(n) {
+                    execute_in(i, &st2, n, realm);
+                    deliver_changes(i, &st2)?;
+                }
+            }
+            Ok(Value::Undefined)
+        });
+        i.realms[0].0.borrow_mut().set_own("__runFrameScript", f);
+        // __fullyActive(f): whether a callback's frame is still in the page.
+        let st2 = st.clone();
+        let f = i.native(move |_i, _t, a| Ok(Value::Bool(st2.borrow().fully_active(Interp::realm_of(&arg(&a, 0))))));
+        i.realms[0].0.borrow_mut().set_own("__fullyActive", f);
+    }
     getter(i, st, &document, "activeElement", |i, st, _id| {
         let f = st.borrow().focus;
         let body = st.borrow().dom.find("body");
@@ -4719,7 +4977,7 @@ fn install(i: &mut Interp, st: &S) {
             }
             Ok(wrap(i, &st2, n))
         });
-        i.global_obj.borrow_mut().set_own("__createDocumentType", f);
+        i.realms[0].0.borrow_mut().set_own("__createDocumentType", f);
     }
     method(i, st, &document, "createDocumentFragment", |i, st, doc, _a| {
         let n = new_node(&mut st.borrow_mut().dom, Data::Element { name: FRAGMENT.into(), attrs: Vec::new() });
@@ -4730,7 +4988,7 @@ fn install(i: &mut Interp, st: &S) {
         if a.is_empty() {
             return i.throw("TypeError", "createEvent: 1 argument required, but only 0 present.");
         }
-        let f = i.global_obj.borrow().get_own("__createEvent").cloned();
+        let f = i.realms[0].0.borrow().get_own("__createEvent").cloned();
         match f {
             Some(Slot::Data(f)) if Interp::is_callable(&f) => i.call(&f, Value::Undefined, vec![arg(&a, 0)]),
             _ => Ok(make_event(i, st, "", false, false)),
@@ -4775,7 +5033,7 @@ fn install(i: &mut Interp, st: &S) {
         Ok(Value::Undefined)
     });
     method(i, st, &document, "writeln", |i, _st, _id, a| {
-        let doc = i.get(&Value::Obj(i.global_obj.clone()), "document")?;
+        let doc = i.get(&Value::Obj(i.realms[0].0.clone()), "document")?;
         let w = i.get(&doc, "write")?;
         let mut a = a;
         a.push(str_val("\n"));
@@ -4784,7 +5042,7 @@ fn install(i: &mut Interp, st: &S) {
     method(i, st, &document, "open", |_i, _st, _id, _a| Ok(Value::Undefined));
     method(i, st, &document, "close", |_i, _st, _id, _a| Ok(Value::Undefined));
     method(i, st, &document, "getSelection", |i, _st, _id, _a| {
-        let g = Value::Obj(i.global_obj.clone());
+        let g = Value::Obj(i.realms[0].0.clone());
         let f = i.get(&g, "getSelection")?;
         i.call(&f, g, vec![])
     });
@@ -4792,10 +5050,10 @@ fn install(i: &mut Interp, st: &S) {
 
     // ---------------------------------------------------------- window
     let doc = wrap(i, st, ROOT);
-    let g = Value::Obj(i.global_obj.clone());
+    let g = Value::Obj(i.realms[0].0.clone());
     i.set(&g, "document", doc).ok();
     let hook = |i: &mut Interp, name: &str, f: Value| {
-        i.global_obj.borrow_mut().set_slot(name, Slot::Data(f));
+        i.realms[0].0.borrow_mut().set_slot(name, Slot::Data(f));
     };
     let st2 = st.clone();
     let f = i.native(move |i, _t, a| {
@@ -6017,6 +6275,10 @@ impl Runtime {
             documents: HashMap::new(),
             watched: HashMap::new(),
             ranges_live: false,
+            frame_windows: HashMap::new(),
+            window_docs: HashMap::new(),
+            realm_frames: HashMap::new(),
+            frame_docs: HashMap::new(),
         }));
         let mut interp = Interp::new();
         // Real pages nest calls deeply (module loaders, jQuery); run on a big stack (see STACK).
@@ -6077,7 +6339,7 @@ impl Runtime {
         fire(i, &self.state, ROOT, "readystatechange", false);
         fire(i, &self.state, ROOT, "DOMContentLoaded", true);
         // The page's frames load first (same-origin ones are fetched now).
-        let start = i.global_obj.borrow().get_own("__startFrames").cloned();
+        let start = i.realms[0].0.borrow().get_own("__startFrames").cloned();
         if let Some(Slot::Data(f)) = start {
             let _ = i.call(&f, Value::Undefined, Vec::new());
             i.run_microtasks();
