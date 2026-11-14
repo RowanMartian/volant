@@ -1190,6 +1190,7 @@ pub fn install(i: &mut Interp) {
     number.borrow_mut().set_own("MIN_SAFE_INTEGER", Value::Num(-9007199254740991.0));
     number.borrow_mut().set_own("EPSILON", Value::Num(f64::EPSILON));
     number.borrow_mut().set_own("MAX_VALUE", Value::Num(f64::MAX));
+    number.borrow_mut().set_own("MIN_VALUE", Value::Num(5e-324));
     number.borrow_mut().set_own("POSITIVE_INFINITY", Value::Num(f64::INFINITY));
     number.borrow_mut().set_own("NEGATIVE_INFINITY", Value::Num(f64::NEG_INFINITY));
     number.borrow_mut().set_own("NaN", Value::Num(f64::NAN));

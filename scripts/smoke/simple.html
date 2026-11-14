@@ -57,7 +57,8 @@ try {
   var g = document.getElementById('c').getContext('2d');
   g.fillStyle = '#1d4ed8'; g.fillRect(10, 10, 80, 60);
   g.fillStyle = '#f59e0b'; g.beginPath(); g.arc(140, 40, 30, 0, Math.PI * 2); g.fill();
-  note('canvas ok');
+  var px = g.getImageData(20, 20, 1, 1).data, dot = g.getImageData(140, 40, 1, 1).data;
+  note(px[2] === 216 && px[3] === 255 && dot[0] === 245 ? 'canvas ok' : 'canvas pixels ' + Array.from(px).join(',') + ' / ' + Array.from(dot).join(','));
 } catch (e) { note('canvas ' + e); }
 try {
   document.cookie = 'smoke=1; SameSite=Lax';

@@ -390,7 +390,7 @@ fn hover_focus_target_and_caret_in_snapshots() {
 }
 
 #[test]
-fn canvas_drawing_is_recorded() {
+fn canvas_draws_pixels() {
     let mut rt = page(
         "<canvas id=c width=200 height=100></canvas><canvas id=empty></canvas>\
          <script>const c = document.getElementById('c'), g = c.getContext('2d');\
@@ -405,19 +405,13 @@ fn canvas_drawing_is_recorded() {
     let snap = rt.snapshot();
     assert_eq!(snap.canvases.len(), 1, "only the canvas with a context");
     let canvas = snap.canvases.values().next().unwrap();
-    assert_eq!((canvas.width, canvas.height, canvas.ops.len()), (200.0, 100.0, 3), "{:?}", canvas.ops);
-    use crate::canvas::{Align, Op};
-    match &canvas.ops[0] {
-        Op::Path { subpaths, fill: Some(c), stroke: None, .. } => {
-            assert_eq!((c.b, subpaths[0].1[0], subpaths[0].1[2]), (255, (50.0, 20.0), (60.0, 25.0)));
-        }
-        other => panic!("{other:?}"),
-    }
-    match &canvas.ops[1] {
-        Op::Path { subpaths, stroke: Some(c), line_width, .. } => assert!(c.a == 128 && *line_width == 2.0 && subpaths[0].1.len() > 8 && (subpaths[0].1[0].0 - 60.0).abs() < 0.01),
-        other => panic!("{other:?}"),
-    }
-    assert!(matches!(&canvas.ops[2], Op::Text { text, size, bold: true, serif: true, align: Align::Center, .. } if text == "Hi" && *size == 16.0));
+    assert_eq!((canvas.width, canvas.height), (200, 100));
+    let px = |x: usize, y: usize| canvas.pixels[(y * 200 + x) * 4..(y * 200 + x) * 4 + 4].to_vec();
+    // The red square was cleared; the blue one is where the transform put it.
+    assert_eq!(px(5, 5), vec![0, 0, 0, 0]);
+    assert_eq!(px(55, 22), vec![0, 0, 255, 255]);
+    // The circle's stroke, half transparent black.
+    assert!((px(60, 20)[3] as i32 - 128).abs() < 70, "{:?}", px(60, 20));
     // Laid out like a picture of that size.
     let page = render_snapshot(&snap, &[], Env { width: 800.0, height: 600.0, dark: false }, &ApproxFonts, &NoImages);
     let boxes: Vec<(f32, f32, String)> = page.items.iter().filter_map(|i| match i {

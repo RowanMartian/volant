@@ -357,8 +357,9 @@
     }
     text() { this.bodyUsed = true; return Promise.resolve(this._body) }
     json() { this.bodyUsed = true; try { return Promise.resolve(JSON.parse(this._body)) } catch (e) { return Promise.reject(e) } }
-    blob() { return Promise.resolve(new Blob([this._body], { type: this.headers.get('content-type') || '' })) }
-    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._body).buffer) }
+    blob() { this.bodyUsed = true; return Promise.resolve(new Blob([this._bytes || this._body], { type: this.headers.get('content-type') || '' })) }
+    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(this._bytes ? this._bytes.slice(0) : new TextEncoder().encode(this._body).buffer) }
+    bytes() { return this.arrayBuffer().then(b => new Uint8Array(b)) }
     formData() { return Promise.resolve(new FormData()) }
     clone() { return new Response(this._body, { status: this.status, headers: this.headers, url: this.url }) }
     static json(data, init) { return new Response(JSON.stringify(data), Object.assign({ headers: { 'content-type': 'application/json' } }, init)) }
@@ -428,6 +429,7 @@
     const r = send(method, url, headers, init.body !== undefined ? init.body : req && req.body, credentials, mode)
     if (!r) return Promise.reject(new TypeError('Failed to fetch'))
     const res = new Response(r[2], { status: r[0], headers: parseHeaders(r[4]), url: r[3] })
+    if (r[5]) Object.defineProperty(res, '_bytes', { value: r[5] })
     if (r[0] === 0) { res.type = 'opaque'; res.url = ''; return Promise.resolve(res) }
     if (__origin(r[3]) !== __origin(location.href)) res.type = 'cors'
     if (!res.headers.has('content-type') && r[1]) res.headers.set('content-type', r[1])
@@ -578,16 +580,53 @@
   }
   g.unescape = g.unescape || (s => String(s).replace(/%([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))))
   g.escape = g.escape || (s => String(s).replace(/[^A-Za-z0-9@*_+\-./]/g, c => { const n = c.charCodeAt(0); return n < 256 ? '%' + (n < 16 ? '0' : '') + n.toString(16).toUpperCase() : '%u' + n.toString(16).toUpperCase().padStart(4, '0') }))
+  // A Blob keeps text as text until its bytes are wanted, and bytes as bytes.
   g.Blob = class Blob {
-    constructor(parts, opts) { this._t = (parts || []).map(String).join(''); this.type = (opts && opts.type) || ''; this.size = this._t.length }
+    constructor(parts, opts) {
+      parts = parts == null ? [] : parts
+      if (typeof parts !== 'object' || typeof parts[Symbol.iterator] !== 'function') throw new TypeError("Failed to construct 'Blob': The provided value cannot be converted to a sequence.")
+      const list = [...parts]
+      let text = true
+      for (const p of list) if (p instanceof ArrayBuffer || ArrayBuffer.isView(p) || (p instanceof Blob && !('_tx' in p._d))) text = false
+      const d = {}
+      if (text) d._tx = list.map(p => p instanceof Blob ? p._d._tx : String(p)).join('')
+      else {
+        const chunks = list.map(p => p instanceof ArrayBuffer ? new Uint8Array(p) : ArrayBuffer.isView(p) ? new Uint8Array(p.buffer, p.byteOffset, p.byteLength) : p instanceof Blob ? p._u8() : __encode(String(p)))
+        const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0))
+        let at = 0
+        for (const c of chunks) { out.set(c, at); at += c.length }
+        d._b = out
+      }
+      Object.defineProperty(this, '_d', { value: d })
+      const type = opts && opts.type !== undefined ? String(opts.type) : ''
+      this.type = /[^\x20-\x7e]/.test(type) ? '' : type.toLowerCase()
+    }
+    get size() { return this._u8().length }
+    get _t() { const d = this._d; return '_tx' in d ? d._tx : (d._tx = new TextDecoder().decode(d._b)) }
+    _u8() { const d = this._d; return d._b || (d._b = __encode(d._tx)) }
     text() { return Promise.resolve(this._t) }
-    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._t).buffer) }
-    slice(a, b) { return new Blob([this._t.slice(a, b)], { type: this.type }) }
+    arrayBuffer() { const u = this._u8(); return Promise.resolve(u.buffer.slice(u.byteOffset, u.byteOffset + u.length)) }
+    bytes() { return Promise.resolve(new Uint8Array(this._u8())) }
+    slice(a, b, type) {
+      const u = this._u8(), n = u.length
+      const at = v => v === undefined ? undefined : v < 0 ? Math.max(n + v, 0) : Math.min(v, n)
+      const s = at(a) || 0, e = b === undefined ? n : at(b)
+      return new Blob([u.slice(s, Math.max(s, e))], { type: type === undefined ? '' : type })
+    }
+    stream() { const u = this._u8(); return new ReadableStream({ start(c) { c.enqueue(new Uint8Array(u)); c.close() } }) }
   }
   g.File = class File extends g.Blob { constructor(parts, name, opts) { super(parts, opts); this.name = name; this.lastModified = Date.now() } }
   g.FileReader = class FileReader extends EventTarget {
     readAsText(b) { b.text().then(t => { this.result = t; this.readyState = 2; this.dispatchEvent(new Event('load')); this.dispatchEvent(new Event('loadend')) }) }
-    readAsDataURL(b) { b.text().then(t => { this.result = 'data:' + (b.type || 'text/plain') + ';base64,' + btoa(unescape(encodeURIComponent(t))); this.dispatchEvent(new Event('load')); this.dispatchEvent(new Event('loadend')) }) }
+    readAsDataURL(b) {
+      const u = b._u8()
+      let bin = ''
+      for (let i = 0; i < u.length; i += 8192) bin += String.fromCharCode.apply(null, u.subarray(i, i + 8192))
+      this._done('data:' + (b.type || 'application/octet-stream') + ';base64,' + btoa(bin))
+    }
+    readAsArrayBuffer(b) { b.arrayBuffer().then(r => this._done(r)) }
+    readAsBinaryString(b) { const u = b._u8(); let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); this._done(s) }
+    _done(r) { this.readyState = 1; setTimeout(() => { this.result = r; this.readyState = 2; const e = k => { const ev = new Event(k); if (typeof this['on' + k] === 'function') this['on' + k](ev); this.dispatchEvent(ev) }; e('load'); e('loadend') }, 0) }
     abort() {}
   }
   class FormData {
@@ -683,7 +722,6 @@
     Object.setPrototypeOf(D, g.Node)
     g.Document = D
   }
-  g.Image = function (w, h) { const i = document.createElement('img'); if (w) i.width = w; if (h) i.height = h; return i }
   g.Audio = function (src) { const a = document.createElement('audio'); if (src) a.src = src; return a }
   g.Option = function (text, value, def, selected) {
     const o = document.createElement('option')
@@ -766,141 +804,755 @@
   g.Proxy = g.Proxy || function (target) { return target }
   g.SharedArrayBuffer = undefined
 
-  // ---------------------------------------------------------------- canvas
-  // A 2D context records what's drawn as a display list (transformed, curves
-  // made into short lines); Volant draws the list into the canvas's box.
-  const MAX_OPS = 20000
-  class CanvasGradient { constructor() { this._stops = [] } addColorStop(o, c) { this._stops.push([o, String(c)]) } }
-  class CanvasPattern { setTransform() {} }
-  const paint = v => (v instanceof CanvasGradient ? (v._stops.length ? v._stops[0][1] : 'transparent') : v instanceof CanvasPattern ? '#888' : String(v))
-  class CanvasRenderingContext2D {
-    constructor(canvas) { this.canvas = canvas; this._reset() }
-    _reset() {
-      this._ops = []; this._stack = []; this._m = [1, 0, 0, 1, 0, 0]; this._path = []; this._sub = null
-      this.fillStyle = '#000'; this.strokeStyle = '#000'; this.lineWidth = 1; this.globalAlpha = 1
-      this.font = '10px sans-serif'; this.textAlign = 'start'; this.textBaseline = 'alphabetic'
-      this.lineCap = 'butt'; this.lineJoin = 'miter'; this.miterLimit = 10; this.globalCompositeOperation = 'source-over'
-      this.shadowBlur = 0; this.shadowColor = 'transparent'; this.shadowOffsetX = 0; this.shadowOffsetY = 0
-      this.imageSmoothingEnabled = true; this.direction = 'inherit'; this.filter = 'none'; this._dash = []
+  // ---------------------------------------------------------------- geometry
+  // DOMPoint, DOMRect, DOMQuad and DOMMatrix (CSS Geometry Interfaces).
+  {
+    const num = v => +v
+    const dict = (v, what) => { if (v != null && typeof v !== 'object' && typeof v !== 'function') throw new TypeError("Failed to execute '" + what + "': The provided value is not of type 'Dictionary'."); return v || {} }
+    const def = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true })
+    const accessors = (C, names, writable, store) => {
+      for (const n of names) Object.defineProperty(C.prototype, n, { get() { return this[store][n] }, set: writable ? function (v) { this[store][n] = num(v) } : undefined, enumerable: true, configurable: true })
     }
-    _push(op) { if (this._ops.length < MAX_OPS) this._ops.push(op) }
-    _pt(x, y) { const m = this._m; return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]] }
-    _scale() { const m = this._m; return Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1 }
+    class DOMPointReadOnly {
+      constructor(x = 0, y = 0, z = 0, w = 1) { def(this, '_p', { x: num(x), y: num(y), z: num(z), w: num(w) }) }
+      static fromPoint(...a) { const p = dict(a[0], 'fromPoint'); return new this(p.x, p.y, p.z, p.w) }
+      matrixTransform(...a) {
+        const m = DOMMatrixReadOnly.fromMatrix(a[0])
+        const v = m._m, { x, y, z, w } = this._p
+        return new DOMPoint(v[0] * x + v[4] * y + v[8] * z + v[12] * w, v[1] * x + v[5] * y + v[9] * z + v[13] * w, v[2] * x + v[6] * y + v[10] * z + v[14] * w, v[3] * x + v[7] * y + v[11] * z + v[15] * w)
+      }
+      toJSON() { const { x, y, z, w } = this._p; return { x, y, z, w } }
+    }
+    class DOMPoint extends DOMPointReadOnly {}
+    accessors(DOMPointReadOnly, ['x', 'y', 'z', 'w'], false, '_p')
+    accessors(DOMPoint, ['x', 'y', 'z', 'w'], true, '_p')
+    const nanMin = (...v) => v.some(Number.isNaN) ? NaN : Math.min(...v)
+    const nanMax = (...v) => v.some(Number.isNaN) ? NaN : Math.max(...v)
+    class DOMRectReadOnly {
+      constructor(x = 0, y = 0, width = 0, height = 0) { def(this, '_r', { x: num(x), y: num(y), width: num(width), height: num(height) }) }
+      static fromRect(...a) { const r = dict(a[0], 'fromRect'); return new this(r.x, r.y, r.width, r.height) }
+      get top() { const r = this._r; return nanMin(r.y, r.y + r.height) }
+      get bottom() { const r = this._r; return nanMax(r.y, r.y + r.height) }
+      get left() { const r = this._r; return nanMin(r.x, r.x + r.width) }
+      get right() { const r = this._r; return nanMax(r.x, r.x + r.width) }
+      toJSON() { const { x, y, width, height } = this._r; return { x, y, width, height, top: this.top, right: this.right, bottom: this.bottom, left: this.left } }
+    }
+    class DOMRect extends DOMRectReadOnly {}
+    accessors(DOMRectReadOnly, ['x', 'y', 'width', 'height'], false, '_r')
+    accessors(DOMRect, ['x', 'y', 'width', 'height'], true, '_r')
+    for (const k of ['top', 'bottom', 'left', 'right']) Object.defineProperty(DOMRectReadOnly.prototype, k, { enumerable: true })
+    class DOMQuad {
+      constructor(p1, p2, p3, p4) { def(this, '_q', [p1, p2, p3, p4].map(p => DOMPoint.fromPoint(dict(p, 'DOMQuad')))) }
+      static fromRect(r) { r = dict(r, 'fromRect'); const x = num(r.x ?? 0), y = num(r.y ?? 0), w = num(r.width ?? 0), h = num(r.height ?? 0); return new DOMQuad({ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }) }
+      static fromQuad(q) { q = dict(q, 'fromQuad'); return new DOMQuad(q.p1, q.p2, q.p3, q.p4) }
+      get p1() { return this._q[0] }
+      get p2() { return this._q[1] }
+      get p3() { return this._q[2] }
+      get p4() { return this._q[3] }
+      getBounds() {
+        const xs = this._q.map(p => p.x), ys = this._q.map(p => p.y)
+        const x = nanMin(...xs), y = nanMin(...ys)
+        return new DOMRect(x, y, nanMax(...xs) - x, nanMax(...ys) - y)
+      }
+      toJSON() { return { p1: this.p1, p2: this.p2, p3: this.p3, p4: this.p4 } }
+    }
+    for (const k of ['p1', 'p2', 'p3', 'p4']) Object.defineProperty(DOMQuad.prototype, k, { enumerable: true })
+
+    // Matrices are 16 numbers, column by column: [m11, m12, m13, m14, m21, …, m44].
+    const ID = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    const mul = (A, B) => {
+      const C = new Array(16)
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) C[c * 4 + r] = A[r] * B[c * 4] + A[4 + r] * B[c * 4 + 1] + A[8 + r] * B[c * 4 + 2] + A[12 + r] * B[c * 4 + 3]
+      return C
+    }
+    const two = (a, b, c, d, e, f) => [a, b, 0, 0, c, d, 0, 0, 0, 0, 1, 0, e, f, 0, 1]
+    const NAMES = ['m11', 'm12', 'm13', 'm14', 'm21', 'm22', 'm23', 'm24', 'm31', 'm32', 'm33', 'm34', 'm41', 'm42', 'm43', 'm44']
+    const ALIAS = { a: 0, b: 1, c: 4, d: 5, e: 12, f: 13 }
+    const rad = d => d * Math.PI / 180
+    const axisAngle = (x, y, z, deg) => {
+      const len = Math.hypot(x, y, z)
+      if (len === 0) return ID.slice()
+      x /= len; y /= len; z /= len
+      const half = rad(deg) / 2, sc = Math.sin(half) * Math.cos(half), sq = Math.sin(half) ** 2
+      return [1 - 2 * (y * y + z * z) * sq, 2 * (x * y * sq + z * sc), 2 * (x * z * sq - y * sc), 0,
+        2 * (x * y * sq - z * sc), 1 - 2 * (x * x + z * z) * sq, 2 * (y * z * sq + x * sc), 0,
+        2 * (x * z * sq + y * sc), 2 * (y * z * sq - x * sc), 1 - 2 * (x * x + y * y) * sq, 0, 0, 0, 0, 1]
+    }
+    // A CSS transform list as a matrix and whether it's 2D (absolute lengths only).
+    const parseTransform = str => {
+      str = String(str).replace(/\/\*[\s\S]*?\*\//g, ' ').trim()
+      if (str === '' || str.toLowerCase() === 'none') return [ID.slice(), true]
+      const bad = () => { throw new DOMException("Failed to parse '" + str + "'.", 'SyntaxError') }
+      let m = ID.slice(), is2D = true, rest = str
+      const len = s => { const r = /^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(px)?$/i.exec(s); if (!r || (!r[2] && +r[1] !== 0)) bad(); return +r[1] }
+      const ang = s => { const r = /^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(deg|rad|grad|turn)?$/i.exec(s); if (!r || (!r[2] && +r[1] !== 0)) bad(); const u = (r[2] || 'deg').toLowerCase(); return +r[1] * (u === 'rad' ? 180 / Math.PI : u === 'grad' ? 0.9 : u === 'turn' ? 360 : 1) }
+      const n = s => { const r = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.exec(s); if (!r) bad(); return +s }
+      while (rest.length) {
+        const f = /^([a-zA-Z0-9]+)\(([^)]*)\)\s*/.exec(rest)
+        if (!f) bad()
+        rest = rest.slice(f[0].length)
+        const name = f[1].toLowerCase(), args = f[2].split(',').map(a => a.trim())
+        if (args.some(a => a === '')) bad()
+        const k = cnt => { if (!(Array.isArray(cnt) ? cnt.includes(args.length) : args.length === cnt)) bad() }
+        let t
+        switch (name) {
+          case 'matrix': k(6); t = two(...args.map(n)); break
+          case 'matrix3d': k(16); t = args.map(n); is2D = false; break
+          case 'translate': k([1, 2]); t = two(1, 0, 0, 1, len(args[0]), args[1] ? len(args[1]) : 0); break
+          case 'translatex': k(1); t = two(1, 0, 0, 1, len(args[0]), 0); break
+          case 'translatey': k(1); t = two(1, 0, 0, 1, 0, len(args[0])); break
+          case 'translatez': k(1); t = ID.slice(); t[14] = len(args[0]); is2D = false; break
+          case 'translate3d': k(3); t = ID.slice(); t[12] = len(args[0]); t[13] = len(args[1]); t[14] = len(args[2]); is2D = false; break
+          case 'scale': k([1, 2]); { const x = n(args[0]); t = two(x, 0, 0, args[1] ? n(args[1]) : x, 0, 0) } break
+          case 'scalex': k(1); t = two(n(args[0]), 0, 0, 1, 0, 0); break
+          case 'scaley': k(1); t = two(1, 0, 0, n(args[0]), 0, 0); break
+          case 'scalez': k(1); t = ID.slice(); t[10] = n(args[0]); is2D = false; break
+          case 'scale3d': k(3); t = ID.slice(); t[0] = n(args[0]); t[5] = n(args[1]); t[10] = n(args[2]); is2D = false; break
+          case 'rotate': case 'rotatez': k(1); { const a = rad(ang(args[0])); t = two(Math.cos(a), Math.sin(a), -Math.sin(a), Math.cos(a), 0, 0) } if (name === 'rotatez') is2D = false; break
+          case 'rotatex': k(1); t = axisAngle(1, 0, 0, ang(args[0])); is2D = false; break
+          case 'rotatey': k(1); t = axisAngle(0, 1, 0, ang(args[0])); is2D = false; break
+          case 'rotate3d': k(4); t = axisAngle(n(args[0]), n(args[1]), n(args[2]), ang(args[3])); is2D = false; break
+          case 'skew': k([1, 2]); t = two(1, Math.tan(rad(args[1] ? ang(args[1]) : 0)), Math.tan(rad(ang(args[0]))), 1, 0, 0); break
+          case 'skewx': k(1); t = two(1, 0, Math.tan(rad(ang(args[0]))), 1, 0, 0); break
+          case 'skewy': k(1); t = two(1, Math.tan(rad(ang(args[0]))), 0, 1, 0, 0); break
+          case 'perspective': k(1); { const d = len(args[0]); t = ID.slice(); if (d !== 0) t[11] = -1 / d } is2D = false; break
+          default: bad()
+        }
+        m = mul(m, t)
+      }
+      return [m, is2D]
+    }
+    const same = (a, b) => a === b || (Number.isNaN(a) && Number.isNaN(b))
+    // Checks a DOMMatrixInit dictionary and fills in its gaps.
+    const fixup = (o, only2D) => {
+      o = dict(o, 'fromMatrix')
+      for (const [al, idx] of Object.entries(ALIAS)) {
+        const nm = NAMES[idx]
+        if (o[al] !== undefined && o[nm] !== undefined && !same(+o[al], +o[nm])) throw new TypeError("Failed to execute 'fromMatrix': The '" + al + "' property should equal '" + nm + "'.")
+      }
+      const v = ID.slice()
+      for (const [al, idx] of Object.entries(ALIAS)) { const x = o[NAMES[idx]] !== undefined ? o[NAMES[idx]] : o[al]; if (x !== undefined) v[idx] = +x }
+      if (only2D) return [v, true]
+      const third = [2, 3, 6, 7, 8, 9, 11, 14]
+      let flat = true
+      for (const k of [2, 3, 6, 7, 8, 9, 10, 11, 14, 15]) { if (o[NAMES[k]] !== undefined) { v[k] = +o[NAMES[k]]; if (third.includes(k) ? v[k] !== 0 : v[k] !== 1) flat = false } }
+      if (o.is2D === true && !flat) throw new TypeError("Failed to execute 'fromMatrix': The is2D member is set to true but the input matrix is a 3D matrix.")
+      return [v, o.is2D === undefined ? flat : !!o.is2D]
+    }
+    class DOMMatrixReadOnly {
+      constructor(init) {
+        let v = ID.slice(), is2D = true
+        if (init === undefined) {} else if (typeof init === 'string') [v, is2D] = parseTransform(init)
+        else if (init !== null && typeof init === 'object' && typeof init[Symbol.iterator] === 'function') {
+          const a = [...init].map(num)
+          if (a.length === 6) v = two(...a)
+          else if (a.length === 16) { v = a; is2D = false }
+          else throw new TypeError("Failed to construct 'DOMMatrix': The sequence must contain 6 elements for a 2D matrix or 16 elements for a 3D matrix.")
+        } else [v, is2D] = parseTransform(String(init))
+        def(this, '_m', v)
+        def(this, '_2d', is2D)
+      }
+      static fromMatrix(...a) { const o = a[0]; if (o instanceof DOMMatrixReadOnly) return this._of(o._m.slice(), o._2d); const [v, d] = fixup(o); return this._of(v, d) }
+      static fromFloat32Array(a) { if (!(a instanceof Float32Array)) throw new TypeError('Not a Float32Array'); return new this([...a]) }
+      static fromFloat64Array(a) { if (!(a instanceof Float64Array)) throw new TypeError('Not a Float64Array'); return new this([...a]) }
+      static _of(v, is2D) { const m = new this(); m._m = v; m._2d = is2D; return m }
+      get is2D() { return this._2d }
+      get isIdentity() { return this._m.every((x, k) => x === ID[k]) }
+      _copy() { return DOMMatrix._of(this._m.slice(), this._2d) }
+      translate(...a) { return this._copy().translateSelf(...a) }
+      scale(...a) { return this._copy().scaleSelf(...a) }
+      scaleNonUniform(...a) { return this._copy().scaleSelf(a[0] ?? 1, a[1] ?? 1, 1, 0, 0, 0) }
+      scale3d(...a) { return this._copy().scale3dSelf(...a) }
+      rotate(...a) { return this._copy().rotateSelf(...a) }
+      rotateFromVector(...a) { return this._copy().rotateFromVectorSelf(...a) }
+      rotateAxisAngle(...a) { return this._copy().rotateAxisAngleSelf(...a) }
+      skewX(...a) { return this._copy().skewXSelf(...a) }
+      skewY(...a) { return this._copy().skewYSelf(...a) }
+      multiply(...a) { return this._copy().multiplySelf(...a) }
+      flipX() { return this._copy().multiplySelf(DOMMatrix._of(two(-1, 0, 0, 1, 0, 0), true)) }
+      flipY() { return this._copy().multiplySelf(DOMMatrix._of(two(1, 0, 0, -1, 0, 0), true)) }
+      inverse() { return this._copy().invertSelf() }
+      transformPoint(...a) { return DOMPoint.fromPoint(a[0]).matrixTransform(this) }
+      toFloat32Array() { return new Float32Array(this._m) }
+      toFloat64Array() { return new Float64Array(this._m) }
+      toString() {
+        if (!this._m.every(Number.isFinite)) throw new DOMException('Cannot serialize a matrix with non-finite values.', 'InvalidStateError')
+        const v = this._m
+        return this._2d ? 'matrix(' + [v[0], v[1], v[4], v[5], v[12], v[13]].join(', ') + ')' : 'matrix3d(' + v.join(', ') + ')'
+      }
+      toJSON() { const o = {}; for (const k of ['a', 'b', 'c', 'd', 'e', 'f', ...NAMES]) o[k] = this[k]; o.is2D = this.is2D; o.isIdentity = this.isIdentity; return o }
+    }
+    class DOMMatrix extends DOMMatrixReadOnly {
+      multiplySelf(...a) { const o = DOMMatrixReadOnly.fromMatrix(a[0]); this._m = mul(this._m, o._m); if (!o._2d) this._2d = false; return this }
+      preMultiplySelf(...a) { const o = DOMMatrixReadOnly.fromMatrix(a[0]); this._m = mul(o._m, this._m); if (!o._2d) this._2d = false; return this }
+      translateSelf(...a) { const x = +(a[0] ?? 0), y = +(a[1] ?? 0), z = +(a[2] ?? 0); const t = ID.slice(); t[12] = x; t[13] = y; t[14] = z; this._m = mul(this._m, t); if (z !== 0) this._2d = false; return this }
+      scaleSelf(...a) {
+        const sx = +(a[0] ?? 1), sy = a[1] === undefined ? sx : +a[1], sz = +(a[2] ?? 1), ox = +(a[3] ?? 0), oy = +(a[4] ?? 0), oz = +(a[5] ?? 0)
+        this.translateSelf(ox, oy, oz)
+        const t = ID.slice(); t[0] = sx; t[5] = sy; t[10] = sz
+        this._m = mul(this._m, t)
+        this.translateSelf(-ox, -oy, -oz)
+        if (sz !== 1 || oz !== 0) this._2d = false
+        return this
+      }
+      scale3dSelf(...a) { const s = a[0] ?? 1; this.scaleSelf(s, s, s, a[1] ?? 0, a[2] ?? 0, a[3] ?? 0); if (+s !== 1) this._2d = false; return this }
+      rotateSelf(rx = 0, ry, rz) {
+        if (ry === undefined && rz === undefined) { rz = rx; rx = 0; ry = 0 }
+        rx = +rx; ry = +(ry ?? 0); rz = +(rz ?? 0)
+        if (rx !== 0 || ry !== 0) this._2d = false
+        if (rz) this._m = mul(this._m, axisAngle(0, 0, 1, rz))
+        if (ry) this._m = mul(this._m, axisAngle(0, 1, 0, ry))
+        if (rx) this._m = mul(this._m, axisAngle(1, 0, 0, rx))
+        return this
+      }
+      rotateFromVectorSelf(...a) { const x = +(a[0] ?? 0), y = +(a[1] ?? 0); const a = x === 0 && y === 0 ? 0 : Math.atan2(y, x) * 180 / Math.PI; if (a) this._m = mul(this._m, axisAngle(0, 0, 1, a)); return this }
+      rotateAxisAngleSelf(...a) { const x = +(a[0] ?? 0), y = +(a[1] ?? 0), z = +(a[2] ?? 0), angle = +(a[3] ?? 0); this._m = mul(this._m, axisAngle(x, y, z, angle)); if (x !== 0 || y !== 0) this._2d = false; return this }
+      skewXSelf(...a) { const s = a[0] ?? 0; this._m = mul(this._m, two(1, 0, Math.tan(rad(+s)), 1, 0, 0)); return this }
+      skewYSelf(...a) { const s = a[0] ?? 0; this._m = mul(this._m, two(1, Math.tan(rad(+s)), 0, 1, 0, 0)); return this }
+      invertSelf() {
+        const m = this._m, inv = new Array(16)
+        inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10]
+        inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10]
+        inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9]
+        inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9]
+        inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10]
+        inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10]
+        inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9]
+        inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9]
+        inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6]
+        inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6]
+        inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5]
+        inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5]
+        inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6]
+        inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6]
+        inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5]
+        inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5]
+        const det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12]
+        if (det === 0 || !Number.isFinite(det)) { this._m = new Array(16).fill(NaN); this._2d = false; return this }
+        this._m = inv.map(x => x / det)
+        return this
+      }
+      setMatrixValue(str) { const [v, d] = parseTransform(str); this._m = v; this._2d = d; return this }
+    }
+    for (const [k, idx] of [...Object.entries(ALIAS), ...NAMES.map((n, i) => [n, i])]) {
+      Object.defineProperty(DOMMatrixReadOnly.prototype, k, { get() { return this._m[idx] }, enumerable: true, configurable: true })
+      const third = [2, 3, 6, 7, 8, 9, 11, 14].includes(idx), diag = idx === 10 || idx === 15
+      Object.defineProperty(DOMMatrix.prototype, k, {
+        get() { return this._m[idx] },
+        set(v) { v = +v; this._m[idx] = v; if ((third && v !== 0) || (diag && v !== 1)) this._2d = false },
+        enumerable: true, configurable: true,
+      })
+    }
+    const all = { DOMPointReadOnly, DOMPoint, DOMRectReadOnly, DOMRect, DOMQuad, DOMMatrixReadOnly, DOMMatrix }
+    for (const [k, C] of Object.entries(all)) {
+      Object.defineProperty(C.prototype, Symbol.toStringTag, { value: k, configurable: true })
+      Object.defineProperty(g, k, { value: C, writable: true, configurable: true })
+    }
+    Object.defineProperty(g, 'WebKitCSSMatrix', { value: DOMMatrix, writable: true, configurable: true })
+    // A DOMMatrix2DInit for canvases: [a, b, c, d, e, f], checked and filled in.
+    Object.defineProperty(g, '__m2d', { value: o => { if (o instanceof DOMMatrixReadOnly) { const v = o._m; return [v[0], v[1], v[4], v[5], v[12], v[13]] } const [v] = fixup(o, true); return [v[0], v[1], v[4], v[5], v[12], v[13]] } })
+  }
+
+  // ---------------------------------------------------------------- fonts
+  // FontFace and document.fonts: Canard reads TrueType, OpenType and WOFF files itself.
+  {
+    const weights = w => {
+      const one = v => v === 'normal' ? 400 : v === 'bold' ? 700 : Math.min(1000, Math.max(1, parseFloat(v) || 400))
+      const p = String(w == null ? 'normal' : w).trim().split(/\s+/)
+      return [one(p[0]), one(p[1] || p[0])]
+    }
+    const bufferish = v => v instanceof ArrayBuffer || ArrayBuffer.isView(v)
+    class FontFace {
+      constructor(family, source, desc) {
+        if (arguments.length < 2) throw new TypeError("Failed to construct 'FontFace': 2 arguments required.")
+        desc = desc || {}
+        this.family = String(family).replace(/^["']|["']$/g, '')
+        this.style = desc.style || 'normal'
+        this.weight = String(desc.weight || 'normal')
+        this.stretch = desc.stretch || 'normal'
+        this.unicodeRange = desc.unicodeRange || 'U+0-10FFFF'
+        this.variant = desc.variant || 'normal'
+        this.featureSettings = desc.featureSettings || 'normal'
+        this.display = desc.display || 'auto'
+        this.ascentOverride = this.descentOverride = this.lineGapOverride = 'normal'
+        this.status = 'unloaded'
+        let ok, no
+        this.loaded = new Promise((a, b) => { ok = a; no = b })
+        this.loaded.catch(() => {})
+        Object.defineProperty(this, '_src', { value: source })
+        Object.defineProperty(this, '_done', { value: [ok, no] })
+        // Bytes load straight away; addresses when asked to (or when the set needs them).
+        if (bufferish(source)) this._load()
+        else if (typeof source !== 'string') { this.status = 'error'; no(new DOMException('The source is not a string or buffer.', 'SyntaxError')) }
+      }
+      _load() {
+        if (this.status !== 'unloaded') return
+        this.status = 'loading'
+        const [lo, hi] = weights(this.weight)
+        const ok = __fontload(this.family, this._src, lo, hi, /italic|oblique/.test(this.style))
+        this.status = ok ? 'loaded' : 'error'
+        if (ok) this._done[0](this)
+        else this._done[1](new DOMException('A network error occurred.', 'NetworkError'))
+        fonts._changed()
+      }
+      load() { this._load(); return this.loaded }
+    }
+    g.FontFace = FontFace
+    class FontFaceSetLoadEvent extends Event {
+      constructor(type, init) { super(type, init); this.fontfaces = (init && init.fontfaces) || [] }
+    }
+    g.FontFaceSetLoadEvent = FontFaceSetLoadEvent
+    // The page's own @font-face rules load the first time anything asks.
+    let sheetsLoaded = false
+    const sheets = () => { if (!sheetsLoaded) { sheetsLoaded = true; __fontfaces() } }
+    class FontFaceSet extends EventTarget {
+      constructor() { super(); Object.defineProperty(this, '_faces', { value: new Set() }) }
+      get size() { return this._faces.size }
+      get status() { for (const f of this._faces) if (f.status === 'loading') return 'loading'; return 'loaded' }
+      get ready() { sheets(); return Promise.resolve(this) }
+      add(f) { if (!(f instanceof FontFace)) throw new TypeError("Failed to execute 'add' on 'FontFaceSet': parameter 1 is not of type 'FontFace'."); this._faces.add(f); return this }
+      delete(f) { return this._faces.delete(f) }
+      has(f) { return this._faces.has(f) }
+      clear() { this._faces.clear() }
+      forEach(cb, self) { for (const f of this._faces) cb.call(self, f, f, this) }
+      values() { return this._faces.values() }
+      keys() { return this._faces.values() }
+      entries() { return this._faces.entries() }
+      [Symbol.iterator]() { return this._faces.values() }
+      _matching(font) {
+        const m = /([^,]*?)\s*(\d+(?:\.\d+)?(?:px|pt|em|rem|%))(?:\/\S+)?\s+(.+)$/.exec(String(font).trim())
+        if (!m) throw new DOMException('Could not resolve \'' + font + '\' as a font.', 'SyntaxError')
+        const fams = m[3].split(',').map(f => f.trim().replace(/^["']|["']$/g, '').toLowerCase())
+        return [...this._faces].filter(f => fams.includes(f.family.toLowerCase()))
+      }
+      load(font, text) {
+        sheets()
+        let faces
+        try { faces = this._matching(font) } catch (e) { return Promise.reject(e) }
+        for (const f of faces) f._load()
+        return Promise.all(faces.map(f => f.loaded))
+      }
+      check(font, text) {
+        sheets()
+        return this._matching(font).every(f => f.status === 'loaded')
+      }
+      _changed() {}
+    }
+    g.FontFaceSet = FontFaceSet
+    const fonts = new FontFaceSet()
+    Object.defineProperty(document, 'fonts', { get: () => fonts, configurable: true })
+  }
+
+  // ---------------------------------------------------------------- canvas
+  // A 2D context queues commands (the numbers in script/canvas_run.rs), and
+  // Canard carries them out on the canvas's pixels when the page reads them
+  // back or the page is drawn. Getters answer from the state kept here.
+  const CV = { SAVE: 1, RESTORE: 2, RESET: 3, TRANSFORM: 10, SET_TRANSFORM: 11, SET: 20, DASH: 21, BEGIN: 30, MOVE: 31, LINE: 32, QUAD: 33, CUBIC: 34, ARC: 35, ELLIPSE: 36, ARC_TO: 37, RECT: 38, ROUND_RECT: 39, CLOSE: 40, SVG: 41, ADD_PATH: 42, FILL: 50, STROKE: 51, CLIP: 52, FILL_RECT: 53, STROKE_RECT: 54, CLEAR_RECT: 55, FILL_TEXT: 60, STROKE_TEXT: 61, DRAW_IMAGE: 70, GET: 80, PUT: 81, URL: 82, HIT: 83 }
+  const MAX_QUEUE = 100000
+  const domErr = (name, msg) => new DOMException(msg || name, name)
+  const fin = (...a) => a.every(Number.isFinite)
+  const needArgs = (n, args, what) => { if (args.length < n) throw new TypeError("Failed to execute '" + what + "': " + n + ' arguments required, but only ' + args.length + ' present.') }
+  class CanvasGradient {
+    constructor(k, a) { this._k = k; this._a = a; this._s = [] }
+    addColorStop(o, c) {
+      needArgs(2, arguments, 'addColorStop')
+      o = +o
+      if (!Number.isFinite(o)) throw new TypeError('The provided double value is non-finite.')
+      if (o < 0 || o > 1) throw domErr('IndexSizeError', 'The provided value (' + o + ') is outside the range (0.0, 1.0).')
+      if (__cvcolor(String(c)) === null) throw domErr('SyntaxError', "The value provided ('" + c + "') could not be parsed as a color.")
+      this._s.push([o, String(c)])
+    }
+  }
+  class CanvasPattern {
+    constructor(img, rep) { this._k = 'pattern'; this._i = img; this._r = rep; this._m = null }
+    setTransform(m) { this._m = __m2d(m) }
+  }
+  // Path commands, shared by contexts and Path2D.
+  const pathMethods = {
+    moveTo(x, y) { this._p(CV.MOVE, +x, +y) },
+    lineTo(x, y) { this._p(CV.LINE, +x, +y) },
+    quadraticCurveTo(cx, cy, x, y) { this._p(CV.QUAD, +cx, +cy, +x, +y) },
+    bezierCurveTo(a, b, c, d, e, f) { this._p(CV.CUBIC, +a, +b, +c, +d, +e, +f) },
+    arc(x, y, r, a0, a1, ccw) {
+      needArgs(5, arguments, 'arc')
+      if (fin(+x, +y, +r, +a0, +a1) && r < 0) throw domErr('IndexSizeError', 'The radius provided (' + r + ') is negative.')
+      this._p(CV.ARC, +x, +y, +r, +a0, +a1, ccw ? 1 : 0)
+    },
+    ellipse(x, y, rx, ry, rot, a0, a1, ccw) {
+      needArgs(7, arguments, 'ellipse')
+      if (fin(+x, +y, +rx, +ry, +rot, +a0, +a1) && (rx < 0 || ry < 0)) throw domErr('IndexSizeError', 'The radius provided is negative.')
+      this._p(CV.ELLIPSE, +x, +y, +rx, +ry, +rot, +a0, +a1, ccw ? 1 : 0)
+    },
+    arcTo(x1, y1, x2, y2, r) {
+      needArgs(5, arguments, 'arcTo')
+      if (fin(+x1, +y1, +x2, +y2, +r) && r < 0) throw domErr('IndexSizeError', 'The radius provided (' + r + ') is negative.')
+      this._p(CV.ARC_TO, +x1, +y1, +x2, +y2, +r)
+    },
+    rect(x, y, w, h) { this._p(CV.RECT, +x, +y, +w, +h) },
+    roundRect(x, y, w, h, radii) {
+      if (radii === undefined) radii = 0
+      const list = (typeof radii === 'object' && radii !== null && typeof radii[Symbol.iterator] === 'function') ? Array.from(radii) : [radii]
+      if (list.length < 1 || list.length > 4) throw new RangeError(list.length + ' radii provided. Between one and four radii are necessary.')
+      const flat = []
+      for (const r of list) {
+        const [rx, ry] = typeof r === 'object' && r !== null ? [+(r.x || 0), +(r.y || 0)] : [+r, +r]
+        if (!fin(rx, ry)) return
+        if (rx < 0 || ry < 0) throw new RangeError('Radius value ' + r + ' is negative.')
+        flat.push(rx, ry)
+      }
+      this._p(CV.ROUND_RECT, +x, +y, +w, +h, flat)
+    },
+    closePath() { this._p(CV.CLOSE) },
+  }
+  class Path2D {
+    constructor(src) {
+      this._c = []
+      if (src instanceof Path2D) this._c = src._c.slice()
+      else if (src !== undefined) this._c.push(CV.SVG, String(src))
+    }
+    _p(...a) { for (const v of a) this._c.push(v) }
+    addPath(p, m) {
+      if (!(p instanceof Path2D)) throw new TypeError("Failed to execute 'addPath': parameter 1 is not of type 'Path2D'.")
+      const [a, b, c, d, e, f] = __m2d(m)
+      this._c.push(CV.ADD_PATH, p._c.slice(), a, b, c, d, e, f)
+    }
+  }
+  Object.assign(Path2D.prototype, pathMethods)
+  class ImageData {
+    constructor(a, b, c, opts) {
+      if (a instanceof Uint8ClampedArray) {
+        const n = a.length
+        if (n === 0 || n % 4) throw domErr('InvalidStateError', 'The input data length is not a multiple of 4.')
+        b = b >>> 0
+        if (!b) throw domErr('IndexSizeError', 'The source width is zero or not a number.')
+        if ((n / 4) % b) throw domErr('IndexSizeError', 'The input data length is not a multiple of (4 * width).')
+        const h = n / 4 / b
+        if (c !== undefined && c >>> 0 !== h) throw domErr('IndexSizeError', 'The input data length is not equal to (4 * width * height).')
+        Object.defineProperties(this, { width: { value: b, enumerable: true }, height: { value: h, enumerable: true }, data: { value: a, enumerable: true } })
+      } else {
+        needArgs(2, arguments, 'ImageData')
+        const w = Math.trunc(+a), h = Math.trunc(+b)
+        if (!w || !h || !Number.isFinite(w) || !Number.isFinite(h)) throw domErr('IndexSizeError', 'The source width or height is zero.')
+        const [aw, ah] = [Math.abs(w), Math.abs(h)]
+        if (aw * ah > 1 << 28) throw new RangeError('Out of memory at ImageData creation')
+        Object.defineProperties(this, { width: { value: aw, enumerable: true }, height: { value: ah, enumerable: true }, data: { value: new Uint8ClampedArray(aw * ah * 4), enumerable: true } })
+      }
+      Object.defineProperty(this, 'colorSpace', { value: (opts && opts.colorSpace) || 'srgb', enumerable: true })
+    }
+  }
+  class TextMetrics {}
+  // Each style property: (index for the queue, default, how to check a new value; undefined means ignore it).
+  const ops = ['source-over', 'source-in', 'source-out', 'source-atop', 'destination-over', 'destination-in', 'destination-out', 'destination-atop', 'lighter', 'copy', 'xor', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity']
+  const oneOf = list => v => (v = String(v), list.includes(v) ? v : undefined)
+  const positive = v => (v = +v, Number.isFinite(v) && v > 0 ? v : undefined)
+  const finite = v => (v = +v, Number.isFinite(v) ? v : undefined)
+  const style = (v, ctx) => {
+    if (v instanceof CanvasGradient || v instanceof CanvasPattern) return v
+    const c = __cvcolor(String(v), ctx && ctx.canvas)
+    return c === null ? undefined : c
+  }
+  const props = {
+    fillStyle: [0, '#000000', style], strokeStyle: [1, '#000000', style],
+    lineWidth: [2, 1, positive], lineCap: [3, 'butt', oneOf(['butt', 'round', 'square'])], lineJoin: [4, 'miter', oneOf(['miter', 'round', 'bevel'])],
+    miterLimit: [5, 10, positive], globalAlpha: [6, 1, v => (v = +v, Number.isFinite(v) && v >= 0 && v <= 1 ? v : undefined)],
+    globalCompositeOperation: [7, 'source-over', oneOf(ops)],
+    font: [8, '10px sans-serif', v => (v = String(v), __cvfont(v) ? v : undefined)],
+    textAlign: [9, 'start', oneOf(['start', 'end', 'left', 'right', 'center'])],
+    textBaseline: [10, 'alphabetic', oneOf(['top', 'hanging', 'middle', 'alphabetic', 'ideographic', 'bottom'])],
+    shadowBlur: [11, 0, v => (v = +v, Number.isFinite(v) && v >= 0 ? v : undefined)],
+    shadowColor: [12, 'rgba(0, 0, 0, 0)', (v, ctx) => { const c = __cvcolor(String(v), ctx && ctx.canvas); return c === null ? undefined : c }],
+    shadowOffsetX: [13, 0, finite], shadowOffsetY: [14, 0, finite],
+    imageSmoothingEnabled: [15, true, v => !!v], lineDashOffset: [16, 0, finite],
+    direction: [17, 'inherit', oneOf(['ltr', 'rtl', 'inherit'])],
+  }
+  // Accepted and kept, but nothing draws differently for them yet.
+  const quiet = { imageSmoothingQuality: ['low', oneOf(['low', 'medium', 'high'])], filter: ['none', v => String(v)], letterSpacing: ['0px', v => String(v)], wordSpacing: ['0px', v => String(v)], fontKerning: ['auto', oneOf(['auto', 'normal', 'none'])], fontStretch: ['normal', v => String(v)], fontVariantCaps: ['normal', v => String(v)], textRendering: ['auto', v => String(v)] }
+  const fresh = () => {
+    const s = { m: [1, 0, 0, 1, 0, 0], dash: [] }
+    for (const k in props) s[k] = props[k][1]
+    for (const k in quiet) s[k] = quiet[k][0]
+    return s
+  }
+  // The pixels of an image source, checked as drawImage and createPattern check them: null when it isn't ready.
+  const usable = (img, what) => {
+    if (img && img.tagName === 'CANVAS') {
+      if (!img.width || !img.height) throw domErr('InvalidStateError', "Failed to execute '" + what + "': The image argument is a canvas element with a width or height of 0.")
+      if (img.__ctx) img.__ctx._flush()
+      return true
+    }
+    if (img instanceof ImageData || (img && img._bitmap)) return true
+    if (img && (img.tagName === 'IMG' || img.tagName === 'image')) return !!(img.getAttribute('src') || img.getAttribute('href'))
+    if (img && img.tagName === 'VIDEO') return false
+    throw new TypeError("Failed to execute '" + what + "': The provided value is not of type '(CSSImageValue or HTMLCanvasElement or HTMLImageElement or HTMLVideoElement or ImageBitmap or OffscreenCanvas or SVGImageElement or VideoFrame)'.")
+  }
+  class CanvasRenderingContext2D {
+    constructor(canvas) { this.canvas = canvas; this._q = []; this._s = fresh(); this._stack = [] }
+    _p(...a) { const q = this._q; for (const v of a) q.push(v); if (q.length > MAX_QUEUE) this._flush() }
+    _flush() { if (this._q.length) { const q = this._q; this._q = []; __cv(this.canvas, q) } }
+    _ask(...a) { const q = this._q; this._q = []; for (const v of a) q.push(v); return __cv(this.canvas, q) }
+    _reset() { this._q = [CV.RESET]; this._s = fresh(); this._stack = [] }
+    getContextAttributes() { return { alpha: true, desynchronized: false, colorSpace: 'srgb', willReadFrequently: false } }
+    isContextLost() { return false }
     // state
-    save() { this._stack.push([this._m.slice(), this.fillStyle, this.strokeStyle, this.lineWidth, this.globalAlpha, this.font, this.textAlign, this.textBaseline]) }
-    restore() { const s = this._stack.pop(); if (s) [this._m, this.fillStyle, this.strokeStyle, this.lineWidth, this.globalAlpha, this.font, this.textAlign, this.textBaseline] = s }
+    save() { this._stack.push(Object.assign({}, this._s, { m: this._s.m.slice(), dash: this._s.dash.slice() })); this._p(CV.SAVE) }
+    restore() { if (this._stack.length) { this._s = this._stack.pop(); this._p(CV.RESTORE) } }
     reset() { this._reset() }
     // transforms
-    transform(a, b, c, d, e, f) { const m = this._m; this._m = [m[0] * a + m[2] * b, m[1] * a + m[3] * b, m[0] * c + m[2] * d, m[1] * c + m[3] * d, m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5]] }
-    setTransform(a, b, c, d, e, f) { if (typeof a === 'object' && a) { ({ a, b, c, d, e, f } = a) } this._m = a === undefined ? [1, 0, 0, 1, 0, 0] : [a, b, c, d, e, f] }
-    resetTransform() { this._m = [1, 0, 0, 1, 0, 0] }
-    getTransform() { const [a, b, c, d, e, f] = this._m; return { a, b, c, d, e, f, is2D: true, isIdentity: a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0 } }
-    translate(x, y) { this.transform(1, 0, 0, 1, x, y) }
-    scale(x, y) { this.transform(x, 0, 0, y, 0, 0) }
-    rotate(r) { const c = Math.cos(r), s = Math.sin(r); this.transform(c, s, -s, c, 0, 0) }
+    transform(a, b, c, d, e, f) {
+      needArgs(6, arguments, 'transform')
+      a = +a; b = +b; c = +c; d = +d; e = +e; f = +f
+      if (!fin(a, b, c, d, e, f)) return
+      const m = this._s.m
+      this._s.m = [m[0] * a + m[2] * b, m[1] * a + m[3] * b, m[0] * c + m[2] * d, m[1] * c + m[3] * d, m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5]]
+      this._p(CV.TRANSFORM, a, b, c, d, e, f)
+    }
+    setTransform(a, b, c, d, e, f) {
+      if (arguments.length <= 1) [a, b, c, d, e, f] = __m2d(a)
+      a = +a; b = +b; c = +c; d = +d; e = +e; f = +f
+      if (!fin(a, b, c, d, e, f)) return
+      this._s.m = [a, b, c, d, e, f]
+      this._p(CV.SET_TRANSFORM, a, b, c, d, e, f)
+    }
+    resetTransform() { this.setTransform(1, 0, 0, 1, 0, 0) }
+    getTransform() { const [a, b, c, d, e, f] = this._s.m; return g.DOMMatrix ? new g.DOMMatrix([a, b, c, d, e, f]) : { a, b, c, d, e, f, is2D: true, isIdentity: a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0 } }
+    translate(x, y) { needArgs(2, arguments, 'translate'); this.transform(1, 0, 0, 1, x, y) }
+    scale(x, y) { needArgs(2, arguments, 'scale'); this.transform(x, 0, 0, y, 0, 0) }
+    rotate(r) { needArgs(1, arguments, 'rotate'); r = +r; if (Number.isFinite(r)) this.transform(Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0) }
     // paths
-    beginPath() { this._path = []; this._sub = null }
-    _start(x, y) { this._sub = [false, ...this._pt(x, y)]; this._path.push(this._sub); this._last = [x, y] }
-    moveTo(x, y) { this._start(+x, +y) }
-    lineTo(x, y) { x = +x; y = +y; if (!this._sub) this._start(x, y); else { this._sub.push(...this._pt(x, y)); this._last = [x, y] } }
-    closePath() { if (this._sub) { this._sub[0] = true; const [x, y] = this._sub.length > 2 ? [this._sub[1], this._sub[2]] : [0, 0]; this._sub = null; this._closedAt = [x, y] } }
-    rect(x, y, w, h) { this.moveTo(x, y); this.lineTo(x + w, y); this.lineTo(x + w, y + h); this.lineTo(x, y + h); this.closePath() }
-    roundRect(x, y, w, h, r) {
-      r = Math.min(Math.abs(Array.isArray(r) ? r[0] || 0 : +r || 0), Math.abs(w) / 2, Math.abs(h) / 2)
-      if (!r) return this.rect(x, y, w, h)
-      this.moveTo(x + r, y); this.arc(x + w - r, y + r, r, -Math.PI / 2, 0); this.arc(x + w - r, y + h - r, r, 0, Math.PI / 2)
-      this.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI); this.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5); this.closePath()
+    beginPath() { this._p(CV.BEGIN) }
+    _rule(r) { return r === 'evenodd' ? 1 : 0 }
+    _pathArgs(a) { return a[0] instanceof Path2D ? [a[0]._c.slice(), a[1]] : [null, a[0]] }
+    fill(...a) { const [p, r] = this._pathArgs(a); this._p(CV.FILL, this._rule(r), p) }
+    stroke(p) { this._p(CV.STROKE, p instanceof Path2D ? p._c.slice() : null) }
+    clip(...a) { const [p, r] = this._pathArgs(a); this._p(CV.CLIP, this._rule(r), p) }
+    isPointInPath(...a) {
+      const p = a[0] instanceof Path2D ? a.shift()._c.slice() : null
+      needArgs(2, a, 'isPointInPath')
+      return this._ask(CV.HIT, 0, +a[0], +a[1], this._rule(a[2]), p)
     }
-    arc(x, y, r, a0, a1, ccw) { this.ellipse(x, y, r, r, 0, a0, a1, ccw) }
-    ellipse(x, y, rx, ry, rot, a0, a1, ccw) {
-      let sweep = a1 - a0
-      if (!ccw && sweep < 0) sweep = sweep % (2 * Math.PI) + 2 * Math.PI
-      if (ccw && sweep > 0) sweep = sweep % (2 * Math.PI) - 2 * Math.PI
-      if (Math.abs(a1 - a0) >= 2 * Math.PI) sweep = ccw ? -2 * Math.PI : 2 * Math.PI
-      const n = Math.max(8, Math.min(128, Math.ceil(Math.abs(sweep) * Math.max(rx, ry) * this._scale() / 3)))
-      const cr = Math.cos(rot || 0), sr = Math.sin(rot || 0)
-      for (let k = 0; k <= n; k++) {
-        const t = a0 + sweep * k / n, ex = rx * Math.cos(t), ey = ry * Math.sin(t)
-        const px = x + ex * cr - ey * sr, py = y + ex * sr + ey * cr
-        if (k === 0 && !this._sub) this._start(px, py); else this.lineTo(px, py)
-      }
+    isPointInStroke(...a) {
+      const p = a[0] instanceof Path2D ? a.shift()._c.slice() : null
+      needArgs(2, a, 'isPointInStroke')
+      return this._ask(CV.HIT, 1, +a[0], +a[1], 0, p)
     }
-    arcTo(x1, y1, x2, y2) { this.lineTo(x1, y1); this.lineTo(x2, y2) }
-    quadraticCurveTo(cx, cy, x, y) {
-      const [x0, y0] = this._last || [cx, cy]
-      for (let k = 1; k <= 16; k++) { const t = k / 16, u = 1 - t; this.lineTo(u * u * x0 + 2 * u * t * cx + t * t * x, u * u * y0 + 2 * u * t * cy + t * t * y) }
-    }
-    bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
-      const [x0, y0] = this._last || [c1x, c1y]
-      for (let k = 1; k <= 20; k++) {
-        const t = k / 20, u = 1 - t
-        this.lineTo(u * u * u * x0 + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t * t * t * x, u * u * u * y0 + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t * t * t * y)
-      }
-    }
-    _draw(fill, stroke) {
-      const subs = this._path.filter(s => s.length >= 5).map(s => s.slice())
-      if (subs.length) this._push(['p', fill ? paint(this.fillStyle) : null, stroke ? paint(this.strokeStyle) : null, this.lineWidth * this._scale(), this.globalAlpha, subs])
-    }
-    fill() { this._draw(true, false) }
-    stroke() { this._draw(false, true) }
-    clip() {}
-    isPointInPath() { return false }
-    isPointInStroke() { return false }
     // rectangles
-    _rectPath(x, y, w, h) { const a = this._pt(x, y), b = this._pt(x + w, y), c = this._pt(x + w, y + h), d = this._pt(x, y + h); return [[true, ...a, ...b, ...c, ...d]] }
-    fillRect(x, y, w, h) { this._push(['p', paint(this.fillStyle), null, 0, this.globalAlpha, this._rectPath(x, y, w, h)]) }
-    strokeRect(x, y, w, h) { this._push(['p', null, paint(this.strokeStyle), this.lineWidth * this._scale(), this.globalAlpha, this._rectPath(x, y, w, h)]) }
+    fillRect(x, y, w, h) { needArgs(4, arguments, 'fillRect'); this._p(CV.FILL_RECT, +x, +y, +w, +h) }
+    strokeRect(x, y, w, h) { needArgs(4, arguments, 'strokeRect'); this._p(CV.STROKE_RECT, +x, +y, +w, +h) }
     clearRect(x, y, w, h) {
-      const cw = this.canvas.width, ch = this.canvas.height, [x0, y0] = this._pt(x, y), [x1, y1] = this._pt(x + w, y + h)
-      // Clearing it all starts the list again; a smaller clear paints the page's background.
-      if (Math.min(x0, x1) <= 0 && Math.min(y0, y1) <= 0 && Math.max(x0, x1) >= cw && Math.max(y0, y1) >= ch) this._ops = []
-      else this._push(['c', ...this._rectPath(x, y, w, h)[0].slice(1)])
+      needArgs(4, arguments, 'clearRect')
+      // Clearing the whole canvas with no transform or clip forgets what was queued.
+      const m = this._s.m
+      if (m[0] === 1 && m[1] === 0 && m[2] === 0 && m[3] === 1 && m[4] === 0 && m[5] === 0 && x <= 0 && y <= 0 && x + w >= this.canvas.width && y + h >= this.canvas.height && !this._stack.length && this._q.indexOf(CV.CLIP) < 0 && this._q.indexOf(CV.SAVE) < 0 && this._q.indexOf(CV.RESET) < 0 && this._q.indexOf(CV.SET) < 0) this._q = []
+      this._p(CV.CLEAR_RECT, +x, +y, +w, +h)
     }
     // text
-    _text(t, x, y, fill) {
-      const [px, py] = this._pt(x, y)
-      this._push(['t', px, py, String(t), this.font, paint(fill ? this.fillStyle : this.strokeStyle), this.textAlign, this.textBaseline, this.globalAlpha, this._scale()])
-    }
-    fillText(t, x, y) { this._text(t, x, y, true) }
-    strokeText(t, x, y) { this._text(t, x, y, false) }
+    fillText(t, x, y, mw) { needArgs(3, arguments, 'fillText'); this._p(CV.FILL_TEXT, String(t), +x, +y, mw === undefined ? null : +mw) }
+    strokeText(t, x, y, mw) { needArgs(3, arguments, 'strokeText'); this._p(CV.STROKE_TEXT, String(t), +x, +y, mw === undefined ? null : +mw) }
     measureText(t) {
-      const w = __measure(String(t), this.font), size = parseFloat((/(\d+(?:\.\d+)?)px/.exec(this.font) || [0, 10])[1])
-      return { width: w, actualBoundingBoxLeft: 0, actualBoundingBoxRight: w, actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2, fontBoundingBoxAscent: size * 0.9, fontBoundingBoxDescent: size * 0.25 }
+      needArgs(1, arguments, 'measureText')
+      const [w, asc, desc] = __measure(String(t).replace(/[\t\n\f\r]/g, ' '), this._s.font)
+      const m = new TextMetrics()
+      const align = this._s.textAlign, rtl = this._s.direction === 'rtl'
+      const left = align === 'center' ? w / 2 : (align === 'right' || (align === 'end' && !rtl) || (align === 'start' && rtl)) ? w : 0
+      const bl = this._s.textBaseline
+      const base = bl === 'top' ? asc : bl === 'hanging' ? asc * 0.8 : bl === 'middle' ? (asc - desc) / 2 : (bl === 'bottom' || bl === 'ideographic') ? -desc : 0
+      Object.assign(m, {
+        width: w, actualBoundingBoxLeft: left, actualBoundingBoxRight: w - left,
+        actualBoundingBoxAscent: asc - base, actualBoundingBoxDescent: desc + base,
+        fontBoundingBoxAscent: asc - base, fontBoundingBoxDescent: desc + base,
+        emHeightAscent: asc - base, emHeightDescent: desc + base,
+        hangingBaseline: asc * 0.8 - base, alphabeticBaseline: -base, ideographicBaseline: -desc - base,
+      })
+      return m
     }
     // images
     drawImage(img, ...a) {
-      const src = img && (img.currentSrc || img.src || (img.getAttribute && img.getAttribute('src')))
-      if (!src) return
-      let [dx, dy, dw, dh] = a.length >= 8 ? a.slice(4) : a
-      if (dw === undefined) { dw = img.naturalWidth || img.width || 0; dh = img.naturalHeight || img.height || 0 }
-      const [x0, y0] = this._pt(dx, dy), [x1, y1] = this._pt(dx + dw, dy + dh)
-      this._push(['i', String(src), Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0), this.globalAlpha])
+      if (![2, 4, 8].includes(a.length)) throw new TypeError("Failed to execute 'drawImage': Valid arities are: [3, 5, 9], but " + (a.length + 1) + ' arguments provided.')
+      if (!usable(img, 'drawImage')) return
+      const n = a.map(v => +v)
+      while (n.length < 8) n.push(0)
+      this._p(CV.DRAW_IMAGE, img, a.length, ...n)
     }
-    // pixels (not kept: Volant draws vectors)
-    createImageData(w, h) { if (typeof w === 'object') ({ width: w, height: h } = w); return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) } }
-    getImageData(x, y, w, h) { return this.createImageData(w, h) }
-    putImageData() {}
-    createLinearGradient() { return new CanvasGradient() }
-    createRadialGradient() { return new CanvasGradient() }
-    createConicGradient() { return new CanvasGradient() }
-    createPattern() { return new CanvasPattern() }
-    setLineDash(d) { this._dash = Array.isArray(d) ? d.slice() : [] }
-    getLineDash() { return this._dash.slice() }
+    createPattern(img, rep) {
+      needArgs(2, arguments, 'createPattern')
+      rep = rep === null || rep === '' ? 'repeat' : String(rep)
+      if (!['repeat', 'repeat-x', 'repeat-y', 'no-repeat'].includes(rep)) throw domErr('SyntaxError', "Failed to execute 'createPattern': The provided type ('" + rep + "') is not one of 'repeat', 'no-repeat', 'repeat-x', or 'repeat-y'.")
+      if (!usable(img, 'createPattern')) return null
+      // A canvas pattern keeps the canvas as it is now.
+      if (img && img.tagName === 'CANVAS') { const copy = new ImageData(img.width, img.height); const d = img.getContext('2d').getImageData(0, 0, img.width, img.height); copy.data.set(d.data); img = copy }
+      return new CanvasPattern(img, rep)
+    }
+    // gradients
+    createLinearGradient(x0, y0, x1, y1) {
+      needArgs(4, arguments, 'createLinearGradient')
+      const a = [+x0, +y0, +x1, +y1]
+      if (!fin(...a)) throw new TypeError("Failed to execute 'createLinearGradient': The provided double value is non-finite.")
+      return new CanvasGradient('linear', a)
+    }
+    createRadialGradient(x0, y0, r0, x1, y1, r1) {
+      needArgs(6, arguments, 'createRadialGradient')
+      const a = [+x0, +y0, +r0, +x1, +y1, +r1]
+      if (!fin(...a)) throw new TypeError("Failed to execute 'createRadialGradient': The provided double value is non-finite.")
+      if (a[2] < 0 || a[5] < 0) throw domErr('IndexSizeError', 'The radius provided is negative.')
+      return new CanvasGradient('radial', a)
+    }
+    createConicGradient(angle, x, y) {
+      needArgs(3, arguments, 'createConicGradient')
+      const a = [+angle, +x, +y]
+      if (!fin(...a)) throw new TypeError("Failed to execute 'createConicGradient': The provided double value is non-finite.")
+      return new CanvasGradient('conic', a)
+    }
+    // pixels
+    createImageData(w, h) {
+      if (w instanceof ImageData) return new ImageData(w.width, w.height)
+      needArgs(2, arguments, 'createImageData')
+      return new ImageData(w, h)
+    }
+    getImageData(x, y, w, h) {
+      needArgs(4, arguments, 'getImageData')
+      x = Math.trunc(+x); y = Math.trunc(+y); w = Math.trunc(+w); h = Math.trunc(+h)
+      if (!fin(x, y, w, h)) throw new TypeError("Failed to execute 'getImageData': The provided double value is non-finite.")
+      if (!w || !h) throw domErr('IndexSizeError', "Failed to execute 'getImageData': The source " + (w ? 'height' : 'width') + ' is 0.')
+      if (w < 0) { x += w; w = -w }
+      if (h < 0) { y += h; h = -h }
+      if (w * h > 1 << 28) throw new RangeError('Out of memory at ImageData creation')
+      return new ImageData(this._ask(CV.GET, x, y, w, h), w)
+    }
+    putImageData(d, dx, dy, x, y, w, h) {
+      if (!(d instanceof ImageData)) throw new TypeError("Failed to execute 'putImageData': parameter 1 is not of type 'ImageData'.")
+      needArgs(3, arguments, 'putImageData')
+      if (arguments.length === 3) { x = 0; y = 0; w = d.width; h = d.height }
+      const n = [dx, dy, x, y, w, h].map(v => Math.trunc(+v))
+      if (!fin(...n)) throw new TypeError("Failed to execute 'putImageData': The provided double value is non-finite.")
+      this._p(CV.PUT, d.data, d.width, d.height, ...n)
+    }
+    setLineDash(d) {
+      const list = Array.from(d || [], v => +v)
+      if (list.some(v => !Number.isFinite(v) || v < 0)) return
+      if (list.length % 2) list.push(...list)
+      this._s.dash = list
+      this._p(CV.DASH, list.slice())
+    }
+    getLineDash() { return this._s.dash.slice() }
     drawFocusIfNeeded() {}
+    scrollPathIntoView() {}
+  }
+  Object.assign(CanvasRenderingContext2D.prototype, pathMethods)
+  for (const k in props) {
+    const [idx, , check] = props[k]
+    Object.defineProperty(CanvasRenderingContext2D.prototype, k, {
+      get() { return this._s[k] },
+      set(v) { v = check(v, this); if (v === undefined) return; this._s[k] = v; this._p(CV.SET, idx, v) },
+      configurable: true, enumerable: true,
+    })
+  }
+  for (const k in quiet) {
+    const check = quiet[k][1]
+    Object.defineProperty(CanvasRenderingContext2D.prototype, k, { get() { return this._s[k] }, set(v) { v = check(v); if (v !== undefined) this._s[k] = v }, configurable: true, enumerable: true })
   }
   g.CanvasRenderingContext2D = CanvasRenderingContext2D
   g.CanvasGradient = CanvasGradient
   g.CanvasPattern = CanvasPattern
-  g.Path2D = class Path2D { constructor() { this._calls = [] } }
+  g.Path2D = Path2D
+  g.ImageData = ImageData
+  g.TextMetrics = TextMetrics
+  class ImageBitmap {
+    constructor(src, w, h) { this._bitmap = true; this._src = src; this.width = w; this.height = h }
+    close() { this._src = null; this.width = 0; this.height = 0 }
+  }
+  g.ImageBitmap = ImageBitmap
+  g.createImageBitmap = function (src) {
+    return new Promise((resolve, reject) => {
+      try {
+        if (src instanceof ImageData) return resolve(Object.assign(new ImageBitmap(null, src.width, src.height), { data: src.data }))
+        if (src && src.tagName === 'CANVAS') {
+          const d = src.getContext('2d').getImageData(0, 0, src.width, src.height)
+          return resolve(Object.assign(new ImageBitmap(null, d.width, d.height), { data: d.data }))
+        }
+        if (src instanceof ImageBitmap) return resolve(Object.assign(new ImageBitmap(src._src, src.width, src.height), { data: src.data }))
+        if (src && src.tagName === 'IMG') return resolve(new ImageBitmap(src, src.naturalWidth || src.width, src.naturalHeight || src.height))
+        if (src instanceof g.Blob) {
+          const p = __picture(src._u8(), src.type)
+          if (!p) return reject(new DOMException('The source image could not be decoded.', 'InvalidStateError'))
+          return resolve(Object.assign(new ImageBitmap(null, p[0], p[1]), { data: p[2] }))
+        }
+        reject(new TypeError('The provided value is not of an image type.'))
+      } catch (e) { reject(e) }
+    })
+  }
   {
     const EP = Object.getPrototypeOf(document.createElement('canvas'))
     EP.getContext = function (type) {
-      if (this.tagName !== 'CANVAS' || String(type).toLowerCase() !== '2d') return null
+      if (this.tagName !== 'CANVAS') return null
+      if (String(type) !== '2d') return null
       return this.__ctx || (this.__ctx = new CanvasRenderingContext2D(this))
     }
-    EP.toDataURL = function () { return 'data:,' }
-    EP.toBlob = function (cb) { setTimeout(() => cb && cb(new g.Blob([], { type: 'image/png' })), 0) }
-    EP.transferControlToOffscreen = function () { return null }
+    EP.toDataURL = function () {
+      if (!this.width || !this.height) return 'data:,'
+      const ctx = this.__ctx || this.getContext('2d')
+      return ctx._ask(CV.URL, 0)
+    }
+    EP.toBlob = function (cb, type) {
+      if (typeof cb !== 'function') throw new TypeError("Failed to execute 'toBlob': The callback provided as parameter 1 is not a function.")
+      const url = this.toDataURL(type)
+      setTimeout(() => {
+        if (url === 'data:,') return cb(null)
+        const bin = atob(url.slice(url.indexOf(',') + 1))
+        const u = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i)
+        cb(new g.Blob([u], { type: 'image/png' }))
+      }, 0)
+    }
+    EP.transferControlToOffscreen = function () { throw domErr('NotSupportedError', 'OffscreenCanvas is not supported yet.') }
+    EP.captureStream = function () { throw domErr('NotSupportedError', 'Canvas capture is not supported yet.') }
+  }
+  // ---------------------------------------------------------------- images
+  // An <img>'s picture is fetched and decoded when the page needs to know about
+  // it: a load or error listener, naturalWidth, complete, decode() or a canvas.
+  // Otherwise the app loads pictures on its own, to show them.
+  {
+    const IP = Object.getPrototypeOf(document.createElement('img'))
+    const find = (o, k) => { for (; o; o = Object.getPrototypeOf(o)) { const d = Object.getOwnPropertyDescriptor(o, k); if (d) return d } }
+    const srcD = find(IP, 'src'), setAttr = IP.setAttribute, ael = IP.addEventListener
+    const info = el => el.__pic || (el.__pic = { url: undefined, size: null, pending: false })
+    // The picture's size, fetching it if its address changed ([w, h], or null if it can't be shown).
+    const fetchPic = el => {
+      const s = info(el), url = el.getAttribute('src')
+      if (s.url !== url) { s.url = url; s.size = url ? __img(el) : null }
+      return s.size
+    }
+    const wanted = el => el.__wantload || typeof el.onload === 'function' || typeof el.onerror === 'function' || el.hasAttribute('onload') || el.hasAttribute('onerror')
+    const schedule = el => {
+      const s = info(el)
+      if (s.pending) return
+      s.pending = true
+      setTimeout(() => {
+        s.pending = false
+        if (el.getAttribute('src') === null || !wanted(el)) return
+        el.dispatchEvent(new Event(fetchPic(el) ? 'load' : 'error'))
+      }, 0)
+    }
+    Object.defineProperty(IP, 'src', { get() { return srcD.get.call(this) }, set(v) { srcD.set.call(this, v); if (this.tagName === 'IMG') schedule(this) }, configurable: true, enumerable: true })
+    IP.setAttribute = function (k, v) { const r = setAttr.call(this, k, v); if (this.tagName === 'IMG' && String(k).toLowerCase() === 'src') schedule(this); return r }
+    IP.addEventListener = function (t, ...rest) { if (this.tagName === 'IMG' && (t === 'load' || t === 'error')) this.__wantload = true; return ael.call(this, t, ...rest) }
+    const sized = k => function () { if (this.tagName !== 'IMG') return 0; const s = fetchPic(this); return s ? s[k] : 0 }
+    Object.defineProperty(IP, 'naturalWidth', { get: sized(0), configurable: true, enumerable: true })
+    Object.defineProperty(IP, 'naturalHeight', { get: sized(1), configurable: true, enumerable: true })
+    Object.defineProperty(IP, 'complete', { get() { if (this.tagName !== 'IMG') return true; if (!this.getAttribute('src')) return true; fetchPic(this); return true }, configurable: true, enumerable: true })
+    IP.decode = function () {
+      return new Promise((resolve, reject) => setTimeout(() => (this.getAttribute('src') && fetchPic(this) ? resolve() : reject(new DOMException('The source image cannot be decoded.', 'EncodingError'))), 0))
+    }
+    // Pictures in the page's markup with handlers: they load (and say so) once the page is parsed.
+    document.addEventListener('DOMContentLoaded', () => {
+      for (const img of document.getElementsByTagName('img')) if (img.getAttribute('src') !== null && wanted(img)) schedule(img)
+    })
+    g.Image = function Image(w, h) {
+      const img = document.createElement('img')
+      if (w !== undefined) img.setAttribute('width', String(w))
+      if (h !== undefined) img.setAttribute('height', String(h))
+      return img
+    }
+    g.Image.prototype = IP
   }
 
   // ------------------------------------------------- attribute nodes

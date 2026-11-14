@@ -95,6 +95,10 @@ pub trait Host {
     }
     /// Starts `urls` (for `page`) on their way, to be asked for soon; does nothing if the host can't.
     fn prefetch(&self, _urls: Vec<String>, _page: &str) {}
+    /// Decodes a picture the engine can't (anything but PNG) into straight RGBA: (width, height, pixels).
+    fn decode_image(&self, _bytes: &[u8], _mime: &str) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
 }
 
 /// GETs `url` for `page` from any thread (see [`Host::background`]).
@@ -205,6 +209,9 @@ impl Host for Preloading {
             self.preload.start(urls, page, fetch);
         }
     }
+    fn decode_image(&self, bytes: &[u8], mime: &str) -> Option<(u32, u32, Vec<u8>)> {
+        self.inner.decode_image(bytes, mime)
+    }
 }
 
 /// The files a document will ask for first: its scripts, style sheets and preloads, in order.
@@ -236,74 +243,6 @@ fn subresources(dom: &Dom, base: &str) -> Vec<String> {
     out
 }
 
-/// One recorded canvas operation (see the context in `prelude.js`).
-fn decode_canvas_op(v: &Value) -> Option<crate::canvas::Op> {
-    use crate::canvas::{color, font, Align, Op};
-    let Value::Obj(o) = v else { return None };
-    let o = o.borrow();
-    let Kind::Array(a) = &o.kind else { return None };
-    let num = |k: usize| match a.get(k) {
-        Some(Value::Num(n)) if n.is_finite() => *n as f32,
-        _ => 0.0,
-    };
-    let text = |k: usize| match a.get(k) {
-        Some(Value::Str(s)) => s.to_string(),
-        _ => String::new(),
-    };
-    let points = |v: &[Value]| -> Vec<(f32, f32)> {
-        v.chunks(2).filter_map(|p| match p {
-            [Value::Num(x), Value::Num(y)] if x.is_finite() && y.is_finite() => Some((*x as f32, *y as f32)),
-            _ => None,
-        }).collect()
-    };
-    match text(0).as_str() {
-        "p" => {
-            let alpha = num(4);
-            let paint = |k: usize| match a.get(k) {
-                Some(Value::Str(s)) => color(s, alpha),
-                _ => None,
-            };
-            let (fill, stroke) = (paint(1), paint(2));
-            let Some(Value::Obj(list)) = a.get(5) else { return None };
-            let list = list.borrow();
-            let Kind::Array(subs) = &list.kind else { return None };
-            let mut subpaths = Vec::new();
-            for sp in subs {
-                let Value::Obj(sp) = sp else { continue };
-                let sp = sp.borrow();
-                let Kind::Array(v) = &sp.kind else { continue };
-                let closed = matches!(v.first(), Some(Value::Bool(true)));
-                let pts = points(v.get(1..).unwrap_or(&[]));
-                if pts.len() >= 2 {
-                    subpaths.push((closed, pts));
-                }
-            }
-            (!subpaths.is_empty() && (fill.is_some() || stroke.is_some())).then(|| Op::Path { subpaths, fill, stroke, line_width: num(3).max(0.1) })
-        }
-        "c" => Some(Op::Clear { points: points(a.get(1..).unwrap_or(&[])) }),
-        "t" => {
-            let (size, bold, serif, mono) = font(&text(4));
-            let size = size * num(9).max(0.01);
-            let color = color(&text(5), num(8))?;
-            let align = match text(6).as_str() {
-                "center" => Align::Center,
-                "right" | "end" => Align::Right,
-                _ => Align::Left,
-            };
-            // Baselines other than the alphabetic one, moved to it.
-            let y = num(2)
-                + match text(7).as_str() {
-                    "top" | "hanging" => size * 0.8,
-                    "middle" => size * 0.32,
-                    "bottom" | "ideographic" => -size * 0.2,
-                    _ => 0.0,
-                };
-            Some(Op::Text { x: num(1), y, text: text(3), size, bold, serif, mono, color, align })
-        }
-        "i" => Some(Op::Image { src: text(1), x: num(2), y: num(3), w: num(4), h: num(5), alpha: num(6) }),
-        _ => None,
-    }
-}
 
 /// The element a `#fragment` points at: the one with that id, else an `<a name>`.
 pub fn anchor_target(dom: &Dom, frag: &str) -> Option<NodeId> {
@@ -481,8 +420,12 @@ pub struct State {
     hover_rules: Option<(usize, Rc<Vec<css::Selector>>)>,
     /// A `<select>` that was clicked: the app shows its menu.
     menu: Option<NodeId>,
-    /// Decoded canvas drawings, by canvas: (the JS list they came from, its length, the drawing).
-    canvases: HashMap<NodeId, (usize, usize, std::sync::Arc<crate::canvas::Canvas>)>,
+    /// The 2D contexts' canvases, by `<canvas>`.
+    contexts: HashMap<NodeId, crate::canvas::Context>,
+    /// Pictures canvases drew, decoded, by URL (None if they didn't load).
+    pictures: HashMap<String, Option<std::sync::Arc<crate::canvas::Image>>>,
+    /// Web font files fetched for the page (family and URL), and whether Canard could read them.
+    font_files: HashMap<String, bool>,
     /// The page moved to a `#fragment` (a link, `location.hash`): scroll there.
     pub scroll_to_anchor: bool,
     pub navigate: Option<Navigation>,
@@ -4280,7 +4223,11 @@ fn install(i: &mut Interp, st: &S) {
         let text = String::from_utf8_lossy(&r.body).into_owned();
         let head: String = r.headers.iter().filter(|(k, _)| k != "set-cookie" && k != "set-cookie2").map(|(k, v)| format!("{k}: {v}\r\n")).collect();
         let final_url = if r.url.is_empty() { abs } else { r.url };
-        Ok(i.array(vec![Value::Num(r.status as f64), str_val(&r.content_type), str_val(&text), str_val(&final_url), str_val(&head)]))
+        // Pictures, fonts and other binary bodies keep their bytes too (for blob() and arrayBuffer()).
+        let ct = r.content_type.to_ascii_lowercase();
+        let textual = ct.starts_with("text/") || ["json", "xml", "javascript", "ecmascript", "x-www-form-urlencoded"].iter().any(|t| ct.contains(t));
+        let bytes = if !textual || std::str::from_utf8(&r.body).is_err() { volant_js::typed::new_buffer(i, r.body) } else { Value::Null };
+        Ok(i.array(vec![Value::Num(r.status as f64), str_val(&r.content_type), str_val(&text), str_val(&final_url), str_val(&head), bytes]))
     });
     hook(i, "__fetch", f);
     let st2 = st.clone();
@@ -4291,15 +4238,105 @@ fn install(i: &mut Interp, st: &S) {
     });
     hook(i, "__media", f);
     let f = i.native(move |i, _t, a| {
-        // __measure(text, font): a canvas's measureText width
+        // __measure(text, font): a canvas's measureText as [width, ascent, descent, size]
         let text = i.to_str(&arg(&a, 0))?.to_string();
         let spec = i.to_str(&arg(&a, 1))?.to_string();
-        let (size, bold, serif, mono) = crate::canvas::font(&spec);
-        let family = if mono { style::Family::Mono } else if serif { style::Family::Serif } else { style::Family::Sans };
-        let font = crate::Font { family, size, weight: if bold { 700 } else { 400 }, italic: false };
-        Ok(Value::Num(crate::Fonts::width(&crate::ApproxFonts, &text, &font) as f64))
+        let font = crate::canvas::parse_font(&spec).unwrap_or(crate::Font { family: style::Family::Sans, size: 10.0, weight: 400, italic: false });
+        let (w, asc, desc) = crate::canvas::text_metrics(&text, &font);
+        let v = [w, asc, desc, font.size];
+        Ok(i.array(v.iter().map(|n| Value::Num(*n as f64)).collect()))
     });
     hook(i, "__measure", f);
+    let st2 = st.clone();
+    let f = i.native(move |i, _t, a| {
+        // __cv(canvas, queue): runs a 2D context's queued commands; returns what the last asked for
+        let Some(node) = node_of(&arg(&a, 0)) else { return Ok(Value::Undefined) };
+        let q = match arg(&a, 1) {
+            Value::Obj(o) => match &o.borrow().kind {
+                Kind::Array(v) => v.clone(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        canvas_run::run(i, &st2, node, &q)
+    });
+    hook(i, "__cv", f);
+    let st2 = st.clone();
+    let f = i.native(move |i, _t, a| {
+        // __cvcolor(css, canvas): the colour as canvases give it back, or null if it isn't one
+        // (currentcolor is the canvas element's colour, black when it has none)
+        let s = i.to_str(&arg(&a, 0))?.to_string();
+        if s.trim().eq_ignore_ascii_case("currentcolor") {
+            let c = node_of(&arg(&a, 1)).filter(|&n| connected(&st2.borrow().dom, n)).and_then(|n| style::parse_color(&computed(&st2, n, "color")));
+            return Ok(str_val(&crate::canvas::serialize_color(c.unwrap_or(style::Color::BLACK))));
+        }
+        Ok(style::parse_color(&s).map(|c| str_val(&crate::canvas::serialize_color(c))).unwrap_or(Value::Null))
+    });
+    hook(i, "__cvcolor", f);
+    let f = i.native(move |i, _t, a| {
+        // __cvfont(css): whether a canvas can use this font shorthand
+        let s = i.to_str(&arg(&a, 0))?.to_string();
+        Ok(Value::Bool(crate::canvas::parse_font(&s).is_some()))
+    });
+    hook(i, "__cvfont", f);
+    let st2 = st.clone();
+    let f = i.native(move |_i, _t, _a| {
+        // __fontfaces(): loads the document's @font-face files Canard can read; how many it has
+        let (sheets, url) = {
+            let s = st2.borrow();
+            (crate::style_sheets(&s.dom), s.url.clone())
+        };
+        let mut n = 0;
+        for f in sheets.iter().flat_map(|css| css::font_faces(css)) {
+            n += load_font(&st2, &f.family, f.weight, f.italic, &f.sources, &url) as u32;
+        }
+        Ok(Value::Num(n as f64))
+    });
+    hook(i, "__fontfaces", f);
+    let st2 = st.clone();
+    let f = i.native(move |i, _t, a| {
+        // __fontload(family, src, weightLo, weightHi, italic): a FontFace's `src` (url()s), or its bytes
+        let family = i.to_str(&arg(&a, 0))?.to_string();
+        let weight = (i.to_number(&arg(&a, 2))? as u16, i.to_number(&arg(&a, 3))? as u16);
+        let italic = Interp::truthy(&arg(&a, 4));
+        let src = arg(&a, 1);
+        if let Some(bytes) = volant_js::typed::bytes_of(&src) {
+            return Ok(Value::Bool(crate::fonts::add_file(&family, weight, italic, &bytes)));
+        }
+        let src = i.to_str(&src)?.to_string();
+        let sources = css::font_faces(&format!("@font-face {{ font-family: x; src: {src} }}")).into_iter().next().map(|f| f.sources).unwrap_or_default();
+        let url = st2.borrow().url.clone();
+        Ok(Value::Bool(load_font(&st2, &family, weight, italic, &sources, &url)))
+    });
+    hook(i, "__fontload", f);
+    let st2 = st.clone();
+    let f = i.native(move |i, _t, a| {
+        // __picture(bytes, type): decodes a picture's bytes to [width, height, straight RGBA], or null
+        let Some(bytes) = volant_js::typed::bytes_of(&arg(&a, 0)) else { return Ok(Value::Null) };
+        let mime = i.to_str(&arg(&a, 1))?.to_string();
+        Ok(match canvas_run::decode_picture(&st2, &bytes, &mime) {
+            Some(img) => {
+                let (w, h) = (img.width, img.height);
+                let straight = img.straight();
+                let data = volant_js::typed::new_clamped(i, straight);
+                i.array(vec![Value::Num(w as f64), Value::Num(h as f64), data])
+            }
+            None => Value::Null,
+        })
+    });
+    hook(i, "__picture", f);
+    let st2 = st.clone();
+    let f = i.native(move |i, _t, a| {
+        // __img(img): fetches and decodes an image's picture: [width, height], or null if it can't be shown
+        let Some(node) = node_of(&arg(&a, 0)) else { return Ok(Value::Null) };
+        let src = st2.borrow().dom.attr(node, "src").map(|s| s.to_string());
+        let Some(src) = src.filter(|s| !s.trim().is_empty()) else { return Ok(Value::Null) };
+        Ok(match canvas_run::picture(&st2, &src) {
+            Some(img) => i.array(vec![Value::Num(img.width as f64), Value::Num(img.height as f64)]),
+            None => Value::Null,
+        })
+    });
+    hook(i, "__img", f);
     let st2 = st.clone();
     let f = i.native(move |i, _t, a| {
         let u = i.to_str(&arg(&a, 0))?;
@@ -4673,7 +4710,9 @@ impl Runtime {
             hover: None,
             hover_rules: None,
             menu: None,
-            canvases: HashMap::new(),
+            contexts: HashMap::new(),
+            pictures: HashMap::new(),
+            font_files: HashMap::new(),
             scroll_to_anchor: false,
             current_script: None,
             ran: std::collections::HashSet::new(),
@@ -5117,28 +5156,7 @@ impl Runtime {
 
     /// What a `<canvas>` has drawn (None if it has no 2D context yet).
     fn canvas(&mut self, node: NodeId) -> Option<std::sync::Arc<crate::canvas::Canvas>> {
-        let wrapper = self.state.borrow().wrappers.get(&node).cloned()?;
-        let i = &mut self.interp;
-        let ctx = i.get(&wrapper, "__ctx").ok().filter(|v| matches!(v, Value::Obj(_)))?;
-        let Ok(Value::Obj(list)) = i.get(&ctx, "_ops") else { return None };
-        let (w, h) = {
-            let s = self.state.borrow();
-            let px = |k: &str, d: f32| s.dom.attr(node, k).and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| *v > 0.0).unwrap_or(d);
-            (px("width", 300.0), px("height", 150.0))
-        };
-        let ops: Vec<Value> = match &list.borrow().kind {
-            Kind::Array(a) => a.clone(),
-            _ => return None,
-        };
-        let key = (Rc::as_ptr(&list) as usize, ops.len());
-        if let Some((p, n, c)) = self.state.borrow().canvases.get(&node) {
-            if (*p, *n) == key && c.width == w && c.height == h {
-                return Some(c.clone());
-            }
-        }
-        let c = std::sync::Arc::new(crate::canvas::Canvas { width: w, height: h, ops: ops.iter().filter_map(decode_canvas_op).collect() });
-        self.state.borrow_mut().canvases.insert(node, (key.0, key.1, c.clone()));
-        Some(c)
+        canvas_run::snapshot(&mut self.interp, &self.state, node)
     }
 
     /// Whether the page moved to a `#fragment` since the last call (so the app scrolls to it).
@@ -5264,6 +5282,36 @@ pub fn render_snapshot(snap: &Snapshot, sheets: &[String], env: Env, fonts: &dyn
     crate::layout::layout(&snap.dom, &styled, env.width, env.height, fonts, images)
 }
 
+/// Fetches a web font's first source Canard can read and adds it; false if none would load.
+fn load_font(st: &S, family: &str, weight: (u16, u16), italic: bool, sources: &[String], base: &str) -> bool {
+    for src in sources {
+        let url = resolve_url(base, src);
+        let key = format!("{family}\u{0}{}-{}{}\u{0}{url}", weight.0, weight.1, italic as u8);
+        if let Some(&ok) = st.borrow().font_files.get(&key) {
+            if ok {
+                return true;
+            }
+            continue;
+        }
+        let bytes = match volant_core::base64::data_url(&url) {
+            Some((_, b)) => Some(b),
+            None => {
+                let (host, page) = {
+                    let s = st.borrow();
+                    (s.host.clone(), s.url.clone())
+                };
+                host.get_for(&url, &page).filter(|r| r.success()).map(|r| r.body)
+            }
+        };
+        let ok = bytes.is_some_and(|b| crate::fonts::add_file(family, weight, italic, &b));
+        st.borrow_mut().font_files.insert(key, ok);
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
 /// The `<link rel=stylesheet>` URLs of a document, absolute, in order, with their media.
 pub fn stylesheet_links(dom: &Dom, base: &str) -> Vec<(String, String)> {
     descendants(dom, ROOT)
@@ -5274,5 +5322,6 @@ pub fn stylesheet_links(dom: &Dom, base: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+mod canvas_run;
 #[cfg(test)]
 mod tests;

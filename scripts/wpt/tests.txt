@@ -14,3 +14,7 @@ html/dom
 !encoding/legacy-mb-korean
 !encoding/legacy-mb-schinese
 !encoding/legacy-mb-tchinese
+# Canvas 2D (Canard's own rasteriser) and the geometry interfaces it uses.
+html/canvas/element
+!html/canvas/element/manual
+css/geometry

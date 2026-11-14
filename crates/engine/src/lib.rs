@@ -17,6 +17,7 @@
 //! but Volant; ordinary browsing stays on WebKit for now.
 
 pub mod canvas;
+mod color;
 pub mod css;
 pub mod fonts;
 pub mod forms;
@@ -26,6 +27,7 @@ pub mod raster;
 pub mod reader;
 pub mod script;
 pub mod select;
+pub mod sfnt;
 pub mod style;
 pub mod svg;
 

@@ -32,7 +32,7 @@ jobs:
           git init -q wpt
           cd wpt
           git remote add origin https://github.com/web-platform-tests/wpt.git
-          git sparse-checkout set resources common $(grep -v '^[#!]' ../scripts/wpt/tests.txt | grep .)
+          git sparse-checkout set resources common fonts images html/canvas/resources $(grep -v '^[#!]' ../scripts/wpt/tests.txt | grep .)
           git fetch -q --depth 1 --filter=blob:none origin "$(cat ../scripts/wpt/WPT_COMMIT)"
           git checkout -q FETCH_HEAD
 

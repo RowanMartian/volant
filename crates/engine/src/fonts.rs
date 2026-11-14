@@ -43,6 +43,41 @@ pub fn face_info(i: u16) -> Option<(String, Family)> {
     FACES.lock().ok()?.get(i as usize).cloned()
 }
 
+/// Web font files Canard can read itself: (family, weight range, italic, the parsed file).
+type FontFile = (String, (u16, u16), bool, std::sync::Arc<crate::sfnt::Face>);
+static FILES: Mutex<Vec<FontFile>> = Mutex::new(Vec::new());
+
+/// Adds a web font file (TrueType, OpenType or WOFF) for a family; false if Canard can't read it.
+/// The family is declared too, so styles and canvases use it.
+pub fn add_file(family: &str, weight: (u16, u16), italic: bool, bytes: &[u8]) -> bool {
+    let Some(face) = crate::sfnt::Face::parse(bytes) else { return false };
+    let name = family.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
+    if let Ok(mut f) = FILES.lock() {
+        if f.len() >= 512 {
+            f.remove(0);
+        }
+        f.push((name.clone(), weight, italic, face));
+    }
+    declare_face(&name);
+    true
+}
+
+/// The loaded file closest to `font`, when it's set in a web font Canard has the file for:
+/// the right slant first, then a weight range that holds its weight, else the nearest.
+pub fn file_for(font: &Font) -> Option<std::sync::Arc<crate::sfnt::Face>> {
+    let Family::Face(i) = font.family else { return None };
+    let (name, _) = face_info(i)?;
+    let files = FILES.lock().ok()?;
+    files
+        .iter()
+        .filter(|f| f.0 == name)
+        .min_by_key(|(_, (lo, hi), italic, _)| {
+            let off = if font.weight < *lo { lo - font.weight } else { font.weight.saturating_sub(*hi) };
+            ((*italic != font.italic) as u32) << 16 | off as u32
+        })
+        .map(|f| f.3.clone())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Font {
     pub family: Family,

@@ -82,9 +82,24 @@ old presentational attributes (`bgcolor`, `width="85%"`, `cellpadding`) and hit 
 (traversal and mutation, attributes, `innerHTML`/`outerHTML`, `querySelector` with the engine's own selector matching,
 `classList`, `style`, `dataset`), events with capture, bubbling, `once` and inline handlers, focus, typing, checkboxes,
 native `<select>` menus, a text caret with arrow keys, `:hover`/`:focus`/`:focus-within`/`:target`, same-page
-`#anchor` scrolling, GET and POST forms (URL-encoded, multipart, text) and link activation, `<canvas>` 2D drawing
-(paths, arcs, curves, text, images, transforms) recorded as a display list the app draws natively, scripts inserted by scripts, `document.write`, and a `getComputedStyle`
-backed by the real cascade. `prelude.js` builds the rest of the platform in JavaScript on a few native hooks: `URL`,
+`#anchor` scrolling, GET and POST forms (URL-encoded, multipart, text) and link activation, scripts inserted by
+scripts, `document.write`, and a `getComputedStyle` backed by the real cascade.
+
+**Canvas 2D** is Canard's own pixels (`canvas/`): a premultiplied RGBA buffer, shared copy-on-write with each frame
+it's drawn in, and an anti-aliased scanline rasteriser (16 sub-scanlines, exact horizontal coverage, nonzero and
+even-odd). Curves stay curves until they're drawn, then flatten to the transform's scale; strokes have joins, caps,
+miter limits and dashes, built in user space so transformed lines stay true; fills take colours, linear, radial and
+conic gradients and repeating patterns; clips, every Porter-Duff and blend `globalCompositeOperation`, `globalAlpha`
+and blurred, offset shadows all apply per pixel. `drawImage` (PNG decoded in volant-core, other formats by the
+system), `get/putImageData`, `toDataURL`, `Path2D` (with SVG path data), `isPointInPath`/`isPointInStroke`,
+`createImageBitmap` and `measureText` are there too. Text in a web font Canard has the file for is drawn from the
+font's own outlines: `sfnt.rs` reads TrueType, OpenType and WOFF files (character maps, advances, kerning, simple
+and compound glyphs), and `FontFace`/`document.fonts` load them. Other text comes from the system's fonts.
+
+**Colours** follow CSS Color 4 and 5 to the letter (`color.rs`): legacy and modern `rgb()`/`hsl()` syntax, `hwb()`,
+`lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in nine colour spaces, and `color-mix()` (premultiplied, with hue
+interpolation), converted to sRGB. The CSS geometry interfaces (`DOMMatrix` with transform-list parsing,
+`DOMPoint`, `DOMRect`, `DOMQuad`) and binary `Blob`s, `fetch().blob()` and `FileReader` are in `prelude.js`. `prelude.js` builds the rest of the platform in JavaScript on a few native hooks: `URL`,
 `URLSearchParams`, `fetch`, `XMLHttpRequest`, `Headers`/`Response`, storage, observers, `FormData`, `atob`/`btoa`,
 `TextEncoder` and more. jQuery and MediaWiki's module loader run on it.
 
@@ -193,17 +208,17 @@ cargo run --release -p volant-core --example compile_lists -- easylist.txt easyp
 
 `volant-tools wpt WPT_DIR scripts/wpt/tests.txt OUT` runs a slice of the
 [web-platform-tests](https://github.com/web-platform-tests/wpt) (DOM, events, ranges, traversal, encoding, URL and
-HTML's DOM interfaces, at the commit in `scripts/wpt/WPT_COMMIT`) through the engine with no browser: each file
+HTML's DOM interfaces, canvas 2D and geometry, at the commit in `scripts/wpt/WPT_COMMIT`) through the engine with no browser: each file
 in its own process, the tests served from the checkout, and testharness.js reporting back. It writes a table by
 folder and the most common failures; `--baseline scripts/wpt/baseline.tsv` fails when a file passes fewer subtests
-than before. In the latest run 85,638 of 96,229 subtests pass (89.0%), and 229 of
-the 962 files pass completely (the first run passed 53.2%).
+than before. In the latest run 87,384 of 98,433 subtests pass (88.8%), and 1,141 of
+the 2,106 files pass completely (the first run passed 53.2%).
 
 `volant-tools reftest WPT_DIR scripts/wpt/reftests.txt OUT` runs the CSS reftests (CSS 2, backgrounds, box,
 colour, display, flexbox, position, sizing, text): each test page and its reference go through the whole engine,
 scripts included, then `raster.rs`, a software rasterizer, draws both 800 × 600 px and the pixels are compared,
 allowing what the test's `<meta name=fuzzy>` allows. Text is drawn as a mark per character (Ahem, the CSS tests'
-box font, exactly), so what's compared is layout. In the latest run 6,921 of the 10,894 reftests pass (63.5%; the first run passed 26.7%);
+box font, exactly), so what's compared is layout. In the latest run 7,020 of the 10,894 reftests pass (64.4%; the first run passed 26.7%);
 `scripts/wpt/reftest-baseline.tsv` holds which, and CI fails when one of them stops passing.
 
 `volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Canard and reports what

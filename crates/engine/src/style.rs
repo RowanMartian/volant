@@ -626,60 +626,8 @@ pub fn parse_color(v: &str) -> Option<Color> {
             _ => None,
         };
     }
-    if let Some(args) = v.strip_prefix("rgba(").or_else(|| v.strip_prefix("rgb(")).and_then(|a| a.strip_suffix(')')) {
-        let parts: Vec<&str> = args.split([',', ' ', '/']).map(str::trim).filter(|p| !p.is_empty()).collect();
-        let chan = |p: &str| -> Option<u8> {
-            Some(match p.strip_suffix('%') {
-                Some(n) => (n.parse::<f32>().ok()? * 2.55).round().clamp(0.0, 255.0) as u8,
-                None => p.parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8,
-            })
-        };
-        let alpha = |p: &str| -> Option<u8> {
-            Some(match p.strip_suffix('%') {
-                Some(n) => (n.parse::<f32>().ok()? * 2.55).round().clamp(0.0, 255.0) as u8,
-                None => (p.parse::<f32>().ok()? * 255.0).round().clamp(0.0, 255.0) as u8,
-            })
-        };
-        if parts.len() < 3 {
-            return None;
-        }
-        return Some(Color { r: chan(parts[0])?, g: chan(parts[1])?, b: chan(parts[2])?, a: parts.get(3).map(|a| alpha(a)).unwrap_or(Some(255))? });
-    }
-    if let Some(args) = v.strip_prefix("hsla(").or_else(|| v.strip_prefix("hsl(")).and_then(|a| a.strip_suffix(')')) {
-        let parts: Vec<&str> = args.split([',', ' ', '/']).map(str::trim).filter(|p| !p.is_empty()).collect();
-        if parts.len() < 3 {
-            return None;
-        }
-        let h = parts[0];
-        let turns = if let Some(n) = h.strip_suffix("deg") {
-            n.parse::<f32>().ok()? / 360.0
-        } else if let Some(n) = h.strip_suffix("grad") {
-            n.parse::<f32>().ok()? / 400.0
-        } else if let Some(n) = h.strip_suffix("rad") {
-            n.parse::<f32>().ok()? / std::f32::consts::TAU
-        } else if let Some(n) = h.strip_suffix("turn") {
-            n.parse::<f32>().ok()?
-        } else {
-            h.parse::<f32>().ok()? / 360.0
-        };
-        let hue = turns.rem_euclid(1.0);
-        let pct = |p: &str| p.trim_end_matches('%').parse::<f32>().ok().map(|n| (n / 100.0).clamp(0.0, 1.0));
-        let (sat, light) = (pct(parts[1])?, pct(parts[2])?);
-        let a = match parts.get(3) {
-            Some(p) => match p.strip_suffix('%') {
-                Some(n) => n.parse::<f32>().ok()? / 100.0,
-                None => p.parse::<f32>().ok()?,
-            },
-            None => 1.0,
-        };
-        let q = if light < 0.5 { light * (1.0 + sat) } else { light + sat - light * sat };
-        let p = 2.0 * light - q;
-        let ch = |t: f32| {
-            let t = t.rem_euclid(1.0);
-            let v = if t < 1.0 / 6.0 { p + (q - p) * 6.0 * t } else if t < 0.5 { q } else if t < 2.0 / 3.0 { p + (q - p) * (2.0 / 3.0 - t) * 6.0 } else { p };
-            (v * 255.0).round().clamp(0.0, 255.0) as u8
-        };
-        return Some(Color { r: ch(hue + 1.0 / 3.0), g: ch(hue), b: ch(hue - 1.0 / 3.0), a: (a.clamp(0.0, 1.0) * 255.0).round() as u8 });
+    if v.contains('(') {
+        return crate::color::function(&v);
     }
     if v == "transparent" {
         return Some(Color::TRANSPARENT);
@@ -1702,6 +1650,8 @@ fn logical(name: &str) -> Option<Vec<(String, usize)>> {
 
 /// Applies one declaration to `s` (whose inherited values come from `parent`).
 fn apply(s: &mut Style, d: &Decl, parent: &Style, rem: f32) {
+    // `currentColor` inside colour functions: the element's colour (its parent's, for `color` itself).
+    crate::color::set_current(if d.name == "color" { parent.color } else { s.color });
     if let Some(targets) = logical(&d.name) {
         let parts = split_spaces(d.value.trim());
         let two = targets.iter().any(|t| t.1 == 1);

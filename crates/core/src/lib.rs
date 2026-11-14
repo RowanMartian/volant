@@ -26,6 +26,7 @@
 //! * [`macho`]: universal (fat) Mach-O binaries, as `lipo -create` makes them.
 
 
+pub mod base64;
 pub mod cookies;
 pub mod deflate;
 pub mod encoding;

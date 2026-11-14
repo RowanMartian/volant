@@ -23,7 +23,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAttributedStringNSStringDrawing, NSBezierPath, NSColor, NSCompositingOperation, NSCursor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSFontAttributeName, NSFontDescriptorSymbolicTraits,
+    NSAttributedStringNSStringDrawing, NSBezierPath, NSBitmapImageRep, NSDeviceRGBColorSpace, NSColor, NSCompositingOperation, NSCursor, NSEvent, NSFont, NSGraphicsContext, NSImage, NSFontAttributeName, NSFontDescriptorSymbolicTraits,
     NSFontDescriptorSystemDesignSerif, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName,
     NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSScrollView, NSScrollerStyle, NSStrikethroughStyleAttributeName, NSUnderlineStyleAttributeName, NSView, NSWindowOrderingMode,
 };
@@ -146,6 +146,9 @@ struct NetHost;
 const PAGE_UA: &str = script::USER_AGENT;
 
 impl script::Host for NetHost {
+    fn decode_image(&self, bytes: &[u8], _mime: &str) -> Option<(u32, u32, Vec<u8>)> {
+        decode_picture(bytes)
+    }
     fn request(&self, req: &script::Request) -> Option<script::Reply> {
         if !(req.url.starts_with("https://") || req.url.starts_with("http://")) {
             return None;
@@ -254,6 +257,8 @@ fn fonts_arrived(b: &mut Browser, faces: Vec<FaceData>) {
             continue;
         };
         WEB_FONTS.with(|w| w.borrow_mut().entry(f.family.clone()).or_default().push((f.weight.0, f.weight.1, f.italic, desc)));
+        // Canard reads the file too, to draw canvas text in it.
+        volant_engine::fonts::add_file(&f.family, f.weight, f.italic, &f.bytes);
         volant_engine::fonts::declare_face(&f.family);
         added += 1;
     }
@@ -753,7 +758,7 @@ fn paint_items(page: &Page, range: std::ops::Range<usize>, skip: &[(usize, usize
                 rounded(r, *radius as f64).addClip();
                 if src.starts_with("canvas:") {
                     if let Some(c) = canvases.get(src) {
-                        paint_canvas(c, r, page.background, images);
+                        paint_canvas(c, r);
                     }
                     NSGraphicsContext::restoreGraphicsState_class();
                     continue;
@@ -826,71 +831,99 @@ fn paint_marks(dirty: NSRect, hits: &(Vec<NSRect>, usize), selection: &[NSRect])
 }
 
 /// Draws a `<canvas>`'s display list into its box, scaled from canvas pixels.
-fn paint_canvas(c: &volant_engine::canvas::Canvas, r: NSRect, background: volant_engine::Color, images: &HashMap<String, Retained<NSImage>>) {
-    use volant_engine::canvas::{Align, Op};
-    let (sx, sy) = (r.size.width / c.width.max(1.0) as f64, r.size.height / c.height.max(1.0) as f64);
-    let at = |(x, y): (f32, f32)| NSPoint::new(r.origin.x + x as f64 * sx, r.origin.y + y as f64 * sy);
-    let polygon = |pts: &[(f32, f32)], closed: bool, path: &NSBezierPath| {
-        let mut it = pts.iter();
-        if let Some(&p) = it.next() {
-            path.moveToPoint(at(p));
-            for &q in it {
-                path.lineToPoint(at(q));
-            }
-            if closed {
-                path.closePath();
-            }
-        }
-    };
-    for op in &c.ops {
-        match op {
-            Op::Path { subpaths, fill, stroke, line_width } => {
-                let path = NSBezierPath::bezierPath();
-                for (closed, pts) in subpaths {
-                    polygon(pts, *closed || fill.is_some(), &path);
-                }
-                if let Some(f) = fill {
-                    ns_color(*f).setFill();
-                    path.fill();
-                }
-                if let Some(s) = stroke {
-                    let stroked = NSBezierPath::bezierPath();
-                    for (closed, pts) in subpaths {
-                        polygon(pts, *closed, &stroked);
-                    }
-                    stroked.setLineWidth(*line_width as f64 * sx.min(sy));
-                    ns_color(*s).setStroke();
-                    stroked.stroke();
-                }
-            }
-            Op::Clear { points } => {
-                let path = NSBezierPath::bezierPath();
-                polygon(points, true, &path);
-                ns_color(background).setFill();
-                path.fill();
-            }
-            Op::Text { x, y, text, size, bold, serif, mono, color, align } => {
-                let family = if *mono { volant_engine::Family::Mono } else if *serif { volant_engine::Family::Serif } else { volant_engine::Family::Sans };
-                let font = Font { family, size: (*size as f64 * sy) as f32, weight: if *bold { 700 } else { 400 }, italic: false };
-                let f = ns_font(&font);
-                let s = attributed(text, &f, Some(&ns_color(*color)), false, false);
-                let w = s.size().width;
-                let p = at((*x, *y));
-                let dx = match align {
-                    Align::Left => 0.0,
-                    Align::Center => w / 2.0,
-                    Align::Right => w,
-                };
-                s.drawAtPoint(NSPoint::new(p.x - dx, p.y - f.ascender()));
-            }
-            Op::Image { src, x, y, w, h, alpha } => {
-                if let Some(img) = images.get(src) {
-                    let p = at((*x, *y));
-                    let dst = rect(p.x, p.y, *w as f64 * sx, *h as f64 * sy);
-                    unsafe { img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(dst, NSRect::ZERO, NSCompositingOperation::SourceOver, *alpha as f64, true, None) };
-                }
+fn paint_canvas(c: &volant_engine::canvas::Canvas, r: NSRect) {
+    // The canvas's own pixels (premultiplied RGBA, as AppKit's bitmaps keep them), scaled to its box.
+    let Some(rep) = bitmap(c.width, c.height) else { return };
+    let n = c.width as usize * c.height as usize * 4;
+    if c.pixels.len() < n {
+        return;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(c.pixels.as_ptr(), rep.bitmapData(), n) };
+    unsafe { rep.drawInRect_fromRect_operation_fraction_respectFlipped_hints(r, NSRect::ZERO, NSCompositingOperation::SourceOver, 1.0, true, None) };
+}
+
+/// An empty RGBA bitmap, premultiplied, 8 bits a channel (rows top to bottom).
+fn bitmap(w: u32, h: u32) -> Option<Retained<NSBitmapImageRep>> {
+    if w == 0 || h == 0 || w as u64 * h as u64 > 32 << 20 {
+        return None;
+    }
+    let rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            w as isize,
+            h as isize,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            w as isize * 4,
+            32,
+        )
+    }?;
+    unsafe { std::ptr::write_bytes(rep.bitmapData(), 0, w as usize * h as usize * 4) };
+    Some(rep)
+}
+
+/// Draws into a bitmap with AppKit (`draw` runs with it as the current context).
+fn draw_into(rep: &NSBitmapImageRep, draw: impl FnOnce()) {
+    let Some(ctx) = NSGraphicsContext::graphicsContextWithBitmapImageRep(rep) else { return };
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&ctx));
+    draw();
+    ctx.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+}
+
+/// A picture's bytes decoded by the system (JPEG, GIF, WebP, HEIC, …) to straight RGBA.
+fn decode_picture(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let src = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(bytes))?;
+    let (w, h) = (src.pixelsWide().max(0) as u32, src.pixelsHigh().max(0) as u32);
+    let rep = bitmap(w, h)?;
+    draw_into(&rep, || unsafe {
+        src.drawInRect_fromRect_operation_fraction_respectFlipped_hints(rect(0.0, 0.0, w as f64, h as f64), NSRect::ZERO, NSCompositingOperation::Copy, 1.0, false, None);
+    });
+    let n = w as usize * h as usize * 4;
+    let mut px = unsafe { std::slice::from_raw_parts(rep.bitmapData(), n) }.to_vec();
+    for p in px.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        if a != 0 && a != 255 {
+            for c in &mut p[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
             }
         }
+    }
+    Some((w, h, px))
+}
+
+/// Canvas text in the system's fonts: measured, and drawn into a coverage mask.
+struct MacText;
+
+impl volant_engine::canvas::TextHost for MacText {
+    fn width(&self, text: &str, font: &Font) -> f32 {
+        MacFonts.width(text, font)
+    }
+    fn ascent(&self, font: &Font) -> f32 {
+        MacFonts.ascent(font)
+    }
+    fn descent(&self, font: &Font) -> f32 {
+        MacFonts.descent(font)
+    }
+    fn mask(&self, text: &str, font: &Font) -> Option<volant_engine::canvas::TextMask> {
+        let f = ns_font(font);
+        let s = attributed(text, &f, Some(&NSColor::whiteColor()), false, false);
+        let (asc, desc) = (f.ascender().max(0.0), (-f.descender()).max(0.0));
+        let pad = (font.size * 0.25).ceil() as f64 + 2.0;
+        let w = (s.size().width + 2.0 * pad).ceil() as u32;
+        let h = (asc + desc + 2.0 * pad).ceil() as u32;
+        let rep = bitmap(w, h)?;
+        // The bitmap is unflipped: its baseline is `pad + desc` up from the bottom.
+        draw_into(&rep, || s.drawAtPoint(NSPoint::new(pad, pad + desc - (s.size().height - asc - desc).max(0.0))));
+        let n = w as usize * h as usize;
+        let px = unsafe { std::slice::from_raw_parts(rep.bitmapData(), n * 4) };
+        let alpha = px.chunks_exact(4).map(|p| p[3]).collect();
+        Some(volant_engine::canvas::TextMask { width: w, height: h, alpha, left: -pad as f32, top: -(h as f32 - pad as f32 - desc as f32) })
     }
 }
 
@@ -1004,16 +1037,6 @@ pub fn sync(b: &Browser) {
         if simple {
             if let Some(s) = &e.session {
                 let _ = s.tx.send(Cmd::Width(width as f32, dark));
-            }
-        }
-        // Pictures a <canvas> drew with drawImage load like any other.
-        if let Some(p) = &e.page {
-            for c in p.snap.canvases.values() {
-                for op in &c.ops {
-                    if let volant_engine::canvas::Op::Image { src, .. } = op {
-                        let _ = images.size(src);
-                    }
-                }
             }
         }
         let wanted = images.wanted.into_inner();
@@ -1332,6 +1355,7 @@ fn start_session(e: &mut Inner, tab: TabId, nav: Navigation, width: f32, dark: b
 fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool, judge: bool, rx: std::sync::mpsc::Receiver<Cmd>) {
     use std::sync::mpsc::RecvTimeoutError;
     let started = std::time::Instant::now();
+    volant_engine::canvas::set_text_host(Box::new(MacText));
     let host = NetHost;
     // The page itself is always checked with the server (a 304 is cheap); its files may come from the cache.
     let mut headers = vec![("Accept".to_string(), "text/html,application/xhtml+xml,*/*;q=0.8".to_string()), ("Cache-Control".to_string(), "max-age=0".to_string())];

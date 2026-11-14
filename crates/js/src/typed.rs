@@ -227,6 +227,13 @@ pub fn new_typed(i: &Interp, elem: Elem, values: &[f64]) -> Value {
     new_view(i, View { buffer, elem, offset: 0, len: values.len(), data_view: false }, None)
 }
 
+/// A new Uint8ClampedArray holding `bytes` (canvas image data).
+pub fn new_clamped(i: &Interp, bytes: Vec<u8>) -> Value {
+    let len = bytes.len();
+    let Value::Obj(buffer) = new_buffer(i, bytes) else { unreachable!() };
+    new_view(i, View { buffer, elem: Elem::U8Clamped, offset: 0, len, data_view: false }, None)
+}
+
 /// A new Uint8Array holding `bytes` (for the web engine: TextEncoder, fetch, crypto).
 pub fn new_bytes(i: &Interp, bytes: Vec<u8>) -> Value {
     let len = bytes.len();
