@@ -20,7 +20,7 @@ use crate::style;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use volant_core::html::{self, Data, Dom, Node, NodeId, ROOT};
+use volant_core::html::{self, Change, Data, Dom, Node, NodeId, ROOT};
 use volant_js::interp::{Interp, Kind, Obj, Res, Slot, Value};
 
 /// A request a page makes (a script, a style sheet, fetch(), a form).
@@ -394,6 +394,7 @@ struct Protos {
     comment: Obj,
     doctype: Obj,
     pi: Obj,
+    cdata: Obj,
     fragment: Obj,
     class_list: Obj,
     style: Obj,
@@ -460,6 +461,10 @@ pub struct State {
     doc_urls: HashMap<NodeId, String>,
     /// Documents other than the page's, and their content types.
     documents: HashMap<NodeId, String>,
+    /// Nodes mutation observers watch (how many observers each), and whether
+    /// the page has live ranges: what tree changes scripts are told about.
+    watched: HashMap<NodeId, u32>,
+    ranges_live: bool,
 }
 
 /// The document a node belongs to: the document at the root of its tree, or
@@ -684,6 +689,12 @@ fn attrs_mut(dom: &mut Dom, id: NodeId) -> Option<&mut Vec<(Box<str>, String)>> 
 }
 
 fn set_attr(dom: &mut Dom, id: NodeId, k: &str, v: &str) {
+    if dom.log.is_some() {
+        let old = dom.attr(id, k).map(|s| s.to_string());
+        if let Some(log) = dom.log.as_mut() {
+            log.push(Change::Attr { node: id, name: k.into(), old });
+        }
+    }
     if let Some(attrs) = attrs_mut(dom, id) {
         match attrs.iter_mut().find(|(a, _)| &**a == k) {
             Some(slot) => slot.1 = v.to_string(),
@@ -693,6 +704,13 @@ fn set_attr(dom: &mut Dom, id: NodeId, k: &str, v: &str) {
 }
 
 fn remove_attr(dom: &mut Dom, id: NodeId, k: &str) {
+    if dom.log.is_some() {
+        if let Some(old) = dom.attr(id, k).map(|s| s.to_string()) {
+            if let Some(log) = dom.log.as_mut() {
+                log.push(Change::Attr { node: id, name: k.into(), old: Some(old) });
+            }
+        }
+    }
     if let Some(attrs) = attrs_mut(dom, id) {
         attrs.retain(|(a, _)| &**a != k);
     }
@@ -737,6 +755,14 @@ fn new_node(dom: &mut Dom, data: Data) -> NodeId {
 fn detach(dom: &mut Dom, id: NodeId) {
     let p = dom.nodes[id as usize].parent;
     if p != id {
+        if dom.log.is_some() {
+            let kids = &dom.nodes[p as usize].children;
+            let at = kids.iter().position(|&c| c == id).unwrap_or(0);
+            let (prev, next) = (at.checked_sub(1).map(|k| kids[k]), kids.get(at + 1).copied());
+            if let Some(log) = dom.log.as_mut() {
+                log.push(Change::Removed { parent: p, node: id, index: at as u32, prev, next });
+            }
+        }
         dom.nodes[p as usize].children.retain(|&c| c != id);
         dom.nodes[id as usize].parent = id;
     }
@@ -765,7 +791,7 @@ fn connected(dom: &Dom, id: NodeId) -> bool {
 fn check_insert(dom: &Dom, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: bool) -> Result<(), (&'static str, &'static str)> {
     let kind = |id: NodeId| match &dom.nodes[id as usize].data {
         Data::Document => 'D',
-        Data::Text(_) => 'T',
+        Data::Text(_) | Data::CData(_) => 'T',
         Data::Comment(_) | Data::Pi { .. } => 'C',
         Data::Doctype { .. } => 'Y',
         Data::Element { name, .. } if &**name == FRAGMENT => 'F',
@@ -836,14 +862,24 @@ fn insert(dom: &mut Dom, parent: NodeId, child: NodeId, before: Option<NodeId>) 
         let at = before.and_then(|b| kids.iter().position(|&k| k == b)).unwrap_or(kids.len());
         kids.insert(at, c);
         dom.nodes[c as usize].parent = parent;
+        if dom.log.is_some() {
+            let kids = &dom.nodes[parent as usize].children;
+            let (prev, next) = (at.checked_sub(1).map(|k| kids[k]), kids.get(at + 1).copied());
+            if let Some(log) = dom.log.as_mut() {
+                log.push(Change::Inserted { parent, node: c, index: at as u32, prev, next });
+            }
+        }
     }
     Ok(())
 }
 
 fn set_text(dom: &mut Dom, id: NodeId, text: &str) {
     match &mut dom.nodes[id as usize].data {
-        Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } => {
-            *t = text.to_string();
+        Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } | Data::CData(t) => {
+            let old = std::mem::replace(t, text.to_string());
+            if let Some(log) = dom.log.as_mut() {
+                log.push(Change::Data { node: id, old });
+            }
             return;
         }
         Data::Doctype { .. } => return,
@@ -860,6 +896,14 @@ fn set_text(dom: &mut Dom, id: NodeId, text: &str) {
 
 /// Copies a node (and its subtree when `deep`) within the document.
 fn clone_node(dom: &mut Dom, id: NodeId, deep: bool) -> NodeId {
+    // A copy is new: nothing can be watching it while it's built.
+    let log = dom.log.take();
+    let copy = clone_inner(dom, id, deep);
+    dom.log = log;
+    copy
+}
+
+fn clone_inner(dom: &mut Dom, id: NodeId, deep: bool) -> NodeId {
     let data = match &dom.nodes[id as usize].data {
         other => other.clone(),
     };
@@ -872,7 +916,7 @@ fn clone_node(dom: &mut Dom, id: NodeId, deep: bool) -> NodeId {
     }
     if deep {
         for c in dom.nodes[id as usize].children.clone() {
-            let cc = clone_node(dom, c, true);
+            let cc = clone_inner(dom, c, true);
             let _ = insert(dom, copy, cc, None);
         }
     }
@@ -900,10 +944,12 @@ fn import(dom: &mut Dom, src: &Dom) -> NodeId {
             copy(dom, src, c, id);
         }
     }
+    let log = dom.log.take();
     let frag = new_node(dom, Data::Element { name: FRAGMENT.into(), attrs: Vec::new() });
     for &c in src.children(ROOT) {
         copy(dom, src, c, frag);
     }
+    dom.log = log;
     frag
 }
 
@@ -971,6 +1017,11 @@ fn serialize(dom: &Dom, id: NodeId, out: &mut String) {
             out.push_str("<!DOCTYPE ");
             out.push_str(name);
             out.push('>');
+        }
+        Data::CData(t) => {
+            out.push_str("<![CDATA[");
+            out.push_str(t);
+            out.push_str("]]>");
         }
         Data::Pi { target, data } => {
             out.push_str("<?");
@@ -1455,6 +1506,7 @@ fn proto_for(st: &S, id: NodeId) -> Obj {
         Data::Comment(_) => p.comment.clone(),
         Data::Doctype { .. } => p.doctype.clone(),
         Data::Pi { .. } => p.pi.clone(),
+        Data::CData(_) => p.cdata.clone(),
         Data::Element { name, .. } if &**name == FRAGMENT => p.fragment.clone(),
         Data::Element { name, .. } if name.starts_with('#') => p.node.clone(),
         Data::Element { name, .. } => {
@@ -1521,8 +1573,78 @@ fn method(i: &Interp, st: &S, o: &Obj, name: &str, f: impl Fn(&mut Interp, &S, N
     let st = st.clone();
     def(i, o, name, move |i, t, a| {
         let id = this_node(i, &t)?;
-        f(i, &st, id, a)
+        let r = f(i, &st, id, a);
+        deliver_changes(i, &st)?;
+        r
     });
+}
+
+/// Hands the tree changes made since the last call to the page's
+/// `__domChanged` (live ranges, mutation observers), as
+/// [kind, ...] arrays: 0 removed / 1 inserted [parent, node, index, prev, next],
+/// 2 attribute [node, name, old], 3 data [node, old], each ending with the
+/// watched nodes at or above the change's target (nearest first). Changes
+/// nothing is watching (no live range, no observer above) are dropped here.
+fn deliver_changes(i: &mut Interp, st: &S) -> Res<()> {
+    let picked: Vec<(Change, Vec<NodeId>)> = {
+        let mut s = st.borrow_mut();
+        let log = match s.dom.log.as_mut() {
+            Some(l) if !l.is_empty() => std::mem::take(l),
+            _ => return Ok(()),
+        };
+        let s = &*s;
+        let mut out = Vec::new();
+        for c in log {
+            let target = match &c {
+                Change::Removed { parent, .. } | Change::Inserted { parent, .. } => *parent,
+                Change::Attr { node, .. } | Change::Data { node, .. } => *node,
+            };
+            let mut watchers = Vec::new();
+            if !s.watched.is_empty() {
+                let mut n = target;
+                loop {
+                    if s.watched.contains_key(&n) {
+                        watchers.push(n);
+                    }
+                    let p = s.dom.nodes[n as usize].parent;
+                    if p == n {
+                        break;
+                    }
+                    n = p;
+                }
+            }
+            // Ranges care about the tree and text, not attributes.
+            if watchers.is_empty() && (!s.ranges_live || matches!(c, Change::Attr { .. })) {
+                continue;
+            }
+            out.push((c, watchers));
+        }
+        out
+    };
+    if picked.is_empty() {
+        return Ok(());
+    }
+    let hook = i.global_obj.borrow().get_own("__domChanged").cloned();
+    let Some(Slot::Data(hook)) = hook else { return Ok(()) };
+    let opt = |i: &Interp, n: Option<NodeId>| wrap_opt(i, st, n);
+    let mut recs = Vec::with_capacity(picked.len());
+    for (c, watchers) in picked {
+        let w: Vec<Value> = watchers.into_iter().map(|n| wrap(i, st, n)).collect();
+        let w = i.array(w);
+        let mut r = match c {
+            Change::Removed { parent, node, index, prev, next } | Change::Inserted { parent, node, index, prev, next } => {
+                let kind = if matches!(c, Change::Removed { .. }) { 0.0 } else { 1.0 };
+                vec![Value::Num(kind), wrap(i, st, parent), wrap(i, st, node), Value::Num(index as f64), opt(i, prev), opt(i, next)]
+            }
+            Change::Attr { node, name, old } => vec![Value::Num(2.0), wrap(i, st, node), str_val(&name), old.map_or(Value::Null, |o| str_val(&o))],
+            Change::Data { node, old } => vec![Value::Num(3.0), wrap(i, st, node), str_val(&old)],
+        };
+        r.push(w);
+        recs.push(i.array(r));
+    }
+    let list = i.array(recs);
+    i.call(&hook, Value::Undefined, vec![list])?;
+    Ok(())
 }
 
 fn getter(i: &Interp, st: &S, o: &Obj, name: &str, g: impl Fn(&mut Interp, &S, NodeId) -> Res<Value> + 'static) {
@@ -1550,7 +1672,9 @@ fn accessor(
     let st2 = st.clone();
     let sv = i.native(move |i, t, a| {
         let id = this_node(i, &t)?;
-        s(i, &st2, id, arg(&a, 0))?;
+        let r = s(i, &st2, id, arg(&a, 0));
+        deliver_changes(i, &st2)?;
+        r?;
         Ok(Value::Undefined)
     });
     o.borrow_mut().set_slot(name, Slot::accessor(Some(gv), Some(sv)));
@@ -1617,6 +1741,7 @@ fn flush(i: &mut Interp, st: &S) {
             s.generation += 1;
         }
     }
+    let _ = deliver_changes(i, st);
 }
 
 // ------------------------------------------------------------------ events
@@ -2480,6 +2605,7 @@ fn install(i: &mut Interp, st: &S) {
     let text = mk(i, Some(character_data.clone()));
     let comment = mk(i, Some(character_data.clone()));
     let pi = mk(i, Some(character_data.clone()));
+    let cdata = mk(i, Some(text.clone()));
     let doctype = mk(i, Some(node.clone()));
     let fragment = mk(i, Some(node.clone()));
     let document = mk(i, Some(node.clone()));
@@ -2538,6 +2664,7 @@ fn install(i: &mut Interp, st: &S) {
         comment: comment.clone(),
         doctype: doctype.clone(),
         pi: pi.clone(),
+        cdata: cdata.clone(),
         fragment: fragment.clone(),
         class_list: class_list.clone(),
         style: style_p.clone(),
@@ -2562,6 +2689,7 @@ fn install(i: &mut Interp, st: &S) {
     ctor(i, "Text", &text);
     ctor(i, "Comment", &comment);
     ctor(i, "ProcessingInstruction", &pi);
+    ctor(i, "CDATASection", &cdata);
     ctor(i, "DocumentType", &doctype);
     ctor(i, "DocumentFragment", &fragment);
     ctor(i, "Document", &document);
@@ -2652,7 +2780,7 @@ fn install(i: &mut Interp, st: &S) {
     }
 
     // Object.prototype.toString tags (libraries tell plain objects from host objects by these).
-    for (o, tag) in [(&comment, "Comment"), (&doctype, "DocumentType"), (&pi, "ProcessingInstruction"), (&fragment, "DocumentFragment"), (&character_data, "CharacterData"), (&element, "Element"), (&html_element, "HTMLElement"), (&text, "Text"), (&document, "Document"), (&html_document, "HTMLDocument"), (&node, "Node"), (&event, "Event"), (&class_list, "DOMTokenList"), (&style_p, "CSSStyleDeclaration")] {
+    for (o, tag) in [(&comment, "Comment"), (&doctype, "DocumentType"), (&pi, "ProcessingInstruction"), (&cdata, "CDATASection"), (&fragment, "DocumentFragment"), (&character_data, "CharacterData"), (&element, "Element"), (&html_element, "HTMLElement"), (&text, "Text"), (&document, "Document"), (&html_document, "HTMLDocument"), (&node, "Node"), (&event, "Event"), (&class_list, "DOMTokenList"), (&style_p, "CSSStyleDeclaration")] {
         o.borrow_mut().set_own("\0@toStringTag", str_val(tag));
     }
     i.global_obj.borrow_mut().set_own("\0@toStringTag", str_val("Window"));
@@ -2774,6 +2902,7 @@ fn install(i: &mut Interp, st: &S) {
             Data::Comment(_) => 8.0,
             Data::Doctype { .. } => 10.0,
             Data::Pi { .. } => 7.0,
+            Data::CData(_) => 4.0,
             Data::Element { name, .. } if &**name == FRAGMENT => 11.0,
             Data::Element { .. } => 1.0,
         }))
@@ -2786,6 +2915,7 @@ fn install(i: &mut Interp, st: &S) {
             Data::Comment(_) => "#comment".to_string(),
             Data::Doctype { name, .. } => name.to_string(),
             Data::Pi { target, .. } => target.to_string(),
+            Data::CData(_) => "#cdata-section".to_string(),
             Data::Element { name, .. } if name.starts_with('#') => name.to_string(),
             Data::Element { .. } => tag_name(&s, id),
         }))
@@ -2851,7 +2981,7 @@ fn install(i: &mut Interp, st: &S) {
             let s = st.borrow();
             Ok(match &s.dom.nodes[id as usize].data {
                 Data::Document | Data::Doctype { .. } => Value::Null,
-                Data::Comment(t) | Data::Pi { data: t, .. } => str_val(t),
+                Data::Comment(t) | Data::Pi { data: t, .. } | Data::CData(t) => str_val(t),
                 _ => str_val(&s.dom.text(id)),
             })
         },
@@ -2874,7 +3004,7 @@ fn install(i: &mut Interp, st: &S) {
             |_i, st, id| {
                 let s = st.borrow();
                 Ok(match &s.dom.nodes[id as usize].data {
-                    Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } => str_val(t),
+                    Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } | Data::CData(t) => str_val(t),
                     _ => Value::Null,
                 })
             },
@@ -2907,7 +3037,7 @@ fn install(i: &mut Interp, st: &S) {
     getter(i, st, &character_data, "length", |_i, st, id| {
         let s = st.borrow();
         Ok(match &s.dom.nodes[id as usize].data {
-            Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } => Value::Num(t.encode_utf16().count() as f64),
+            Data::Text(t) | Data::Comment(t) | Data::Pi { data: t, .. } | Data::CData(t) => Value::Num(t.encode_utf16().count() as f64),
             _ => Value::Undefined,
         })
     });
@@ -4544,6 +4674,21 @@ fn install(i: &mut Interp, st: &S) {
         made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
+    method(i, st, &document, "createCDATASection", |i, st, doc, a| {
+        if a.is_empty() {
+            return i.throw("TypeError", "createCDATASection: 1 argument required, but only 0 present.");
+        }
+        let data = i.to_str(&arg(&a, 0))?;
+        if in_html_doc(&st.borrow(), doc) {
+            return i.throw("NotSupportedError", "HTML documents can't have CDATA sections");
+        }
+        if data.contains("]]>") {
+            return i.throw("InvalidCharacterError", "a CDATA section can't contain ]]>");
+        }
+        let n = new_node(&mut st.borrow_mut().dom, Data::CData(data.to_string()));
+        made_by(st, doc, n);
+        Ok(wrap(i, st, n))
+    });
     method(i, st, &document, "createProcessingInstruction", |i, st, doc, a| {
         let target = i.to_str(&arg(&a, 0))?;
         let data = i.to_str(&arg(&a, 1))?;
@@ -4809,6 +4954,36 @@ fn install(i: &mut Interp, st: &S) {
         })
     });
     hook(i, "__img", f);
+    let st2 = st.clone();
+    let f = i.native(move |_i, _t, a| {
+        // __watchDom(): the page has live ranges; __watchDom(node, ±1): an
+        // observer starts or stops watching node. Tree changes are recorded
+        // only while something listens.
+        let mut s = st2.borrow_mut();
+        match node_of(&arg(&a, 0)) {
+            None => s.ranges_live = true,
+            Some(n) => {
+                let d = match arg(&a, 1) {
+                    Value::Num(d) => d as i64,
+                    _ => 1,
+                };
+                let e = s.watched.entry(n).or_insert(0);
+                *e = (*e as i64 + d).max(0) as u32;
+                if *e == 0 {
+                    s.watched.remove(&n);
+                }
+            }
+        }
+        if s.ranges_live || !s.watched.is_empty() {
+            if s.dom.log.is_none() {
+                s.dom.log = Some(Vec::new());
+            }
+        } else {
+            s.dom.log = None;
+        }
+        Ok(Value::Undefined)
+    });
+    hook(i, "__watchDom", f);
     let st2 = st.clone();
     let f = i.native(move |i, _t, a| {
         // __prefetch(...urls): starts the page's files on their way, side by side
@@ -5840,6 +6015,8 @@ impl Runtime {
             owners: HashMap::new(),
             doc_urls: HashMap::new(),
             documents: HashMap::new(),
+            watched: HashMap::new(),
+            ranges_live: false,
         }));
         let mut interp = Interp::new();
         // Real pages nest calls deeply (module loaders, jQuery); run on a big stack (see STACK).
@@ -6316,7 +6493,7 @@ impl Runtime {
 /// and the (copy, original) pairs of its canvases.
 fn snapshot_of(s: &State) -> (Snapshot, Vec<(NodeId, NodeId)>) {
     {
-        let mut dom = Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default(), attr_ns: Default::default() };
+        let mut dom = Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default(), attr_ns: Default::default(), log: None };
         let mut map = vec![ROOT];
         // Interaction states, marked on the copy for `:hover`, `:focus`, `:focus-within` and `:target`.
         let mut marks: HashMap<NodeId, Vec<&'static str>> = HashMap::new();
@@ -6354,7 +6531,8 @@ fn snapshot_of(s: &State) -> (Snapshot, Vec<(NodeId, NodeId)>) {
                     }
                     Data::Element { name: name.clone(), attrs }
                 }
-                Data::Text(t) => Data::Text(t.clone()),
+                // To render, a CDATA section is text (a style sheet's, often).
+                Data::Text(t) | Data::CData(t) => Data::Text(t.clone()),
                 Data::Document | Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } => return,
             };
             let id = dst.nodes.len() as NodeId;

@@ -354,7 +354,7 @@ impl Builder<'_> {
             }
             match &self.dom.nodes[c as usize].data {
                 Data::Text(t) => run.push(Inline::Text { text: t.clone(), style: c, link: None }),
-                Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } => {}
+                Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } | Data::CData(_) => {}
                 Data::Element { .. } => {
                     if self.styles[c as usize].display == Display::None {
                         continue;
@@ -660,7 +660,7 @@ impl Builder<'_> {
         }
         match &self.dom.nodes[id as usize].data {
             Data::Text(t) => run.push(Inline::Text { text: t.clone(), style: id, link }),
-            Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } => {}
+            Data::Comment(_) | Data::Doctype { .. } | Data::Pi { .. } | Data::CData(_) => {}
             Data::Element { .. } => {
                 let s = &self.styles[id as usize];
                 if s.display == Display::None {

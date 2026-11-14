@@ -20,6 +20,8 @@ pub enum Data {
     Doctype { name: Box<str>, public_id: String, system_id: String },
     /// `<?target data?>`: only scripts make these in HTML documents.
     Pi { target: Box<str>, data: String },
+    /// `<![CDATA[...]]>`: only in XML documents (and made by their scripts).
+    CData(String),
 }
 
 #[derive(Debug)]
@@ -39,6 +41,22 @@ pub struct Dom {
     /// Attributes with a namespace (`setAttributeNS`, XML's prefixed ones):
     /// per element, (qualified name, namespace, prefix). Others have none.
     pub attr_ns: std::collections::HashMap<NodeId, Vec<(Box<str>, Box<str>, Option<Box<str>>)>>,
+    /// Changes to the tree, recorded while this is on (scripts' live ranges
+    /// and mutation observers read them).
+    pub log: Option<Vec<Change>>,
+}
+
+/// One change to a document's tree.
+#[derive(Clone, Debug)]
+pub enum Change {
+    /// `node` was taken out of `parent`, where it was child `index`, between `prev` and `next`.
+    Removed { parent: NodeId, node: NodeId, index: u32, prev: Option<NodeId>, next: Option<NodeId> },
+    /// `node` was put into `parent` as child `index`, between `prev` and `next`.
+    Inserted { parent: NodeId, node: NodeId, index: u32, prev: Option<NodeId>, next: Option<NodeId> },
+    /// An attribute was set or removed (`old` is what it was, if it was there).
+    Attr { node: NodeId, name: Box<str>, old: Option<String> },
+    /// A text, comment or processing instruction's data changed from `old`.
+    Data { node: NodeId, old: String },
 }
 
 pub const ROOT: NodeId = 0;
@@ -91,7 +109,7 @@ impl Dom {
 
     fn text_into(&self, id: NodeId, out: &mut String) {
         match &self.nodes[id as usize].data {
-            Data::Text(t) => out.push_str(t),
+            Data::Text(t) | Data::CData(t) => out.push_str(t),
             _ => {
                 for &c in &self.nodes[id as usize].children {
                     self.text_into(c, out);
@@ -418,7 +436,7 @@ fn parse_opts(html: &str, scripts: bool) -> Dom {
         b.text("<");
         i += 1;
     }
-    Dom { nodes: b.nodes, ns: Default::default(), attr_ns: Default::default() }
+    Dom { nodes: b.nodes, ns: Default::default(), attr_ns: Default::default(), log: None }
 }
 
 fn read_name(html: &str, start: usize) -> (String, usize) {
@@ -526,7 +544,7 @@ mod tests {
             }
             Data::Comment(t) => out.push_str(&format!("<!--{t}-->")),
             Data::Doctype { name, .. } => out.push_str(&format!("<!DOCTYPE {name}>")),
-            Data::Pi { .. } => {}
+            Data::Pi { .. } | Data::CData(_) => {}
         }
     }
 

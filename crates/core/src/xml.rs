@@ -9,7 +9,7 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
 pub fn parse(text: &str) -> Result<Dom, String> {
-    let mut p = Parser { s: text, i: 0, dom: Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default(), attr_ns: Default::default() } };
+    let mut p = Parser { s: text, i: 0, dom: Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default(), attr_ns: Default::default(), log: None } };
     p.run()?;
     Ok(p.dom)
 }
@@ -92,7 +92,7 @@ impl<'a> Parser<'a> {
                 }
                 self.i += 9;
                 let c = self.until("]]>", "an unclosed CDATA section")?;
-                self.text(parent, c);
+                self.add(parent, Data::CData(c.to_string()));
             } else if r.starts_with("<!DOCTYPE") {
                 if root_seen || !stack.is_empty() {
                     return self.err("a misplaced doctype");

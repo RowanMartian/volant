@@ -648,7 +648,6 @@
   g.EventSource = class EventSource extends EventTarget { constructor(url) { super(); this.url = url; this.readyState = 2 } close() {} }
 
   // ---------------------------------------------------------------- observers
-  g.MutationObserver = class MutationObserver { constructor(cb) { this.cb = cb } observe() {} disconnect() {} takeRecords() { return [] } }
   g.ResizeObserver = class ResizeObserver { constructor(cb) { this.cb = cb } observe() {} unobserve() {} disconnect() {} }
   g.PerformanceObserver = class PerformanceObserver { constructor() {} observe() {} disconnect() {} takeRecords() { return [] } }
   g.PerformanceObserver.supportedEntryTypes = []
@@ -1450,18 +1449,6 @@
     whenDefined(name) { return Promise.resolve(registry.get(name)) },
     upgrade: noop,
   }
-  g.getSelection = () => ({ rangeCount: 0, isCollapsed: true, type: 'None', removeAllRanges: noop, addRange: noop, collapse: noop, getRangeAt: () => document.createRange(), toString: () => '' })
-  document.createRange = () => ({
-    setStart: noop, setEnd: noop, setStartBefore: noop, setEndAfter: noop, selectNode: noop, selectNodeContents: noop, collapse: noop, detach: noop,
-    getBoundingClientRect: () => ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
-    getClientRects: () => [],
-    createContextualFragment(html) {
-      const t = document.createElement('template'); t.innerHTML = html
-      const f = document.createDocumentFragment()
-      while (t.firstChild) f.appendChild(t.firstChild)
-      return f
-    },
-  })
   // ---------------------------------------------------------------- more documents
   const NS = { html: 'http://www.w3.org/1999/xhtml', svg: 'http://www.w3.org/2000/svg' }
   class DOMImplementation {
@@ -3307,6 +3294,510 @@
     if (this.parentNode) this.parentNode.insertBefore(rest, this.nextSibling)
     this.data = d.slice(0, off)
     return rest
+  }
+
+  // ---------------------------------------------------------------- live ranges, selection, mutation observers
+  // Once __watchDom() is on, the tree reports every change to __domChanged as
+  // [kind, ...]: 0 removed / 1 inserted [parent, node, index, prev, next],
+  // 2 attribute [node, name, old], 3 data [node, old].
+  {
+    const need = (n, k, what) => { if (n < k) throw new TypeError(what + ': ' + k + ' argument' + (k > 1 ? 's' : '') + ' required, but only ' + n + ' present.') }
+    const liveRanges = new Set()
+    // window.reportError: the error reaches the page's error handling as an uncaught one would.
+    const reportError = g.reportError || (g.reportError = e => { setTimeout(() => { throw e }, 0) })
+    const observed = new Map()
+    const pending = new Set()
+    let scheduled = false
+    let cdHint = null
+    const isCD = t => t === 3 || t === 4 || t === 7 || t === 8
+    const nodeLength = n => isCD(n.nodeType) ? n.data.length : n.nodeType === 10 ? 0 : n.childNodes.length
+    const indexOf = n => { let i = 0; for (let c = n.previousSibling; c; c = c.previousSibling) i++; return i }
+    const rootOf = n => { while (n.parentNode) n = n.parentNode; return n }
+    const inclusiveAncestor = (a, b) => { for (; b; b = b.parentNode) if (a === b) return true; return false }
+    const nextIn = (n, root) => { if (n.firstChild) return n.firstChild; return skipIn(n, root) }
+    const skipIn = (n, root) => { for (; n && n !== root; n = n.parentNode) if (n.nextSibling) return n.nextSibling; return null }
+    // Where boundary point (a, ao) is relative to (b, bo): -1 before, 0 equal, 1 after.
+    const cmpPoint = (a, ao, b, bo) => {
+      if (a === b) return ao === bo ? 0 : ao < bo ? -1 : 1
+      if (a.compareDocumentPosition(b) & 2) return -cmpPoint(b, bo, a, ao)
+      if (inclusiveAncestor(a, b)) {
+        let c = b
+        while (c.parentNode !== a) c = c.parentNode
+        if (indexOf(c) < ao) return 1
+      }
+      return -1
+    }
+    const wantNode = (n, what) => { if (!(n instanceof Node)) throw new TypeError(what + ": parameter 1 is not of type 'Node'.") }
+    const bad = (name, msg) => new DOMException(msg, name)
+    const contained = (n, r) => rootOf(n) === rootOf(r._sc) && cmpPoint(n, 0, r._sc, r._so) > 0 && cmpPoint(n, nodeLength(n), r._ec, r._eo) < 0
+    const track = r => {
+      liveRanges.add(r)
+      // Ranges are never collected here: keep the newest few thousand live.
+      if (liveRanges.size > 4000) liveRanges.delete(liveRanges.values().next().value)
+      __watchDom()
+    }
+    const plainRange = (sc, so, ec, eo) => { const r = Object.create(Range.prototype); r._sc = sc; r._so = so; r._ec = ec; r._eo = eo; return r }
+
+    class AbstractRange {
+      constructor() { if (new.target === AbstractRange) throw new TypeError('Illegal constructor') }
+      get startContainer() { return this._sc }
+      get startOffset() { return this._so }
+      get endContainer() { return this._ec }
+      get endOffset() { return this._eo }
+      get collapsed() { return this._sc === this._ec && this._so === this._eo }
+    }
+    class StaticRange extends AbstractRange {
+      constructor(init) {
+        super()
+        if (arguments.length < 1) throw new TypeError("StaticRange: 1 argument required, but only 0 present.")
+        if (init === null || typeof init !== 'object') throw new TypeError('StaticRange: init must be an object')
+        for (const k of ['startContainer', 'startOffset', 'endContainer', 'endOffset']) if (init[k] === undefined) throw new TypeError("StaticRange: '" + k + "' is required")
+        const { startContainer: sc, endContainer: ec } = init
+        wantNode(sc, 'StaticRange'); wantNode(ec, 'StaticRange')
+        for (const n of [sc, ec]) if (n.nodeType === 10 || n.nodeType === 2) throw bad('InvalidNodeTypeError', "a doctype or attribute can't hold a range boundary")
+        this._sc = sc; this._so = init.startOffset >>> 0; this._ec = ec; this._eo = init.endOffset >>> 0
+      }
+    }
+    class Range extends AbstractRange {
+      constructor() { super(); this._sc = this._ec = document; this._so = this._eo = 0; track(this) }
+      get commonAncestorContainer() { let n = this._sc; while (!inclusiveAncestor(n, this._ec)) n = n.parentNode; return n }
+      _offset(node, off) {
+        if (node.nodeType === 10) throw bad('InvalidNodeTypeError', "a doctype can't hold a range boundary")
+        off = off >>> 0
+        if (off > nodeLength(node)) throw bad('IndexSizeError', 'offset ' + off + ' is past the end of the node')
+        return off
+      }
+      setStart(node, off) {
+        need(arguments.length, 2, 'Range.setStart'); wantNode(node, 'Range.setStart')
+        off = this._offset(node, off)
+        this._sc = node; this._so = off
+        if (rootOf(node) !== rootOf(this._ec) || cmpPoint(node, off, this._ec, this._eo) > 0) { this._ec = node; this._eo = off }
+      }
+      setEnd(node, off) {
+        need(arguments.length, 2, 'Range.setEnd'); wantNode(node, 'Range.setEnd')
+        off = this._offset(node, off)
+        this._ec = node; this._eo = off
+        if (rootOf(node) !== rootOf(this._sc) || cmpPoint(node, off, this._sc, this._so) < 0) { this._sc = node; this._so = off }
+      }
+      _parentOf(node, what) {
+        need(1, 1, what); wantNode(node, what)
+        const p = node.parentNode
+        if (!p) throw bad('InvalidNodeTypeError', 'the node has no parent')
+        return p
+      }
+      setStartBefore(node) { need(arguments.length, 1, 'Range.setStartBefore'); const p = this._parentOf(node, 'Range.setStartBefore'); this.setStart(p, indexOf(node)) }
+      setStartAfter(node) { need(arguments.length, 1, 'Range.setStartAfter'); const p = this._parentOf(node, 'Range.setStartAfter'); this.setStart(p, indexOf(node) + 1) }
+      setEndBefore(node) { need(arguments.length, 1, 'Range.setEndBefore'); const p = this._parentOf(node, 'Range.setEndBefore'); this.setEnd(p, indexOf(node)) }
+      setEndAfter(node) { need(arguments.length, 1, 'Range.setEndAfter'); const p = this._parentOf(node, 'Range.setEndAfter'); this.setEnd(p, indexOf(node) + 1) }
+      collapse(toStart = false) { if (toStart) { this._ec = this._sc; this._eo = this._so } else { this._sc = this._ec; this._so = this._eo } }
+      selectNode(node) {
+        need(arguments.length, 1, 'Range.selectNode')
+        const p = this._parentOf(node, 'Range.selectNode'), i = indexOf(node)
+        this._sc = this._ec = p; this._so = i; this._eo = i + 1
+      }
+      selectNodeContents(node) {
+        need(arguments.length, 1, 'Range.selectNodeContents'); wantNode(node, 'Range.selectNodeContents')
+        if (node.nodeType === 10) throw bad('InvalidNodeTypeError', "a doctype can't hold a range boundary")
+        this._sc = this._ec = node; this._so = 0; this._eo = nodeLength(node)
+      }
+      compareBoundaryPoints(how, src) {
+        need(arguments.length, 2, 'Range.compareBoundaryPoints')
+        how = Math.trunc(Number(how)); how = isFinite(how) ? ((how % 65536) + 65536) % 65536 : 0
+        if (how > 3) throw bad('NotSupportedError', 'unknown comparison ' + how)
+        if (!(src instanceof Range)) throw new TypeError("Range.compareBoundaryPoints: parameter 2 is not of type 'Range'.")
+        if (rootOf(this._sc) !== rootOf(src._sc)) throw bad('WrongDocumentError', 'the ranges are in different trees')
+        switch (how) {
+          case 0: return cmpPoint(this._sc, this._so, src._sc, src._so)
+          case 1: return cmpPoint(this._ec, this._eo, src._sc, src._so)
+          case 2: return cmpPoint(this._ec, this._eo, src._ec, src._eo)
+          default: return cmpPoint(this._sc, this._so, src._ec, src._eo)
+        }
+      }
+      comparePoint(node, off) {
+        need(arguments.length, 2, 'Range.comparePoint'); wantNode(node, 'Range.comparePoint')
+        if (rootOf(node) !== rootOf(this._sc)) throw bad('WrongDocumentError', 'the node is in a different tree')
+        off = this._offset(node, off)
+        if (cmpPoint(node, off, this._sc, this._so) < 0) return -1
+        if (cmpPoint(node, off, this._ec, this._eo) > 0) return 1
+        return 0
+      }
+      isPointInRange(node, off) {
+        need(arguments.length, 2, 'Range.isPointInRange'); wantNode(node, 'Range.isPointInRange')
+        if (rootOf(node) !== rootOf(this._sc)) return false
+        off = this._offset(node, off)
+        return cmpPoint(node, off, this._sc, this._so) >= 0 && cmpPoint(node, off, this._ec, this._eo) <= 0
+      }
+      intersectsNode(node) {
+        need(arguments.length, 1, 'Range.intersectsNode'); wantNode(node, 'Range.intersectsNode')
+        if (rootOf(node) !== rootOf(this._sc)) return false
+        const p = node.parentNode
+        if (!p) return true
+        const i = indexOf(node)
+        return cmpPoint(p, i, this._ec, this._eo) < 0 && cmpPoint(p, i + 1, this._sc, this._so) > 0
+      }
+      cloneRange() { const r = new Range(); r._sc = this._sc; r._so = this._so; r._ec = this._ec; r._eo = this._eo; return r }
+      detach() {}
+      toString() {
+        const { _sc: sc, _so: so, _ec: ec, _eo: eo } = this
+        if (sc === ec && sc.nodeType === 3) return sc.data.slice(so, eo)
+        let s = sc.nodeType === 3 ? sc.data.slice(so) : ''
+        const root = this.commonAncestorContainer
+        for (let n = root.firstChild; n; n = nextIn(n, root)) if (n.nodeType === 3 && contained(n, this)) s += n.data
+        if (ec.nodeType === 3) s += ec.data.slice(0, eo)
+        return s
+      }
+      // Where the range collapses to once its contents are taken out.
+      _after() {
+        const { _sc: sc, _so: so, _ec: ec } = this
+        if (inclusiveAncestor(sc, ec)) return [sc, so]
+        let ref = sc
+        while (ref.parentNode && !inclusiveAncestor(ref.parentNode, ec)) ref = ref.parentNode
+        return [ref.parentNode, indexOf(ref) + 1]
+      }
+      deleteContents() {
+        if (this.collapsed) return
+        const { _sc: sc, _so: so, _ec: ec, _eo: eo } = this
+        if (sc === ec && isCD(sc.nodeType)) { sc.replaceData(so, eo - so, ''); return }
+        const remove = [], root = this.commonAncestorContainer
+        for (let n = root.firstChild; n;) {
+          if (contained(n, this)) { remove.push(n); n = skipIn(n, root) } else n = nextIn(n, root)
+        }
+        const [nn, no] = this._after()
+        if (isCD(sc.nodeType)) sc.replaceData(so, nodeLength(sc) - so, '')
+        for (const n of remove) if (n.parentNode) n.parentNode.removeChild(n)
+        if (isCD(ec.nodeType)) ec.replaceData(0, eo, '')
+        this._sc = this._ec = nn; this._so = this._eo = no
+      }
+      _copy(extract) {
+        const { _sc: sc, _so: so, _ec: ec, _eo: eo } = this
+        const frag = (sc.nodeType === 9 ? sc : sc.ownerDocument).createDocumentFragment()
+        if (this.collapsed) return frag
+        if (sc === ec && isCD(sc.nodeType)) {
+          const c = sc.cloneNode(); c.data = sc.substringData(so, eo - so); frag.appendChild(c)
+          if (extract) sc.replaceData(so, eo - so, '')
+          return frag
+        }
+        const common = this.commonAncestorContainer
+        let first = null, last = null
+        if (!inclusiveAncestor(sc, ec)) { first = sc; while (first.parentNode !== common) first = first.parentNode }
+        if (!inclusiveAncestor(ec, sc)) { last = ec; while (last.parentNode !== common) last = last.parentNode }
+        const inside = []
+        for (let c = common.firstChild; c; c = c.nextSibling) if (contained(c, this)) inside.push(c)
+        if (inside.some(c => c.nodeType === 10)) throw bad('HierarchyRequestError', "a doctype can't go into a fragment")
+        const after = extract ? this._after() : null
+        if (first) {
+          if (isCD(first.nodeType)) {
+            const c = sc.cloneNode(); c.data = sc.substringData(so, nodeLength(sc) - so); frag.appendChild(c)
+            if (extract) sc.replaceData(so, nodeLength(sc) - so, '')
+          } else {
+            const c = first.cloneNode(); frag.appendChild(c)
+            c.appendChild(plainRange(sc, so, first, nodeLength(first))._copy(extract))
+          }
+        }
+        for (const c of inside) frag.appendChild(extract ? c : c.cloneNode(true))
+        if (last) {
+          if (isCD(last.nodeType)) {
+            const c = ec.cloneNode(); c.data = ec.substringData(0, eo); frag.appendChild(c)
+            if (extract) ec.replaceData(0, eo, '')
+          } else {
+            const c = last.cloneNode(); frag.appendChild(c)
+            c.appendChild(plainRange(last, 0, ec, eo)._copy(extract))
+          }
+        }
+        if (after) { this._sc = this._ec = after[0]; this._so = this._eo = after[1] }
+        return frag
+      }
+      extractContents() { return this._copy(true) }
+      cloneContents() { return this._copy(false) }
+      insertNode(node) {
+        need(arguments.length, 1, 'Range.insertNode'); wantNode(node, 'Range.insertNode')
+        const sc = this._sc, t = sc.nodeType
+        if (t === 7 || t === 8 || (t === 3 && !sc.parentNode) || sc === node) throw bad('HierarchyRequestError', "a node can't be inserted there")
+        let ref = t === 3 ? sc : sc.childNodes[this._so] || null
+        const parent = ref ? ref.parentNode : sc
+        // What insertBefore would refuse, checked before the text is split.
+        const nt = node.nodeType
+        if (isCD(parent.nodeType) || parent.nodeType === 10 || inclusiveAncestor(node, parent) || nt === 9 || (nt === 10 && parent.nodeType !== 9) || (nt === 3 && parent.nodeType === 9))
+          throw bad('HierarchyRequestError', "the node can't be inserted there")
+        if (t === 3) ref = sc.splitText(this._so)
+        if (node === ref) ref = ref.nextSibling
+        if (node.parentNode) node.parentNode.removeChild(node)
+        let at = ref ? indexOf(ref) : nodeLength(parent)
+        at += nt === 11 ? nodeLength(node) : 1
+        parent.insertBefore(node, ref)
+        if (this.collapsed) { this._ec = parent; this._eo = at }
+      }
+      surroundContents(np) {
+        need(arguments.length, 1, 'Range.surroundContents'); wantNode(np, 'Range.surroundContents')
+        const common = this.commonAncestorContainer
+        for (let n = this._sc; n !== common; n = n.parentNode) if (n.nodeType !== 3 && !inclusiveAncestor(n, this._ec)) throw bad('InvalidStateError', 'the range partly selects a non-text node')
+        for (let n = this._ec; n !== common; n = n.parentNode) if (n.nodeType !== 3 && !inclusiveAncestor(n, this._sc)) throw bad('InvalidStateError', 'the range partly selects a non-text node')
+        if (np.nodeType === 9 || np.nodeType === 10 || np.nodeType === 11) throw bad('InvalidNodeTypeError', "that node can't surround a range")
+        const frag = this.extractContents()
+        while (np.firstChild) np.removeChild(np.firstChild)
+        this.insertNode(np)
+        np.appendChild(frag)
+        this.selectNode(np)
+      }
+      createContextualFragment(html) {
+        const doc = this._sc.nodeType === 9 ? this._sc : this._sc.ownerDocument
+        const t = doc.createElement('template'); t.innerHTML = String(html)
+        const f = doc.createDocumentFragment()
+        const c = t.content || t
+        while (c.firstChild) f.appendChild(c.firstChild)
+        return f
+      }
+      getClientRects() {
+        const rects = [], seen = new Set()
+        const add = el => { if (!el || seen.has(el)) return; seen.add(el); const r = el.getBoundingClientRect(); if (r.width || r.height) rects.push(r) }
+        const { _sc: sc, _ec: ec } = this
+        if (sc.nodeType === 3) add(sc.parentElement)
+        const root = this.commonAncestorContainer
+        for (let n = root.firstChild; n;) {
+          if (contained(n, this)) { if (n.nodeType === 1) add(n); else if (n.nodeType === 3) add(n.parentElement); n = skipIn(n, root) } else n = nextIn(n, root)
+        }
+        if (ec.nodeType === 3) add(ec.parentElement)
+        return rects
+      }
+      getBoundingClientRect() {
+        const rs = this.getClientRects()
+        if (!rs.length) {
+          const el = this._sc.nodeType === 1 ? this._sc : this._sc.parentElement
+          const r = el ? el.getBoundingClientRect() : null
+          return new DOMRect(r ? r.x : 0, r ? r.y : 0, 0, r ? r.height : 0)
+        }
+        let l = Infinity, t = Infinity, rr = -Infinity, b = -Infinity
+        for (const r of rs) { l = Math.min(l, r.left); t = Math.min(t, r.top); rr = Math.max(rr, r.right); b = Math.max(b, r.bottom) }
+        return new DOMRect(l, t, rr - l, b - t)
+      }
+    }
+    for (const [k, v] of [['START_TO_START', 0], ['START_TO_END', 1], ['END_TO_END', 2], ['END_TO_START', 3]]) {
+      Object.defineProperty(Range, k, { value: v, enumerable: true })
+      Object.defineProperty(Range.prototype, k, { value: v, enumerable: true })
+    }
+    g.AbstractRange = AbstractRange
+    g.StaticRange = StaticRange
+    g.Range = Range
+    Document.prototype.createRange = function () { const r = new Range(); r._sc = r._ec = this; return r }
+
+    // One selection per window: a range (or none), and which end is the focus.
+    class Selection {
+      constructor() { this._r = null; this._back = false }
+      get rangeCount() { return this._r ? 1 : 0 }
+      get anchorNode() { return this._r ? (this._back ? this._r._ec : this._r._sc) : null }
+      get anchorOffset() { return this._r ? (this._back ? this._r._eo : this._r._so) : 0 }
+      get focusNode() { return this._r ? (this._back ? this._r._sc : this._r._ec) : null }
+      get focusOffset() { return this._r ? (this._back ? this._r._so : this._r._eo) : 0 }
+      get isCollapsed() { return !this._r || this._r.collapsed }
+      get type() { return !this._r ? 'None' : this._r.collapsed ? 'Caret' : 'Range' }
+      get direction() { return !this._r || this._r.collapsed ? 'none' : this._back ? 'backward' : 'forward' }
+      getRangeAt(i) { if (!this._r || i >>> 0 !== 0) throw bad('IndexSizeError', 'no range at ' + i); return this._r }
+      addRange(r) { need(arguments.length, 1, 'Selection.addRange'); if (!this._r && r instanceof Range && rootOf(r._sc) === rootOf(document)) { this._r = r; this._back = false } }
+      removeRange(r) { if (r === this._r) this._r = null; else throw bad('NotFoundError', "the range isn't in this selection") }
+      removeAllRanges() { this._r = null }
+      empty() { this._r = null }
+      collapse(node, off = 0) {
+        if (node === null) { this._r = null; return }
+        const r = document.createRange(); r.setStart(node, off); this._r = r; this._back = false
+      }
+      setPosition(node, off = 0) { this.collapse(node, off) }
+      collapseToStart() { if (!this._r) throw bad('InvalidStateError', 'nothing is selected'); const r = this._r.cloneRange(); r.collapse(true); this._r = r }
+      collapseToEnd() { if (!this._r) throw bad('InvalidStateError', 'nothing is selected'); const r = this._r.cloneRange(); r.collapse(false); this._r = r }
+      extend(node, off = 0) {
+        if (!this._r) throw bad('InvalidStateError', 'nothing is selected')
+        const a = this.anchorNode, ao = this.anchorOffset, r = document.createRange()
+        if (rootOf(node) === rootOf(a) && cmpPoint(node, off, a, ao) < 0) { r.setStart(node, off); r.setEnd(a, ao); this._back = true }
+        else { r.setStart(a, ao); r.setEnd(node, off); this._back = false }
+        this._r = r
+      }
+      setBaseAndExtent(a, ao, f, fo) { this.collapse(a, ao); this.extend(f, fo) }
+      selectAllChildren(node) { const r = document.createRange(); r.selectNodeContents(node); this._r = r; this._back = false }
+      deleteFromDocument() { if (this._r) this._r.deleteContents() }
+      containsNode(node, partly = false) {
+        if (!this._r || rootOf(node) !== rootOf(this._r._sc)) return false
+        if (partly) return this._r.intersectsNode(node)
+        const p = node.parentNode
+        if (!p) return false
+        const i = indexOf(node)
+        return cmpPoint(p, i, this._r._sc, this._r._so) >= 0 && cmpPoint(p, i + 1, this._r._ec, this._r._eo) <= 0
+      }
+      getComposedRanges() { return this._r ? [new StaticRange({ startContainer: this._r._sc, startOffset: this._r._so, endContainer: this._r._ec, endOffset: this._r._eo })] : [] }
+      modify() {}
+      toString() { return this._r ? this._r.toString() : '' }
+    }
+    g.Selection = Selection
+    const selection = new Selection()
+    g.getSelection = () => selection
+
+    // ------------------------------------------------ mutation observers
+    class MutationRecord {
+      constructor() { throw new TypeError('Illegal constructor') }
+    }
+    // addedNodes and removedNodes: arrays that also answer item().
+    const ListProto = Object.create(Array.prototype, { item: { value(i) { return this[i >>> 0] ?? null } } })
+    const noNodes = Object.setPrototypeOf([], ListProto)
+    function Rec(type, target, name, old, added, removed, prev, next) {
+      this.type = type; this.target = target
+      this.addedNodes = added ? Object.setPrototypeOf(added, ListProto) : noNodes
+      this.removedNodes = removed ? Object.setPrototypeOf(removed, ListProto) : noNodes
+      this.previousSibling = prev || null; this.nextSibling = next || null
+      this.attributeName = name ?? null; this.attributeNamespace = null; this.oldValue = old ?? null
+    }
+    Rec.prototype = MutationRecord.prototype
+    const notify = () => {
+      scheduled = false
+      const list = [...pending]
+      pending.clear()
+      for (const obs of list) {
+        const recs = obs.takeRecords()
+        if (recs.length) try { obs._cb.call(obs, recs, obs) } catch (e) { reportError(e) }
+      }
+    }
+    // `watchers`: the observed nodes at or above target (the tree works them out).
+    const queueRecord = (type, target, watchers, name, old, added, removed, prev, next) => {
+      const who = new Map()
+      for (const n of watchers) {
+        const regs = observed.get(n)
+        if (!regs) continue
+        for (const { obs, o } of regs) {
+          if (n !== target && !o.subtree) continue
+          if (type === 'attributes' && (!o.attributes || (o.attributeFilter && !o.attributeFilter.includes(name)))) continue
+          if (type === 'characterData' && !o.characterData) continue
+          if (type === 'childList' && !o.childList) continue
+          const keep = type === 'attributes' ? o.attributeOldValue : type === 'characterData' ? o.characterDataOldValue : false
+          if (!who.has(obs) || keep) who.set(obs, keep ? old : who.get(obs) ?? null)
+        }
+      }
+      for (const [obs, oldValue] of who) {
+        obs._records.push(new Rec(type, target, name, oldValue, added, removed, prev, next))
+        pending.add(obs)
+      }
+      if (pending.size && !scheduled) { scheduled = true; queueMicrotask(notify) }
+    }
+    class MutationObserver {
+      constructor(cb) {
+        if (typeof cb !== 'function') throw new TypeError("MutationObserver: parameter 1 is not of type 'MutationCallback'.")
+        Object.defineProperties(this, { _cb: { value: cb }, _records: { value: [], writable: true }, _nodes: { value: [], writable: true } })
+      }
+      observe(target, opts = {}) {
+        need(arguments.length, 1, 'MutationObserver.observe'); wantNode(target, 'MutationObserver.observe')
+        let { childList = false, attributes, characterData, subtree = false, attributeOldValue, characterDataOldValue, attributeFilter } = opts || {}
+        if ((attributeOldValue !== undefined || attributeFilter !== undefined) && attributes === undefined) attributes = true
+        if (characterDataOldValue !== undefined && characterData === undefined) characterData = true
+        if (!childList && !attributes && !characterData) throw new TypeError('MutationObserver.observe: one of childList, attributes or characterData must be true')
+        if (attributeOldValue && !attributes) throw new TypeError("MutationObserver.observe: attributeOldValue needs attributes")
+        if (attributeFilter !== undefined && !attributes) throw new TypeError('MutationObserver.observe: attributeFilter needs attributes')
+        if (characterDataOldValue && !characterData) throw new TypeError('MutationObserver.observe: characterDataOldValue needs characterData')
+        const o = { childList: !!childList, attributes: !!attributes, characterData: !!characterData, subtree: !!subtree, attributeOldValue: !!attributeOldValue, characterDataOldValue: !!characterDataOldValue, attributeFilter: attributeFilter === undefined ? null : Array.from(attributeFilter, String) }
+        let regs = observed.get(target)
+        if (!regs) observed.set(target, regs = [])
+        const have = regs.find(r => r.obs === this)
+        if (have) have.o = o
+        else { regs.push({ obs: this, o }); this._nodes.push(target); __watchDom(target, 1) }
+      }
+      disconnect() {
+        for (const n of this._nodes) {
+          const regs = observed.get(n)
+          if (!regs) continue
+          const keep = regs.filter(r => r.obs !== this)
+          if (keep.length < regs.length) __watchDom(n, -1)
+          if (keep.length) observed.set(n, keep); else observed.delete(n)
+        }
+        this._nodes = []
+        this._records = []
+      }
+      takeRecords() { const r = this._records; this._records = []; return r }
+    }
+    g.MutationObserver = MutationObserver
+    g.MutationRecord = MutationRecord
+    g.WebKitMutationObserver = MutationObserver
+
+    // The tree changed: move live ranges' boundaries, and tell observers
+    // (one childList record per operation, as the DOM groups them).
+    g.__domChanged = list => {
+      const out = [], accs = new Map()
+      for (const r of list) {
+        const k = r[0]
+        if (k === 0 || k === 1) {
+          const [, parent, node, index, prev, next, w] = r
+          // While the removed node is still out of a connected parent's tree, a
+          // boundary that's connected can't be inside it (a moved node is back in, though).
+          const conn = k === 0 && liveRanges.size && parent.isConnected && !node.isConnected
+          const inside = n => (!conn || !n.isConnected) && inclusiveAncestor(node, n)
+          for (const R of liveRanges) {
+            if (k === 0) {
+              if (inside(R._sc)) { R._sc = parent; R._so = index } else if (R._sc === parent && R._so > index) R._so--
+              if (inside(R._ec)) { R._ec = parent; R._eo = index } else if (R._ec === parent && R._eo > index) R._eo--
+            } else {
+              if (R._sc === parent && R._so > index) R._so++
+              if (R._ec === parent && R._eo > index) R._eo++
+            }
+          }
+          if (!w.length) continue
+          const a = accs.get(parent)
+          const merges = a && (k === 0
+            ? (a.added.length === 0 && index === a.at) || (a.removed.length === 0 && index === a.last + 1)
+            : (a.added.length === 0 && index === a.at) || (a.added.length > 0 && index === a.last + 1))
+          if (merges) {
+            if (k === 0) { a.removed.push(node); a.next = next }
+            else { if (a.removed.length === 0 || a.added.length > 0 && a.lastKind === 1) a.next = next; a.added.push(node); a.last = index }
+            a.lastKind = k
+          } else {
+            const acc = { kind: 'childList', parent, w, added: k ? [node] : [], removed: k ? [] : [node], prev, next, at: index, last: index, lastKind: k }
+            accs.set(parent, acc)
+            out.push(acc)
+          }
+        } else if (k === 3) {
+          const [, node, old, w] = r
+          const h = cdHint && cdHint[0] === node ? cdHint : [node, 0, old.length, node.data.length]
+          const [, off, count, len] = h
+          for (const R of liveRanges) {
+            if (R._sc === node && R._so > off) R._so = R._so <= off + count ? off : R._so + len - count
+            if (R._ec === node && R._eo > off) R._eo = R._eo <= off + count ? off : R._eo + len - count
+          }
+          if (w.length) out.push({ kind: 'characterData', node, old, w })
+        } else if (r[4].length) out.push({ kind: 'attributes', node: r[1], name: r[2], old: r[3], w: r[4] })
+      }
+      for (const o of out) {
+        if (o.kind === 'childList') queueRecord('childList', o.parent, o.w, null, null, o.added, o.removed, o.prev, o.next)
+        else queueRecord(o.kind, o.node, o.w, o.name, o.old)
+      }
+    }
+
+    // Character data edits say exactly what they replaced, so ranges inside move as the DOM says.
+    const CD = g.CharacterData.prototype
+    const replaceData = CD.replaceData
+    CD.replaceData = function (off, count, data) {
+      need(arguments.length, 3, 'CharacterData.replaceData')
+      const len = this.data.length
+      off = off >>> 0
+      if (off > len) throw bad('IndexSizeError', 'offset ' + off + ' is past the end')
+      count = Math.min(count >>> 0, len - off)
+      const prev = cdHint
+      cdHint = [this, off, count, String(data).length]
+      try { replaceData.call(this, off, count, data) } finally { cdHint = prev }
+    }
+    CD.appendData = function (data) { need(arguments.length, 1, 'CharacterData.appendData'); this.replaceData(this.data.length, 0, String(data)) }
+    g.Text.prototype.splitText = function (off) {
+      need(arguments.length, 1, 'Text.splitText')
+      off = off >>> 0
+      const d = this.data
+      if (off > d.length) throw bad('IndexSizeError', 'offset ' + off + ' is past the end')
+      const rest = (this.ownerDocument || document).createTextNode(d.slice(off))
+      const parent = this.parentNode
+      if (parent) {
+        parent.insertBefore(rest, this.nextSibling)
+        const i = indexOf(this)
+        for (const R of liveRanges) {
+          if (R._sc === this && R._so > off) { R._sc = rest; R._so -= off }
+          if (R._ec === this && R._eo > off) { R._ec = rest; R._eo -= off }
+          if (R._sc === parent && R._so === i + 1) R._so++
+          if (R._ec === parent && R._eo === i + 1) R._eo++
+        }
+      }
+      this.replaceData(off, d.length - off, '')
+      return rest
+    }
   }
 
   // ---------------------------------------------------------------- reflected attributes

@@ -518,3 +518,27 @@ fn style_sheets_scope_and_unbound_listeners() {
     let mut rt = page(html);
     assert_eq!(console(&mut rt), "1 true CSSStyleRule,CSSMediaRule rgb(0, 128, 0) 2 1 1 1 click https://example.com/x false");
 }
+
+#[test]
+fn live_ranges_and_mutation_observers() {
+    let mut rt = page(r#"<div id=a>hello <b>bold</b> world</div><p id=p>x</p><script>
+        const a = document.getElementById('a'), t = a.firstChild
+        const r = document.createRange(); r.setStart(t, 2); r.setEnd(a.lastChild, 3)
+        console.log(r.toString(), r.commonAncestorContainer.id)
+        t.insertData(0, 'XX'); console.log(r.startOffset)
+        const all = document.createRange(); all.selectNodeContents(a)
+        a.insertBefore(document.createElement('i'), a.firstChild); console.log(all.endOffset)
+        console.log(r.extractContents().textContent, a.innerHTML, r.collapsed)
+        const mo = new MutationObserver(rs => console.log(rs.map(x => x.type + ':' + x.addedNodes.length + '/' + x.removedNodes.length + ':' + x.oldValue).join(' ')))
+        const p = document.getElementById('p')
+        mo.observe(document.body, { subtree: true, childList: true, attributes: true, attributeOldValue: true, characterData: true, characterDataOldValue: true })
+        p.setAttribute('class', 'k'); p.firstChild.data = 'y'; p.innerHTML = '<i>1</i><i>2</i>'
+        const s = document.createTextNode('abcdef'); p.appendChild(s)
+        const r3 = document.createRange(); r3.setStart(s, 4); r3.setEnd(s, 5); s.splitText(2)
+        console.log(r3.startContainer.data, r3.startOffset, r3.toString())
+    </script>"#);
+    assert_eq!(
+        console(&mut rt),
+        "llo bold wo a\n4\n4\nllo bold wo <i></i>XXherld true\ncdef 2 e\nattributes:0/0:null characterData:0/0:x childList:2/1:null childList:1/0:null childList:1/0:null characterData:0/0:abcdef"
+    );
+}
