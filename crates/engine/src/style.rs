@@ -2450,6 +2450,7 @@ fn matches_compound(dom: &Dom, id: NodeId, c: &Compound) -> bool {
             Pseudo::Disabled => attr(attrs, "disabled").is_some(),
             Pseudo::Enabled => attr(attrs, "disabled").is_none(),
             Pseudo::Root => tag == "html",
+            Pseudo::Scope => QUERY_SCOPE.with(|s| s.get()).map_or(tag == "html", |s| s == id),
             Pseudo::Link => (tag == "a" || tag == "area") && attr(attrs, "href").is_some(),
             Pseudo::FirstChild => element_siblings(dom, id).first() == Some(&id),
             Pseudo::LastChild => element_siblings(dom, id).last() == Some(&id),
@@ -2534,6 +2535,19 @@ fn bucket(sel: &css::Selector) -> (u8, String) {
     } else {
         (3, String::new())
     }
+}
+
+thread_local! {
+    /// The element a script's query runs on, which `:scope` matches.
+    pub static QUERY_SCOPE: std::cell::Cell<Option<NodeId>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with `:scope` meaning `scope`.
+pub fn with_scope<T>(scope: Option<NodeId>, f: impl FnOnce() -> T) -> T {
+    let prev = QUERY_SCOPE.with(|s| s.replace(scope));
+    let r = f();
+    QUERY_SCOPE.with(|s| s.set(prev));
+    r
 }
 
 /// (origin, order, rule, selector)

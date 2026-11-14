@@ -85,6 +85,8 @@ pub enum Pseudo {
     LastChild,
     OnlyChild,
     Root,
+    /// `:scope`: the element a query runs on (`:root` in style sheets).
+    Scope,
     /// `:link` and `:any-link`: an `<a>` or `<area>` with an href.
     Link,
     /// `:empty`: no element children and no text.
@@ -533,6 +535,7 @@ pub fn parse_selector(text: &str) -> Option<Selector> {
                     ("first-of-type", None) => Pseudo::Nth(0, 1, false, true),
                     ("last-of-type", None) => Pseudo::Nth(0, 1, true, true),
                     ("root", None) => Pseudo::Root,
+                    ("scope", None) => Pseudo::Scope,
                     ("link" | "any-link", None) => Pseudo::Link,
                     ("empty", None) => Pseudo::Empty,
                     ("nth-child", Some(a)) => {

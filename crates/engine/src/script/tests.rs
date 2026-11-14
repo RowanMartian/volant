@@ -501,3 +501,20 @@ fn node_types_documents_and_dom_exceptions() {
         "html 10 8 marker | 3 ab a<!-- x -->b | llo he true | HierarchyRequestError 3 true | HierarchyRequestError | SyntaxError 12 | T true true HTML | true | hi true | true"
     );
 }
+
+#[test]
+fn style_sheets_scope_and_unbound_listeners() {
+    let html = r#"<html><head><style id=s>p { color: red } @media (min-width: 1px) { .a { margin: 0 } }</style></head><body><p id=p>x</p><ul id=u><li>1</li><li class=k>2</li></ul><a id=a href="/x">l</a><script>
+        const sh = document.getElementById('s').sheet;
+        const kinds = [...sh.cssRules].map(r => r.constructor.name).join();
+        sh.insertRule('#p { color: rgb(0, 128, 0) }', sh.cssRules.length);
+        const u = document.getElementById('u');
+        const on = document.addEventListener; let hit = 0; on('ping', () => hit++); window.dispatchEvent(new Event('ping'));
+        let seen; document.body.addEventListener('click', () => { seen = window.event && window.event.type }); document.body.click();
+        console.log(document.styleSheets.length, sh === document.styleSheets[0], kinds, getComputedStyle(document.getElementById('p')).color,
+            u.querySelectorAll(':scope > li').length, u.querySelectorAll(':scope > :not(.k)').length, document.querySelectorAll(':scope > body').length,
+            hit, seen, String(document.getElementById('a')), document.body.hasAttributes());
+    </script></body></html>"#;
+    let mut rt = page(html);
+    assert_eq!(console(&mut rt), "1 true CSSStyleRule,CSSMediaRule rgb(0, 128, 0) 2 1 1 1 click https://example.com/x false");
+}

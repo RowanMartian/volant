@@ -1088,7 +1088,7 @@ fn selector_list(text: &str) -> Option<Vec<css::Selector>> {
         }
     }
     parts.push(&text[start..]);
-    parts.iter().map(|p| css::parse_selector(p.trim().trim_start_matches(":scope").trim())).collect()
+    parts.iter().map(|p| css::parse_selector(p.trim())).collect()
 }
 
 /// Pseudo-classes and pseudo-elements CSS defines: a selector naming one
@@ -1755,6 +1755,20 @@ fn call_listeners(i: &mut Interp, st: &S, node: NodeId, ev: &Value, phase: u8) {
 
 /// Dispatches `ev` at `target` (capture, target, bubble). Returns false if it was cancelled.
 pub fn dispatch(i: &mut Interp, st: &S, target: NodeId, ev: &Value) -> bool {
+    // `window.event` is the event being dispatched, while its listeners run
+    // (kept hidden; the prelude's `event` accessor reads it until a page replaces it).
+    let prev = i.global_obj.borrow().get_own("\0event").cloned();
+    i.global_obj.borrow_mut().set_hidden("\0event", ev.clone());
+    let r = dispatch_path(i, st, target, ev);
+    let prev = match prev {
+        Some(Slot::Data(v)) => v,
+        _ => Value::Undefined,
+    };
+    i.global_obj.borrow_mut().set_hidden("\0event", prev);
+    r
+}
+
+fn dispatch_path(i: &mut Interp, st: &S, target: NodeId, ev: &Value) -> bool {
     let mut path = vec![target];
     if target != WINDOW {
         let dom_path = {
@@ -2711,9 +2725,22 @@ fn install(i: &mut Interp, st: &S) {
         }
         Ok(Value::Undefined)
     }
-    method(i, st, &node, "addEventListener", |i, st, id, a| add_listener(i, st, id, &a));
-    method(i, st, &node, "removeEventListener", |i, st, id, a| remove_listener(i, st, id, &a));
-    method(i, st, &node, "dispatchEvent", |i, st, id, a| {
+    // Called without a `this` (`const on = document.addEventListener; on(...)`),
+    // or on the window, these act on the window, as WebIDL says.
+    fn target_method(i: &Interp, st: &S, o: &Obj, name: &str, f: impl Fn(&mut Interp, &S, NodeId, Vec<Value>) -> Res<Value> + 'static) {
+        let st = st.clone();
+        def(i, o, name, move |i, t, a| {
+            let id = match &t {
+                Value::Undefined | Value::Null => WINDOW,
+                Value::Obj(o) if Rc::ptr_eq(o, &i.global_obj) => WINDOW,
+                _ => this_node(i, &t)?,
+            };
+            f(i, &st, id, a)
+        });
+    }
+    target_method(i, st, &node, "addEventListener", |i, st, id, a| add_listener(i, st, id, &a));
+    target_method(i, st, &node, "removeEventListener", |i, st, id, a| remove_listener(i, st, id, &a));
+    target_method(i, st, &node, "dispatchEvent", |i, st, id, a| {
         let ev = arg(&a, 0);
         let _ = i.set(&ev, "isTrusted", Value::Bool(false));
         Ok(Value::Bool(dispatch(i, st, id, &ev)))
@@ -3155,11 +3182,15 @@ fn install(i: &mut Interp, st: &S) {
         let found: Vec<NodeId> = {
             let s = st.borrow();
             let d = descendants(&s.dom, scope);
-            if all {
-                d.into_iter().filter(|&n| matches_any(&s.dom, n, &sels)).collect()
-            } else {
-                d.into_iter().find(|&n| matches_any(&s.dom, n, &sels)).into_iter().collect()
-            }
+            // On a document (or fragment) `:scope` is the root element.
+            let scope = Some(scope).filter(|&n| is_element(&s.dom, n));
+            style::with_scope(scope, || {
+                if all {
+                    d.into_iter().filter(|&n| matches_any(&s.dom, n, &sels)).collect()
+                } else {
+                    d.into_iter().find(|&n| matches_any(&s.dom, n, &sels)).into_iter().collect()
+                }
+            })
         };
         Ok(if all { wrap_list(i, st, found) } else { wrap_opt(i, st, found.first().copied()) })
     }
@@ -3653,7 +3684,7 @@ fn install(i: &mut Interp, st: &S) {
         }
         flush(i, st);
         let s = st.borrow();
-        Ok(Value::Bool(selector_list(&text).map(|sels| matches_any(&s.dom, id, &sels)).unwrap_or(false)))
+        Ok(Value::Bool(selector_list(&text).map(|sels| style::with_scope(Some(id), || matches_any(&s.dom, id, &sels))).unwrap_or(false)))
     });
     method(i, st, &element, "closest", |i, st, id, a| {
         if a.is_empty() {
@@ -3666,7 +3697,7 @@ fn install(i: &mut Interp, st: &S) {
         flush(i, st);
         let found = {
             let s = st.borrow();
-            selector_list(&text).and_then(|sels| closest(&s.dom, id, |d, n| matches_any(d, n, &sels)))
+            selector_list(&text).and_then(|sels| style::with_scope(Some(id), || closest(&s.dom, id, |d, n| matches_any(d, n, &sels))))
         };
         Ok(wrap_opt(i, st, found))
     });

@@ -357,7 +357,9 @@
   g.top = g.parent = g.frames = g
   g.opener = null
   g.frameElement = null
-  g.name = ''
+  // window.event is [Replaceable]: setting it makes a plain property dispatch leaves alone.
+  Object.defineProperty(g, 'event', { configurable: true, get: () => g['\0event'], set(v) { Object.defineProperty(g, 'event', { value: v, writable: true, configurable: true, enumerable: true }) } })
+  { let name = ''; Object.defineProperty(g, 'name', { configurable: true, enumerable: true, get: () => name, set: v => { name = String(v) } }) }
   g.length = 0
   g.closed = false
   g.isSecureContext = true
@@ -1950,7 +1952,6 @@
   Math.sinh = Math.sinh || (x => (Math.exp(x) - Math.exp(-x)) / 2)
   Math.cosh = Math.cosh || (x => (Math.exp(x) + Math.exp(-x)) / 2)
   Math.tanh = Math.tanh || (x => { const a = Math.exp(x), b = Math.exp(-x); return (a - b) / (a + b) })
-  g.BigInt = g.BigInt || (n => Math.trunc(Number(n)))
   g.Proxy = g.Proxy || function (target) { return target }
   g.SharedArrayBuffer = undefined
 
@@ -2997,32 +2998,159 @@
     close() { const l = channels[this.name] || []; const k = l.indexOf(this); if (k >= 0) l.splice(k, 1) }
   }
 
-  // ------------------------------------------------- constructable style sheets
-  class CSSRule { constructor(text, sheet) { this.cssText = text; this.parentStyleSheet = sheet; const m = /^\s*([^{]+)\{/.exec(text); this.selectorText = m ? m[1].trim() : ''; this.type = 1 } }
-  g.CSSRule = CSSRule
-  g.CSSStyleRule = CSSRule
-  g.CSSStyleSheet = class CSSStyleSheet {
-    constructor(opts) { this.cssRules = []; this.disabled = !!(opts && opts.disabled); this.media = { mediaText: (opts && opts.media) || '' }; this.ownerNode = null; this.href = null }
-    get rules() { return this.cssRules }
-    insertRule(text, at) { at = at === undefined ? 0 : at; this.cssRules.splice(at, 0, new CSSRule(String(text), this)); this._sync(); return at }
-    deleteRule(at) { this.cssRules.splice(at, 1); this._sync() }
-    addRule(sel, body, at) { return this.insertRule(sel + '{' + body + '}', at === undefined ? this.cssRules.length : at) }
-    removeRule(at) { this.deleteRule(at || 0) }
-    replaceSync(text) {
-      this.cssRules = []
-      let depth = 0, start = 0
-      text = String(text)
-      for (let i = 0; i < text.length; i++) {
-        if (text[i] === '{') depth++
-        else if (text[i] === '}' && --depth === 0) { this.cssRules.push(new CSSRule(text.slice(start, i + 1).trim(), this)); start = i + 1 }
-      }
-      this._sync()
+  // ------------------------------------------------- CSSOM: style sheets and their rules
+  // A sheet's rules are read from its <style>'s text (re-read when the text
+  // changes); insertRule and deleteRule write the text back so Canard draws them.
+  const declsOf = text => {
+    const d = { length: 0 }, names = [], vals = {}, prio = {}
+    for (const part of text.split(';')) {
+      const k = part.indexOf(':')
+      if (k < 0) continue
+      const name = part.slice(0, k).trim().toLowerCase()
+      let v = part.slice(k + 1).trim()
+      if (!name) continue
+      const imp = /!\s*important$/i.test(v)
+      if (imp) v = v.replace(/!\s*important$/i, '').trim()
+      if (!(name in vals)) names.push(name)
+      vals[name] = v; prio[name] = imp ? 'important' : ''
     }
+    names.forEach((n, i) => { d[i] = n; d[n.startsWith('--') ? n : n.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = vals[n] })
+    d.length = names.length
+    d.cssText = names.map(n => n + ': ' + vals[n] + (prio[n] ? ' !important' : '') + ';').join(' ')
+    d.getPropertyValue = n => vals[String(n).toLowerCase()] || ''
+    d.getPropertyPriority = n => prio[String(n).toLowerCase()] || ''
+    d.item = i => names[i] || ''
+    return d
+  }
+  const ruleBody = t => { const a = t.indexOf('{'), b = t.lastIndexOf('}'); return a < 0 ? '' : t.slice(a + 1, b < a ? t.length : b) }
+  class CSSRule {
+    constructor(text, sheet, parent) { this.cssText = text; this.parentStyleSheet = sheet || null; this.parentRule = parent || null }
+  }
+  Object.assign(CSSRule, { STYLE_RULE: 1, CHARSET_RULE: 2, IMPORT_RULE: 3, MEDIA_RULE: 4, FONT_FACE_RULE: 5, PAGE_RULE: 6, KEYFRAMES_RULE: 7, KEYFRAME_RULE: 8, NAMESPACE_RULE: 10, SUPPORTS_RULE: 12 })
+  class CSSStyleRule extends CSSRule {
+    constructor(text, sheet, parent) { super(text, sheet, parent); this.type = 1; this.selectorText = text.slice(0, text.indexOf('{')).trim() }
+    get style() { const d = declsOf(ruleBody(this.cssText)); Object.defineProperty(this, 'style', { value: d, configurable: true }); return d }
+  }
+  class CSSGroupingRule extends CSSRule {
+    constructor(text, sheet, parent) { super(text, sheet, parent); this.cssRules = parseRules(ruleBody(text), sheet, this) }
+    insertRule(text, at) { const r = parseRules(String(text), this.parentStyleSheet, this)[0]; if (!r) throw new DOMException('not a rule', 'SyntaxError'); this.cssRules.splice(at || 0, 0, r); return at || 0 }
+    deleteRule(at) { this.cssRules.splice(at, 1) }
+  }
+  const condition = t => t.slice(t.indexOf(' '), t.indexOf('{')).trim()
+  class CSSMediaRule extends CSSGroupingRule { constructor(t, s, p) { super(t, s, p); this.type = 4; this.conditionText = condition(t); this.media = { mediaText: this.conditionText, length: 1 } } }
+  class CSSSupportsRule extends CSSGroupingRule { constructor(t, s, p) { super(t, s, p); this.type = 12; this.conditionText = condition(t) } }
+  class CSSFontFaceRule extends CSSRule { constructor(t, s, p) { super(t, s, p); this.type = 5; this.style = declsOf(ruleBody(t)) } }
+  class CSSKeyframeRule extends CSSRule { constructor(t, s, p) { super(t, s, p); this.type = 8; this.keyText = t.slice(0, t.indexOf('{')).trim(); this.style = declsOf(ruleBody(t)) } }
+  class CSSKeyframesRule extends CSSRule {
+    constructor(t, s, p) { super(t, s, p); this.type = 7; this.name = condition(t); this.cssRules = parseRules(ruleBody(t), s, this, true) }
+  }
+  class CSSImportRule extends CSSRule {
+    constructor(t, s, p) { super(t, s, p); this.type = 3; const m = /url\(\s*['"]?([^'")]*)|['"]([^'"]*)/.exec(t); this.href = m ? m[1] || m[2] || '' : ''; this.media = { mediaText: '' }; this.styleSheet = null }
+  }
+  class CSSNamespaceRule extends CSSRule { constructor(t, s, p) { super(t, s, p); this.type = 10 } }
+  const makeRule = (t, sheet, parent, frames) => {
+    if (frames) return new CSSKeyframeRule(t, sheet, parent)
+    const at = /^@(-[a-z]+-)?([a-z-]+)/i.exec(t)
+    if (!at) return new CSSStyleRule(t, sheet, parent)
+    switch (at[2].toLowerCase()) {
+      case 'media': return new CSSMediaRule(t, sheet, parent)
+      case 'supports': return new CSSSupportsRule(t, sheet, parent)
+      case 'font-face': return new CSSFontFaceRule(t, sheet, parent)
+      case 'keyframes': return new CSSKeyframesRule(t, sheet, parent)
+      case 'import': return new CSSImportRule(t, sheet, parent)
+      case 'namespace': return new CSSNamespaceRule(t, sheet, parent)
+      default: { const r = new CSSRule(t, sheet, parent); r.type = 0; return r }
+    }
+  }
+  // Splits CSS text into top-level rules (strings and comments respected).
+  function parseRules(text, sheet, parent, frames) {
+    const out = []
+    let depth = 0, start = 0, q = null
+    const push = end => { const t = text.slice(start, end).trim(); start = end; if (t && t !== ';') out.push(makeRule(t, sheet, parent, frames)) }
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i]
+      if (q) { if (c === '\\') i++; else if (c === q) q = null; continue }
+      if (c === '"' || c === "'") q = c
+      else if (c === '/' && text[i + 1] === '*') {
+        const e = text.indexOf('*/', i + 2), end = e < 0 ? text.length : e + 2
+        if (depth === 0 && !text.slice(start, i).trim()) start = end
+        i = end - 1
+      } else if (c === '{') depth++
+      else if (c === '}' && depth > 0) { if (--depth === 0) push(i + 1) }
+      else if (c === ';' && depth === 0) push(i + 1)
+    }
+    if (depth > 0) { const t = text.slice(start).trim(); if (t) out.push(makeRule(t + '}'.repeat(depth), sheet, parent, frames)) }
+    return out
+  }
+  g.CSSRule = CSSRule
+  Object.assign(g, { CSSStyleRule, CSSGroupingRule, CSSConditionRule: CSSGroupingRule, CSSMediaRule, CSSSupportsRule, CSSFontFaceRule, CSSKeyframeRule, CSSKeyframesRule, CSSImportRule, CSSNamespaceRule })
+  g.CSSStyleSheet = class CSSStyleSheet {
+    constructor(opts) { this._rules = []; this._owner = null; this._text = null; this._disabled = !!(opts && opts.disabled); this.media = { mediaText: (opts && opts.media) || '' }; this.href = null; this.title = null; this.type = 'text/css'; this.parentStyleSheet = null; this.ownerRule = null }
+    get ownerNode() { return this._owner }
+    get disabled() { return this._owner && this._owner.localName === 'style' ? this._owner.hasAttribute('disabled') : this._disabled }
+    set disabled(v) { if (this._owner && this._owner.localName === 'style') { if (v) this._owner.setAttribute('disabled', ''); else this._owner.removeAttribute('disabled') } else { this._disabled = !!v; this._sync() } }
+    get cssRules() {
+      const o = this._owner
+      if (o && o.localName === 'style') { const t = o.textContent; if (t !== this._text) { this._text = t; this._rules = parseRules(t, this) } }
+      return this._rules
+    }
+    get rules() { return this.cssRules }
+    insertRule(text, at) {
+      const rules = this.cssRules
+      at = at === undefined ? 0 : at >>> 0
+      if (at > rules.length) throw new DOMException('index out of range', 'IndexSizeError')
+      const r = parseRules(String(text), this)
+      if (r.length !== 1) throw new DOMException('not a single rule: ' + text, 'SyntaxError')
+      rules.splice(at, 0, r[0])
+      const o = this._owner
+      if (o && o.localName === 'style' && at === rules.length - 1) { const add = '\n' + r[0].cssText; o.appendChild(document.createTextNode(add)); this._text += add }
+      else this._sync()
+      return at
+    }
+    deleteRule(at) { const rules = this.cssRules; if (at >= rules.length) throw new DOMException('index out of range', 'IndexSizeError'); rules.splice(at, 1); this._sync() }
+    addRule(sel, body, at) { this.insertRule(sel + '{' + body + '}', at === undefined ? this.cssRules.length : at); return -1 }
+    removeRule(at) { this.deleteRule(at || 0) }
+    replaceSync(text) { this._rules = parseRules(String(text), this); this._sync() }
     replace(text) { this.replaceSync(text); return Promise.resolve(this) }
-    // An adopted sheet is shown through a <style> Volant keeps for it.
-    _sync() { if (this._style) this._style.textContent = this.disabled ? '' : this.cssRules.map(r => r.cssText).join('\n') }
+    // A <style>'s sheet writes its text; an adopted sheet is shown through a <style> Volant keeps for it.
+    _sync() {
+      const text = this._rules.map(r => r.cssText).join('\n')
+      if (this._owner && this._owner.localName === 'style') { this._owner.textContent = text; this._text = this._owner.textContent }
+      else if (this._style) this._style.textContent = this._disabled ? '' : text
+    }
   }
   {
+    const owned = new WeakMap(), kept = new WeakSet()
+    const sheetFor = el => {
+      if (!el.isConnected || kept.has(el)) return null
+      if (el.localName === 'link' && !/(^|\s)stylesheet(\s|$)/i.test(el.getAttribute('rel') || '')) return null
+      let s = owned.get(el)
+      if (!s) {
+        s = new CSSStyleSheet()
+        s._owner = el
+        if (el.localName === 'link') s.href = el.href
+        s.title = el.getAttribute('title')
+        s.media = { mediaText: el.getAttribute('media') || '' }
+        owned.set(el, s)
+      }
+      return s
+    }
+    for (const C of [g.HTMLStyleElement, g.HTMLLinkElement]) if (C) Object.defineProperty(C.prototype, 'sheet', { configurable: true, enumerable: true, get() { return sheetFor(this) } })
+    class StyleSheetList {
+      item(i) { return this[i] || null }
+      [Symbol.iterator]() { return Array.prototype[Symbol.iterator].call(this) }
+    }
+    g.StyleSheetList = StyleSheetList
+    Object.defineProperty(Document.prototype, 'styleSheets', {
+      configurable: true, enumerable: true,
+      get() {
+        const list = new StyleSheetList()
+        let n = 0
+        for (const el of this.querySelectorAll('style, link')) { const s = sheetFor(el); if (s) list[n++] = s }
+        Object.defineProperty(list, 'length', { value: n })
+        return list
+      },
+    })
     let adopted = []
     Object.defineProperty(Document.prototype, 'adoptedStyleSheets', {
       configurable: true,
@@ -3030,8 +3158,16 @@
       set(list) {
         for (const s of adopted) if (s._style && !list.includes(s)) { s._style.remove(); s._style = null }
         adopted = Array.from(list)
-        for (const s of adopted) if (!s._style) { s._style = document.createElement('style'); (document.head || document.documentElement).appendChild(s._style); s._sync() }
+        for (const s of adopted) show(s)
       },
+    })
+    // Shadow roots are their hosts here, so a shadow root's adopted sheets apply to the page.
+    const show = s => { if (s instanceof CSSStyleSheet && !s._style) { s._style = document.createElement('style'); kept.add(s._style); (document.head || document.documentElement).appendChild(s._style); s._sync() } }
+    const byHost = new WeakMap()
+    Object.defineProperty(Element.prototype, 'adoptedStyleSheets', {
+      configurable: true,
+      get() { let l = byHost.get(this); if (!l) byHost.set(this, l = []); return l },
+      set(list) { const l = Array.from(list); byHost.set(this, l); for (const s of l) show(s) },
     })
   }
 
@@ -3050,6 +3186,11 @@
       })
     }
   }
+
+  for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement]) if (C) {
+    Object.defineProperty(C.prototype, 'toString', { configurable: true, writable: true, value: function toString() { return this.href } })
+  }
+  if (!Element.prototype.hasAttributes) Object.defineProperty(Element.prototype, 'hasAttributes', { configurable: true, writable: true, value: function hasAttributes() { return this.attributes.length > 0 } })
 
   // ---------------------------------------------------------------- namespace lookup (DOM's "locate a namespace")
   {

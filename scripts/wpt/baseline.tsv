@@ -77,7 +77,7 @@ dom/nodes/Element-childElementCount.html	1
 dom/nodes/Element-children.html	0
 dom/nodes/Element-classlist.html	1300
 dom/nodes/Element-closest-null-selectors.html	2
-dom/nodes/Element-closest.html	25
+dom/nodes/Element-closest.html	27
 dom/nodes/Element-firstElementChild-namespace.html	1
 dom/nodes/Element-firstElementChild.html	1
 dom/nodes/Element-getElementsByClassName.html	1
@@ -85,7 +85,7 @@ dom/nodes/Element-getElementsByTagName-change-document-HTMLNess.html	0
 dom/nodes/Element-getElementsByTagName.html	14
 dom/nodes/Element-getElementsByTagNameNS.html	14
 dom/nodes/Element-hasAttribute.html	2
-dom/nodes/Element-hasAttributes.html	0
+dom/nodes/Element-hasAttributes.html	2
 dom/nodes/Element-insertAdjacentElement.html	4
 dom/nodes/Element-insertAdjacentText.html	4
 dom/nodes/Element-lastElementChild.html	1
@@ -170,7 +170,7 @@ dom/nodes/ParentNode-prepend.html	15
 dom/nodes/ParentNode-properties.html	12
 dom/nodes/ParentNode-querySelector-All-comma-selector.html	2
 dom/nodes/ParentNode-querySelector-All-multiple-not.html	0
-dom/nodes/ParentNode-querySelector-All-scope.html	2
+dom/nodes/ParentNode-querySelector-All-scope.html	8
 dom/nodes/ParentNode-querySelector-All.html	1507
 dom/nodes/ParentNode-querySelector-argument-stringification.html	3
 dom/nodes/ParentNode-querySelector-attribute-change.html	7
@@ -196,7 +196,7 @@ dom/nodes/ParentNode-querySelector-nth-of-type-complex.html	1
 dom/nodes/ParentNode-querySelector-orphan-scope.html	2
 dom/nodes/ParentNode-querySelector-parent-context.html	1
 dom/nodes/ParentNode-querySelector-scope-in-not.html	0
-dom/nodes/ParentNode-querySelector-scope.html	2
+dom/nodes/ParentNode-querySelector-scope.html	4
 dom/nodes/ParentNode-querySelector-shadowroot-nth-child.html	1
 dom/nodes/ParentNode-querySelector-svg-not-root.html	1
 dom/nodes/ParentNode-querySelector-tag-case.html	6
@@ -207,7 +207,7 @@ dom/nodes/ParentNode-querySelectorAll-nested-not-has.html	0
 dom/nodes/ParentNode-querySelectorAll-not-descendant.html	0
 dom/nodes/ParentNode-querySelectorAll-removed-elements.html	1
 dom/nodes/ParentNode-querySelectorAll-scope-change.html	0
-dom/nodes/ParentNode-querySelectorAll-scope-colon-id-class.html	1
+dom/nodes/ParentNode-querySelectorAll-scope-colon-id-class.html	2
 dom/nodes/ParentNode-querySelectorAll-svg-append.html	2
 dom/nodes/ParentNode-querySelectorAll-svg-class.html	1
 dom/nodes/ParentNode-querySelectors-exclusive.html	1
@@ -433,13 +433,13 @@ dom/events/KeyEvent-initKeyEvent.html	3
 dom/events/click-on-absolute-pseudo.html	0
 dom/events/element-click.html	3
 dom/events/event-disabled-dynamic.html	1
-dom/events/event-global-event-targets.html	0
-dom/events/event-global-extra.window.html	0
+dom/events/event-global-event-targets.html	1
+dom/events/event-global-extra.window.html	1
 dom/events/event-global-is-still-set-when-coercing-beforeunload-result.html	0
 dom/events/event-global-is-still-set-when-reporting-exception-onerror.html	0
 dom/events/event-global-replaceable.html	2
 dom/events/event-global-set-before-handleEvent-lookup.window.html	0
-dom/events/event-global.html	0
+dom/events/event-global.html	5
 dom/events/event-handler-attribute-replace-preserves-passive.html	2
 dom/events/event-listener-not-fully-active-adopted-node.html	0
 dom/events/event-listener-not-fully-active-callback.html	2
@@ -540,12 +540,12 @@ dom/events/scrolling/wheel-event-transactions-target-move.html	0
 dom/events/scrolling/wheel-event-transactions-target-removal.html	0
 dom/events/scrolling/wheel-event-transactions-target-resize.html	0
 dom/events/shadow-relatedTarget.html	0
-dom/events/webkit-animation-end-event.html	0
+dom/events/webkit-animation-end-event.html	1
 dom/events/webkit-animation-iteration-event.html	0
 dom/events/webkit-animation-start-event.html	0
-dom/events/webkit-transition-end-event.html	0
+dom/events/webkit-transition-end-event.html	1
 dom/events/window-composed-path.html	0
-dom/events/window-event-restored-after-throwing-onerror.html	0
+dom/events/window-event-restored-after-throwing-onerror.html	1
 dom/collections/HTMLCollection-as-prototype.html	0
 dom/collections/HTMLCollection-delete.html	0
 dom/collections/HTMLCollection-detached-root-gc.html	0

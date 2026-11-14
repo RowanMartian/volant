@@ -15,6 +15,7 @@ pub enum Value {
     Num(f64),
     Str(Rc<str>),
     Obj(Obj),
+    BigInt(Rc<crate::bigint::BigInt>),
 }
 
 impl std::fmt::Debug for Value {
@@ -26,6 +27,7 @@ impl std::fmt::Debug for Value {
             Value::Num(n) => write!(f, "{}", num_to_string(*n)),
             Value::Str(s) => write!(f, "{s:?}"),
             Value::Obj(_) => write!(f, "[object]"),
+            Value::BigInt(b) => write!(f, "{}n", b.to_string_radix(10)),
         }
     }
 }
@@ -366,6 +368,7 @@ pub struct Interp {
     pub string_proto: Obj,
     pub number_proto: Obj,
     pub boolean_proto: Obj,
+    pub bigint_proto: Obj,
     pub error_proto: Obj,
     pub map_proto: Obj,
     pub set_proto: Obj,
@@ -449,6 +452,7 @@ impl Interp {
             string_proto: mk(Kind::Plain),
             number_proto: mk(Kind::Plain),
             boolean_proto: mk(Kind::Plain),
+            bigint_proto: mk(Kind::Plain),
             error_proto: mk(Kind::Plain),
             map_proto: mk(Kind::Plain),
             set_proto: mk(Kind::Plain),
@@ -597,6 +601,7 @@ impl Interp {
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
             Value::Str(s) => !s.is_empty(),
             Value::Obj(_) => true,
+            Value::BigInt(b) => !b.is_zero(),
         }
     }
 
@@ -608,6 +613,7 @@ impl Interp {
             Value::Num(_) => "number",
             Value::Str(s) if s.starts_with("\0@") => "symbol",
             Value::Str(_) => "string",
+            Value::BigInt(_) => "bigint",
             Value::Obj(_) => {
                 if Self::is_callable(v) {
                     "function"
@@ -662,6 +668,40 @@ impl Interp {
         self.throw("TypeError", "can't convert object to a primitive")
     }
 
+    /// ToNumeric: a Number, or a BigInt as it is.
+    pub fn to_numeric(&mut self, v: &Value) -> Res<Value> {
+        match v {
+            Value::Num(_) | Value::BigInt(_) => Ok(v.clone()),
+            Value::Obj(_) => {
+                let p = self.to_primitive(v, true)?;
+                self.to_numeric(&p)
+            }
+            _ => Ok(Value::Num(self.to_number(v)?)),
+        }
+    }
+
+    /// ToBigInt: booleans, strings and BigInts (numbers need `BigInt(n)`).
+    pub fn to_bigint(&mut self, v: &Value) -> Res<Rc<crate::bigint::BigInt>> {
+        use crate::bigint::BigInt;
+        match v {
+            Value::BigInt(b) => Ok(b.clone()),
+            Value::Bool(t) => Ok(Rc::new(BigInt::from_u64(*t as u64))),
+            Value::Str(s) if !s.starts_with("\0@") => match BigInt::parse(s) {
+                Some(b) => Ok(Rc::new(b)),
+                None => self.throw("SyntaxError", &format!("can't convert {s} to BigInt")),
+            },
+            Value::Obj(_) => {
+                let p = self.to_primitive(v, true)?;
+                self.to_bigint(&p)
+            }
+            Value::Num(n) => self.throw("TypeError", &format!("can't convert {} to BigInt", num_to_string(*n))),
+            _ => {
+                let s = self.to_str(v).unwrap_or_else(|_| "symbol".into());
+                self.throw("TypeError", &format!("can't convert {s} to BigInt"))
+            }
+        }
+    }
+
     pub fn to_number(&mut self, v: &Value) -> Res<f64> {
         Ok(match v {
             Value::Undefined => f64::NAN,
@@ -669,6 +709,7 @@ impl Interp {
             Value::Bool(b) => *b as u8 as f64,
             Value::Num(n) => *n,
             Value::Str(s) => str_to_number(s),
+            Value::BigInt(_) => return self.throw("TypeError", "can't convert BigInt to number"),
             Value::Obj(_) => {
                 let p = self.to_primitive(v, true)?;
                 self.to_number(&p)?
@@ -684,6 +725,7 @@ impl Interp {
             Value::Num(n) => num_to_string(*n).into(),
             Value::Str(s) if s.starts_with("\0@") => format!("Symbol({})", crate::promise::symbol_description(s).unwrap_or_default()).into(),
             Value::Str(s) => s.clone(),
+            Value::BigInt(b) => b.to_string_radix(10).into(),
             Value::Obj(_) => {
                 let p = self.to_primitive(v, false)?;
                 self.to_str(&p)?
@@ -708,6 +750,7 @@ impl Interp {
             (Value::Num(x), Value::Num(y)) => x == y,
             (Value::Str(x), Value::Str(y)) => x == y,
             (Value::Obj(x), Value::Obj(y)) => Rc::ptr_eq(x, y),
+            (Value::BigInt(x), Value::BigInt(y)) => x == y,
             _ => false,
         }
     }
@@ -724,6 +767,13 @@ impl Interp {
         Ok(match (a, b) {
             (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
             (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
+            // A BigInt equals the number, string or boolean with the same mathematical value.
+            (Value::BigInt(x), Value::BigInt(y)) => x == y,
+            (Value::BigInt(x), Value::Num(n)) | (Value::Num(n), Value::BigInt(x)) => x.cmp_f64(*n) == Some(std::cmp::Ordering::Equal),
+            (Value::BigInt(x), Value::Str(s)) | (Value::Str(s), Value::BigInt(x)) if !s.starts_with("\0@") => {
+                crate::bigint::BigInt::parse(s).is_some_and(|y| **x == y)
+            }
+            (Value::BigInt(x), Value::Bool(t)) | (Value::Bool(t), Value::BigInt(x)) => **x == crate::bigint::BigInt::from_u64(*t as u64),
             (Value::Num(_), Value::Str(_)) | (Value::Str(_), Value::Num(_)) | (Value::Bool(_), _) | (_, Value::Bool(_)) => {
                 if let (Value::Obj(_), _) | (_, Value::Obj(_)) = (a, b) {
                     let (pa, pb) = (self.to_primitive(a, true)?, self.to_primitive(b, true)?);
@@ -752,6 +802,7 @@ impl Interp {
             Value::Str(_) => Some(self.string_proto.clone()),
             Value::Num(_) => Some(self.number_proto.clone()),
             Value::Bool(_) => Some(self.boolean_proto.clone()),
+            Value::BigInt(_) => Some(self.bigint_proto.clone()),
             Value::Obj(o) => Some(o.clone()),
             _ => None,
         }
@@ -795,7 +846,7 @@ impl Interp {
                             return Ok(Value::Num(t.len as f64));
                         }
                         if let Some(i) = index_of(k) {
-                            return Ok(t.get(i).map(Value::Num).unwrap_or(Value::Undefined));
+                            return Ok(t.get_value(i).unwrap_or(Value::Undefined));
                         }
                     }
                     Kind::Map(m) if k == "size" => return Ok(Value::Num(m.len() as f64)),
@@ -875,11 +926,7 @@ impl Interp {
                     if let Some(i) = index_of(k) {
                         let t = t.clone();
                         drop(b);
-                        let n = match &val {
-                            Value::Num(n) => *n,
-                            v => self.to_number(v)?,
-                        };
-                        t.put(i, n);
+                        t.put_value(self, i, &val)?;
                         return Ok(());
                     }
                 }
@@ -1068,7 +1115,7 @@ impl Interp {
             Value::Obj(o) => {
                 let kind_list = match &o.borrow().kind {
                     Kind::Array(a) => Some(a.clone()),
-                    Kind::Typed(t) if !t.data_view => Some(t.values().into_iter().map(Value::Num).collect()),
+                    Kind::Typed(t) if !t.data_view => Some(t.value_list()),
                     Kind::Set(s) => Some(s.keys().cloned().collect()),
                     Kind::Map(m) => Some(m.iter().map(|(k, v)| self.array(vec![k.clone(), v.clone()])).collect()),
                     _ => None,

@@ -530,27 +530,43 @@ impl Interp {
                             stack.last_mut().expect("an operand")
                         };
                     }
+                    // Numbers take the fast path; anything else becomes a Number or a
+                    // BigInt first (two BigInts use BigInt arithmetic).
                     macro_rules! num2 {
-                        ($a:ident, $b:ident, $body:expr) => {{
+                        ($op:expr, $a:ident, $b:ident, $body:expr) => {{
                             let rb = pop!();
                             let ra = pop!();
-                            let ($a, $b) = match (&ra, &rb) {
-                                (Value::Num(x), Value::Num(y)) => (*x, *y),
-                                _ => (tri!(self.to_number(&ra)), tri!(self.to_number(&rb))),
+                            let r = match (&ra, &rb) {
+                                (Value::Num(x), Value::Num(y)) => {
+                                    let ($a, $b) = (*x, *y);
+                                    Value::Num($body)
+                                }
+                                _ => match (tri!(self.to_numeric(&ra)), tri!(self.to_numeric(&rb))) {
+                                    (Value::Num($a), Value::Num($b)) => Value::Num($body),
+                                    (x, y) => tri!(self.big_op($op, &x, &y)),
+                                },
                             };
-                            stack.push(Value::Num($body));
+                            stack.push(r);
                         }};
                     }
                     macro_rules! int2 {
-                        ($a:ident, $b:ident, $body:expr) => {{
+                        ($op:expr, $a:ident, $b:ident, $body:expr) => {{
                             let rb = pop!();
                             let ra = pop!();
-                            let (x, y) = match (&ra, &rb) {
-                                (Value::Num(x), Value::Num(y)) => (*x, *y),
-                                _ => (tri!(self.to_number(&ra)), tri!(self.to_number(&rb))),
+                            let r = match (&ra, &rb) {
+                                (Value::Num(x), Value::Num(y)) => {
+                                    let ($a, $b) = (to_i32(*x), to_i32(*y));
+                                    Value::Num($body)
+                                }
+                                _ => match (tri!(self.to_numeric(&ra)), tri!(self.to_numeric(&rb))) {
+                                    (Value::Num(x), Value::Num(y)) => {
+                                        let ($a, $b) = (to_i32(x), to_i32(y));
+                                        Value::Num($body)
+                                    }
+                                    (x, y) => tri!(self.big_op($op, &x, &y)),
+                                },
                             };
-                            let ($a, $b) = (to_i32(x), to_i32(y));
-                            stack.push(Value::Num($body));
+                            stack.push(r);
                         }};
                     }
                     // The budget is counted at each loop's backward jump and each call
@@ -665,8 +681,10 @@ impl Interp {
                                 Value::Num(n) => *n += d as f64,
                                 v => {
                                     let v = v.clone();
-                                    let n = tri!(self.to_number(&v));
-                                    stack[slot] = Value::Num(n + d as f64);
+                                    stack[slot] = match tri!(self.to_numeric(&v)) {
+                                        Value::BigInt(b) => Value::BigInt(Rc::new(b.add(&crate::bigint::BigInt::from_i64(d as i64)).unwrap_or_default())),
+                                        n => Value::Num(tri!(self.to_number(&n)) + d as f64),
+                                    };
                                 }
                             }
                         }
@@ -859,10 +877,10 @@ impl Interp {
                             };
                             stack.push(r);
                         }
-                        Op::Sub => num2!(x, y, x - y),
-                        Op::Mul => num2!(x, y, x * y),
-                        Op::Div => num2!(x, y, x / y),
-                        Op::Mod => num2!(x, y, {
+                        Op::Sub => num2!(Op::Sub, x, y, x - y),
+                        Op::Mul => num2!(Op::Mul, x, y, x * y),
+                        Op::Div => num2!(Op::Div, x, y, x / y),
+                        Op::Mod => num2!(Op::Mod, x, y, {
                             // Integers (the usual case) skip the floating-point remainder.
                             if x.fract() == 0.0 && y.fract() == 0.0 && x.abs() < 9.0e15 && y.abs() < 9.0e15 && y != 0.0 {
                                 let r = (x as i64 % y as i64) as f64;
@@ -875,13 +893,13 @@ impl Interp {
                                 x % y
                             }
                         }),
-                        Op::Exp => num2!(x, y, x.powf(y)),
-                        Op::BitAnd => int2!(x, y, (x & y) as f64),
-                        Op::BitOr => int2!(x, y, (x | y) as f64),
-                        Op::BitXor => int2!(x, y, (x ^ y) as f64),
-                        Op::Shl => int2!(x, y, x.wrapping_shl(y as u32 & 31) as f64),
-                        Op::Shr => int2!(x, y, x.wrapping_shr(y as u32 & 31) as f64),
-                        Op::UShr => int2!(x, y, (x as u32).wrapping_shr(y as u32 & 31) as f64),
+                        Op::Exp => num2!(Op::Exp, x, y, x.powf(y)),
+                        Op::BitAnd => int2!(Op::BitAnd, x, y, (x & y) as f64),
+                        Op::BitOr => int2!(Op::BitOr, x, y, (x | y) as f64),
+                        Op::BitXor => int2!(Op::BitXor, x, y, (x ^ y) as f64),
+                        Op::Shl => int2!(Op::Shl, x, y, x.wrapping_shl(y as u32 & 31) as f64),
+                        Op::Shr => int2!(Op::Shr, x, y, x.wrapping_shr(y as u32 & 31) as f64),
+                        Op::UShr => int2!(Op::UShr, x, y, (x as u32).wrapping_shr(y as u32 & 31) as f64),
                         Op::Eq | Op::Ne => {
                             let b = pop!();
                             let a = pop!();
@@ -908,11 +926,14 @@ impl Interp {
                         }
                         Op::Neg => {
                             let v = pop!();
-                            let n = match v {
-                                Value::Num(n) => n,
-                                v => tri!(self.to_number(&v)),
+                            let r = match v {
+                                Value::Num(n) => Value::Num(-n),
+                                v => match tri!(self.to_numeric(&v)) {
+                                    Value::BigInt(b) => Value::BigInt(Rc::new(b.neg())),
+                                    v => Value::Num(-tri!(self.to_number(&v))),
+                                },
                             };
-                            stack.push(Value::Num(-n));
+                            stack.push(r);
                         }
                         Op::ToNum => {
                             if !matches!(stack.last(), Some(Value::Num(_))) {
@@ -921,20 +942,35 @@ impl Interp {
                                 stack.push(Value::Num(n));
                             }
                         }
+                        Op::ToNumeric => {
+                            if !matches!(stack.last(), Some(Value::Num(_))) {
+                                let v = pop!();
+                                let n = tri!(self.to_numeric(&v));
+                                stack.push(n);
+                            }
+                        }
                         Op::BitNot => {
                             let v = pop!();
-                            let n = tri!(self.to_number(&v));
-                            stack.push(Value::Num(!to_i32(n) as f64));
+                            match tri!(self.to_numeric(&v)) {
+                                Value::BigInt(b) => stack.push(Value::BigInt(Rc::new(b.not()))),
+                                v => {
+                                    let n = tri!(self.to_number(&v));
+                                    stack.push(Value::Num(!to_i32(n) as f64));
+                                }
+                            }
                         }
                         Op::Typeof => {
                             let v = pop!();
                             stack.push(Value::Str(Interp::typeof_(&v).into()));
                         }
-                        Op::Inc | Op::Dec => {
-                            if let Some(Value::Num(n)) = stack.last_mut() {
-                                *n += if matches!(op, Op::Inc) { 1.0 } else { -1.0 };
+                        Op::Inc | Op::Dec => match stack.last_mut() {
+                            Some(Value::Num(n)) => *n += if matches!(op, Op::Inc) { 1.0 } else { -1.0 },
+                            Some(Value::BigInt(b)) => {
+                                let one = crate::bigint::BigInt::from_i64(if matches!(op, Op::Inc) { 1 } else { -1 });
+                                *b = Rc::new(b.add(&one).unwrap_or_default());
                             }
-                        }
+                            _ => {}
+                        },
                         Op::Jump(to) => jump!(to),
                         Op::JumpIfFalse(to) => {
                             if !Interp::truthy(&pop!()) {
@@ -1131,7 +1167,12 @@ impl Interp {
                         Op::Callee => stack.push(f.func.clone()),
                         Op::Arguments => {
                             let a = stack[f.bp..f.bp + f.argc].to_vec();
-                            stack.push(self.array(a));
+                            let args = self.array(a);
+                            // Sloppy-mode `arguments.callee`: the function running.
+                            if let Value::Obj(o) = &args {
+                                o.borrow_mut().set_hidden("callee", f.func.clone());
+                            }
+                            stack.push(args);
                         }
                         Op::LoadSuper => stack.push(sup_of(&f.func).unwrap_or(Value::Undefined)),
                         Op::SuperGet => {
@@ -1530,7 +1571,7 @@ impl Interp {
                                 return Ok(v.clone());
                             }
                         }
-                        Kind::Typed(t) if !t.data_view => return Ok(t.get(i).map(Value::Num).unwrap_or(Value::Undefined)),
+                        Kind::Typed(t) if !t.data_view => return Ok(t.get_value(i).unwrap_or(Value::Undefined)),
                         _ => {}
                     },
                     Value::Str(s) => return Ok(string_at(s, i)),
@@ -1550,7 +1591,7 @@ impl Interp {
             let i = *n as usize;
             if i as f64 == *n {
                 if let (Kind::Typed(t), Value::Num(x)) = (&ob.borrow().kind, &v) {
-                    if !t.data_view {
+                    if !t.data_view && !t.elem.is_big() {
                         t.put(i, *x);
                         return Ok(());
                     }
@@ -1580,17 +1621,64 @@ impl Interp {
             let (x, y) = (self.to_str(&pa)?, self.to_str(&pb)?);
             Ok(Value::Str(crate::interp::concat_str(&x, &y)))
         } else {
-            Ok(Value::Num(self.to_number(&pa)? + self.to_number(&pb)?))
+            match (self.to_numeric(&pa)?, self.to_numeric(&pb)?) {
+                (Value::Num(x), Value::Num(y)) => Ok(Value::Num(x + y)),
+                (x, y) => self.big_op(Op::Add, &x, &y),
+            }
+        }
+    }
+
+    /// An arithmetic or bitwise operator on two numerics, at least one a BigInt:
+    /// BigInt arithmetic when both are, else a TypeError (no implicit mixing).
+    fn big_op(&mut self, op: Op, a: &Value, b: &Value) -> Res<Value> {
+        let (Value::BigInt(x), Value::BigInt(y)) = (a, b) else {
+            return self.throw("TypeError", "can't mix BigInt and other types, use explicit conversions");
+        };
+        let r = match op {
+            Op::Add => x.add(y),
+            Op::Sub => x.sub(y),
+            Op::Mul => x.mul(y),
+            Op::Div | Op::Mod => match x.divrem(y) {
+                Some((q, r)) => Ok(if matches!(op, Op::Div) { q } else { r }),
+                None => return self.throw("RangeError", "BigInt division by zero"),
+            },
+            Op::Exp => {
+                if y.is_negative() {
+                    return self.throw("RangeError", "BigInt negative exponent");
+                }
+                x.pow(y)
+            }
+            Op::BitAnd => Ok(x.and(y)),
+            Op::BitOr => Ok(x.or(y)),
+            Op::BitXor => Ok(x.xor(y)),
+            Op::Shl => x.shl(y),
+            Op::Shr => x.shr(y),
+            Op::UShr => return self.throw("TypeError", "BigInts have no unsigned right shift, use >> instead"),
+            _ => return self.throw("TypeError", "bad BigInt operation"),
+        };
+        match r {
+            Ok(v) => Ok(Value::BigInt(Rc::new(v))),
+            Err(e) => self.throw("RangeError", e),
         }
     }
 
     fn compare(&mut self, a: &Value, b: &Value) -> Res<Option<std::cmp::Ordering>> {
         let (pa, pb) = (self.to_primitive(a, true)?, self.to_primitive(b, true)?);
-        Ok(if let (Value::Str(x), Value::Str(y)) = (&pa, &pb) {
-            Some(str_cmp(x, y))
-        } else {
-            let (x, y) = (self.to_number(&pa)?, self.to_number(&pb)?);
-            x.partial_cmp(&y)
+        use crate::bigint::BigInt;
+        Ok(match (&pa, &pb) {
+            (Value::Str(x), Value::Str(y)) => Some(str_cmp(x, y)),
+            // A string compared with a BigInt is read as one (not a number: undefined).
+            (Value::BigInt(x), Value::Str(s)) => BigInt::parse(s).map(|y| x.cmp_big(&y)),
+            (Value::Str(s), Value::BigInt(y)) => BigInt::parse(s).map(|x| x.cmp_big(y)),
+            _ => match (self.to_numeric(&pa)?, self.to_numeric(&pb)?) {
+                (Value::BigInt(x), Value::BigInt(y)) => Some(x.cmp_big(&y)),
+                (Value::BigInt(x), Value::Num(y)) => x.cmp_f64(y),
+                (Value::Num(x), Value::BigInt(y)) => y.cmp_f64(x).map(|o| o.reverse()),
+                (x, y) => {
+                    let (x, y) = (self.to_number(&x)?, self.to_number(&y)?);
+                    x.partial_cmp(&y)
+                }
+            },
         })
     }
 
@@ -1676,7 +1764,7 @@ impl Interp {
             Value::Str(s) => Some(s.chars().map(|c| Value::Str(c.to_string().into())).collect()),
             Value::Obj(o) => match &o.borrow().kind {
                 Kind::Array(_) => return Ok(self.obj(Kind::Iter(IterState::Array(o.clone(), 0)))),
-                Kind::Typed(t) if !t.data_view => Some(t.values().into_iter().map(Value::Num).collect()),
+                Kind::Typed(t) if !t.data_view => Some(t.value_list()),
                 Kind::Set(s) => Some(s.keys().cloned().collect()),
                 Kind::Map(m) => Some(m.iter().map(|(k, v)| self.array(vec![k.clone(), v.clone()])).collect()),
                 _ => None,

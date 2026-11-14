@@ -7,6 +7,8 @@ use std::rc::Rc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     Num(f64),
+    /// A BigInt literal, in decimal.
+    BigInt(String),
     Str(String),
     /// A template literal: its string pieces and the tokens of each `${...}`.
     /// Cooked pieces, the expressions' tokens, and the raw source of each piece.
@@ -278,7 +280,14 @@ impl Lexer<'_> {
             while self.i < s.len() && (s[self.i].is_ascii_alphanumeric() || s[self.i] == '_') {
                 self.i += 1;
             }
-            let digits: String = s[ds..self.i].iter().filter(|&&c| c != '_' && c != 'n').collect();
+            let mut digits: String = s[ds..self.i].iter().filter(|&&c| c != '_').collect();
+            if digits.ends_with('n') {
+                digits.pop();
+                return match crate::bigint::BigInt::parse_digits(&digits, radix) {
+                    Some(b) => Ok(Tok::BigInt(b.to_string_radix(10))),
+                    None => self.err("bad BigInt"),
+                };
+            }
             return match u128::from_str_radix(&digits, radix) {
                 Ok(n) => Ok(Tok::Num(n as f64)),
                 // Longer than 128 bits (obfuscators write such constants): in floating point.
@@ -311,7 +320,11 @@ impl Lexer<'_> {
         }
         let text: String = s[start..self.i].iter().filter(|&&c| c != '_').collect();
         if s.get(self.i) == Some(&'n') {
-            self.i += 1; // BigInt literals read as plain numbers
+            self.i += 1;
+            return match crate::bigint::BigInt::parse_digits(&text, 10) {
+                Some(b) => Ok(Tok::BigInt(b.to_string_radix(10))),
+                None => self.err(&format!("bad BigInt {text}n")),
+            };
         }
         match text.parse() {
             Ok(n) => Ok(Tok::Num(n)),
@@ -380,8 +393,9 @@ fn escape(s: &[char], i: &mut usize, v: &mut String, line: &mut u32) {
             // A surrogate pair written as two escapes.
             if (0xd800..0xdc00).contains(&code) && s.get(*i) == Some(&'\\') && s.get(*i + 1) == Some(&'u') {
                 let lo: String = s[*i + 2..(*i + 6).min(s.len())].iter().collect();
-                if let Ok(lo) = u32::from_str_radix(&lo, 16) {
-                    code = 0x10000 + ((code - 0xd800) << 10) + (lo.wrapping_sub(0xdc00) & 0x3ff);
+                // (Only a low surrogate completes it: `\ud803\ud83a` is two lone halves.)
+                if let Ok(lo @ 0xdc00..=0xdfff) = u32::from_str_radix(&lo, 16) {
+                    code = 0x10000 + ((code - 0xd800) << 10) + (lo - 0xdc00);
                     *i += 6;
                 }
             }
@@ -399,6 +413,7 @@ pub type P<T> = Box<T>;
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(f64),
+    BigInt(Rc<str>),
     Str(Rc<str>),
     Template(Vec<String>, Vec<Expr>),
     Bool(bool),
@@ -652,7 +667,7 @@ impl Parser {
     fn func_start(&self, paren: usize) -> usize {
         let mut j = paren;
         let tok = |j: usize| &self.toks[j].tok;
-        if j > 0 && matches!(tok(j - 1), Tok::Ident(_) | Tok::Str(_) | Tok::Num(_)) && !matches!(tok(j - 1), Tok::Ident(w) if w == "function") {
+        if j > 0 && matches!(tok(j - 1), Tok::Ident(_) | Tok::Str(_) | Tok::Num(_) | Tok::BigInt(_)) && !matches!(tok(j - 1), Tok::Ident(w) if w == "function") {
             j -= 1;
         } else if j > 0 && matches!(tok(j - 1), Tok::Punct("]")) {
             // A computed key: back to its `[`.
@@ -1280,6 +1295,7 @@ impl Parser {
                     Tok::Ident(n) => Expr::Str(n.into()),
                     Tok::Str(s) => Expr::Str(s.into()),
                     Tok::Num(n) => Expr::Str(crate::interp::num_to_string(n).into()),
+                    Tok::BigInt(n) => Expr::Str(n.into()),
                     t => return Err(format!("line {}: unexpected {} in class", self.line(), describe(&t))),
                 }
             };
@@ -1667,6 +1683,7 @@ impl Parser {
         let line = self.line();
         match self.next() {
             Tok::Num(n) => Ok(Expr::Num(n)),
+            Tok::BigInt(n) => Ok(Expr::BigInt(n.into())),
             Tok::Str(s) => Ok(Expr::Str(s.into())),
             Tok::Template(strs, exprs, _) => {
                 let mut es = Vec::new();
@@ -1821,6 +1838,7 @@ impl Parser {
                         Tok::Ident(n) => (Expr::Str(n.as_str().into()), Some(n)),
                         Tok::Str(s) => (Expr::Str(s.into()), None),
                         Tok::Num(n) => (Expr::Str(crate::interp::num_to_string(n).into()), None),
+                        Tok::BigInt(n) => (Expr::Str(n.into()), None),
                         t => return Err(format!("line {}: unexpected {} in object", self.line(), describe(&t))),
                     }
                 };
@@ -1887,6 +1905,7 @@ fn to_pattern(e: Expr) -> Option<Expr> {
 fn describe(t: &Tok) -> String {
     match t {
         Tok::Num(n) => format!("number {n}"),
+        Tok::BigInt(n) => format!("BigInt {n}n"),
         Tok::Str(_) => "a string".into(),
         Tok::Template(..) => "a template".into(),
         Tok::Ident(w) => format!("'{w}'"),

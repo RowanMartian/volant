@@ -101,7 +101,7 @@ pub fn items(i: &mut Interp, this: &Value) -> Res<Vec<Value>> {
         Value::Obj(o) => {
             match &o.borrow().kind {
                 Kind::Array(a) => return Ok(a.clone()),
-                Kind::Typed(t) if !t.data_view => return Ok(t.values().into_iter().map(Value::Num).collect()),
+                Kind::Typed(t) if !t.data_view => return Ok(t.value_list()),
                 _ => {}
             }
             let len = i.get(this, "length")?;
@@ -480,6 +480,14 @@ fn json_stringify(i: &mut Interp, v: &Value, indent: &str, cur: &str, seen: &mut
         Value::Bool(b) => Some(b.to_string()),
         Value::Num(n) => Some(if n.is_finite() { num_to_string(*n) } else { "null".into() }),
         Value::Str(s) => Some(volant_core::json::string(s).replace("\\u003c", "<")),
+        Value::BigInt(_) => {
+            let to_json = i.get(v, "toJSON")?;
+            if !Interp::is_callable(&to_json) {
+                return i.throw("TypeError", "BigInt value can't be serialized in JSON");
+            }
+            let r = i.call(&to_json, v.clone(), vec![])?;
+            return json_stringify(i, &r, indent, cur, seen);
+        }
         Value::Obj(o) => {
             if Interp::is_callable(v) {
                 return Ok(None);
@@ -657,6 +665,7 @@ pub fn install(i: &mut Interp) {
                 Value::Str(s) if s.starts_with("\0@") => i.symbol_proto.clone(),
                 Value::Str(_) => i.string_proto.clone(),
                 Value::Num(_) => i.number_proto.clone(),
+                Value::BigInt(_) => i.bigint_proto.clone(),
                 _ => i.boolean_proto.clone(),
             };
             let o = i.obj(Kind::Boxed(p));
@@ -677,6 +686,7 @@ pub fn install(i: &mut Interp) {
             Value::Bool(_) => "Boolean".into(),
             Value::Num(_) => "Number".into(),
             Value::Str(_) => "String".into(),
+            Value::BigInt(_) => "BigInt".into(),
             Value::Obj(o) => {
                 // An explicit [Symbol.toStringTag] wins (DOM objects, window, Math, JSON…).
                 if let Ok(Value::Str(tag)) = i.get(&t, "\0@toStringTag") {
@@ -1616,7 +1626,15 @@ pub fn install(i: &mut Interp) {
 
     // ---------------------------------------------------------- Number, Boolean
     let np = i.number_proto.clone();
-    let number = ctor(i, "Number", &np, |i, _t, a| Ok(Value::Num(if a.is_empty() { 0.0 } else { i.to_number(&a[0])? })));
+    let number = ctor(i, "Number", &np, |i, _t, a| {
+        Ok(Value::Num(match a.first() {
+            None => 0.0,
+            Some(v) => match i.to_numeric(v)? {
+                Value::BigInt(b) => b.to_f64(),
+                v => i.to_number(&v)?,
+            },
+        }))
+    });
     number.borrow_mut().set_own("MAX_SAFE_INTEGER", Value::Num(9007199254740991.0));
     number.borrow_mut().set_own("MIN_SAFE_INTEGER", Value::Num(-9007199254740991.0));
     number.borrow_mut().set_own("EPSILON", Value::Num(f64::EPSILON));
@@ -1687,6 +1705,68 @@ pub fn install(i: &mut Interp) {
         }
         Ok(Value::Str(if n < 0.0 { format!("-{out}") } else { out }.into()))
     });
+    // ---------------------------------------------------------- BigInt
+    let gp = i.bigint_proto.clone();
+    let bigint = ctor(i, "BigInt", &gp, |i, _t, a| {
+        let v = i.to_primitive(&arg(&a, 0), true)?;
+        match v {
+            Value::Num(n) => match crate::bigint::BigInt::from_f64(n) {
+                Some(b) => Ok(Value::BigInt(Rc::new(b))),
+                None => i.throw("RangeError", &format!("{} can't be converted to BigInt because it isn't an integer", num_to_string(n))),
+            },
+            v => Ok(Value::BigInt(i.to_bigint(&v)?)),
+        }
+    });
+    fn this_bigint(i: &mut Interp, t: &Value) -> Res<Rc<crate::bigint::BigInt>> {
+        match t {
+            Value::BigInt(b) => Ok(b.clone()),
+            Value::Obj(o) => match &o.borrow().kind {
+                Kind::Boxed(Value::BigInt(b)) => Ok(b.clone()),
+                _ => i.throw("TypeError", "BigInt.prototype method called on a non-BigInt"),
+            },
+            _ => i.throw("TypeError", "BigInt.prototype method called on a non-BigInt"),
+        }
+    }
+    def(i, &gp, "toString", |i, t, a| {
+        let b = this_bigint(i, &t)?;
+        let radix = if matches!(arg(&a, 0), Value::Undefined) { 10.0 } else { i.to_number(&arg(&a, 0))?.trunc() };
+        if !(2.0..=36.0).contains(&radix) {
+            return i.throw("RangeError", "toString() radix must be between 2 and 36");
+        }
+        Ok(Value::Str(b.to_string_radix(radix as u32).into()))
+    });
+    def(i, &gp, "toLocaleString", |i, t, _a| {
+        let b = this_bigint(i, &t)?;
+        let s = b.to_string_radix(10);
+        let (sign, digits) = s.split_at(if b.is_negative() { 1 } else { 0 });
+        let mut out = String::from(sign);
+        for (k, c) in digits.chars().enumerate() {
+            if k > 0 && (digits.len() - k) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        Ok(Value::Str(out.into()))
+    });
+    def(i, &gp, "valueOf", |i, t, _a| Ok(Value::BigInt(this_bigint(i, &t)?)));
+    gp.borrow_mut().set_own("\0@toStringTag", Value::Str("BigInt".into()));
+    for (name, signed) in [("asIntN", true), ("asUintN", false)] {
+        let f = i.native(move |i, _t, a| {
+            let bits = i.to_number(&arg(&a, 0))?;
+            let bits = if bits.is_nan() { 0.0 } else { bits.trunc() };
+            if !(0.0..=9007199254740991.0).contains(&bits) {
+                return i.throw("RangeError", "invalid bit count");
+            }
+            let b = i.to_bigint(&arg(&a, 1))?;
+            let r = if signed { b.as_int_n(bits as u64) } else { b.as_uint_n(bits as u64) };
+            match r {
+                Ok(v) => Ok(Value::BigInt(Rc::new(v))),
+                Err(e) => i.throw("RangeError", e),
+            }
+        });
+        bigint.borrow_mut().set_own(name, f);
+    }
+
     let bp = i.boolean_proto.clone();
     ctor(i, "Boolean", &bp, |_i, _t, a| Ok(Value::Bool(Interp::truthy(&arg(&a, 0)))));
     def(i, &bp, "toString", |i, t, _a| Ok(Value::Str(i.to_str(&t)?)));

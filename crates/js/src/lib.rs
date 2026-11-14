@@ -23,6 +23,7 @@ pub mod builtins;
 pub mod compile;
 pub mod interp;
 pub mod module;
+pub mod bigint;
 pub mod normalize;
 pub mod parse;
 pub mod promise;

@@ -113,6 +113,8 @@ pub enum Op {
     Not,
     Neg,
     ToNum,
+    /// ToNumeric: like ToNum, but a BigInt stays one (for ++ and --).
+    ToNumeric,
     BitNot,
     Typeof,
     Inc,
@@ -1001,7 +1003,8 @@ impl Compiler {
         let st = self.fns.pop().expect("a function");
         r?;
         let nparams = f.params.iter().take_while(|p| !matches!(p, Expr::Default(..) | Expr::Rest(_))).count() as u32;
-        let name: Option<Rc<str>> = f.name.clone().or_else(|| name.map(Rc::from));
+        // A class's constructor is named after the class, not "constructor".
+        let name: Option<Rc<str>> = if class_ctor { name.map(Rc::from) } else { f.name.clone().or_else(|| name.map(Rc::from)) };
         let mut code = finish(st, name, nparams, method, class_ctor, f.line, self.url.clone());
         code.src = f.src.clone();
         let cur = self.fns.last_mut().expect("an enclosing function");
@@ -2242,6 +2245,13 @@ impl Compiler {
                 let c = self.name_const(s);
                 self.emit(Op::Const(c));
             }
+            Expr::BigInt(s) => {
+                let b = crate::bigint::BigInt::parse(s).unwrap_or_default();
+                let st = self.st();
+                st.consts.push(Value::BigInt(Rc::new(b)));
+                let c = st.consts.len() as u32 - 1;
+                self.emit(Op::Const(c));
+            }
             Expr::Bool(b) => {
                 self.emit(if *b { Op::True } else { Op::False });
             }
@@ -2672,7 +2682,7 @@ impl Compiler {
         match target {
             Expr::Ident(n) => {
                 self.load_name(n)?;
-                self.emit(Op::ToNum);
+                self.emit(Op::ToNumeric);
                 if prefix {
                     self.emit(step);
                     self.store_name(n, false, false)?;
@@ -2689,7 +2699,7 @@ impl Compiler {
                         // [o] → [o o.k]
                         self.emit(Op::Dup);
                         self.get_prop(name);
-                        self.emit(Op::ToNum);
+                        self.emit(Op::ToNumeric);
                         let c = self.name_const(name);
                         let ic = self.ic();
                         if prefix {
@@ -2710,7 +2720,7 @@ impl Compiler {
                         self.expr(k)?;
                         self.emit(Op::Dup2);
                         self.emit(Op::GetElem);
-                        self.emit(Op::ToNum);
+                        self.emit(Op::ToNumeric);
                         if prefix {
                             self.emit(step);
                             self.emit(Op::SetElem);

@@ -70,6 +70,39 @@ impl Elem {
         ELEMS.iter().position(|(_, e)| *e == self).unwrap_or(1)
     }
 
+    /// BigInt64 and BigUint64 hold BigInts rather than Numbers.
+    pub fn is_big(self) -> bool {
+        matches!(self, Elem::I64 | Elem::U64)
+    }
+
+    /// The element at byte `at` as a JS value (a BigInt for the 64-bit kinds).
+    pub fn read_value(self, b: &[u8], at: usize, little: bool) -> Value {
+        if !self.is_big() {
+            return Value::Num(self.read(b, at, little));
+        }
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&b[at..at + 8]);
+        let bits = if little { u64::from_le_bytes(raw) } else { u64::from_be_bytes(raw) };
+        let big = if self == Elem::I64 { crate::bigint::BigInt::from_i64(bits as i64) } else { crate::bigint::BigInt::from_u64(bits) };
+        Value::BigInt(Rc::new(big))
+    }
+
+    /// Stores a value converted as JS does: ToBigInt for the 64-bit kinds, else ToNumber.
+    pub fn write_value(self, i: &mut Interp, b: &mut [u8], at: usize, v: &Value, little: bool) -> Res<()> {
+        if self.is_big() {
+            let bits = i.to_bigint(v)?.to_u64_wrapping();
+            let raw = if little { bits.to_le_bytes() } else { bits.to_be_bytes() };
+            b[at..at + 8].copy_from_slice(&raw);
+        } else {
+            let n = match v {
+                Value::Num(n) => *n,
+                v => i.to_number(v)?,
+            };
+            self.write(b, at, n, little);
+        }
+        Ok(())
+    }
+
     /// The element at byte `at` (which must be in bounds).
     pub fn read(self, b: &[u8], at: usize, little: bool) -> f64 {
         let mut raw = [0u8; 8];
@@ -148,6 +181,51 @@ impl View {
         let Kind::Buffer(bytes) = &b.kind else { return None };
         let at = self.offset + i * self.elem.size();
         (at + self.elem.size() <= bytes.len()).then(|| self.elem.read(bytes, at, true))
+    }
+
+    /// Element `i` as a JS value, or None past the end.
+    pub fn get_value(&self, i: usize) -> Option<Value> {
+        if !self.elem.is_big() {
+            return self.get(i).map(Value::Num);
+        }
+        if i >= self.len {
+            return None;
+        }
+        let b = self.buffer.borrow();
+        let Kind::Buffer(bytes) = &b.kind else { return None };
+        let at = self.offset + i * 8;
+        (at + 8 <= bytes.len()).then(|| self.elem.read_value(bytes, at, true))
+    }
+
+    /// Stores a JS value at element `i`, converted as JS does (ignored past the end).
+    pub fn put_value(&self, interp: &mut Interp, i: usize, v: &Value) -> Res<()> {
+        if !self.elem.is_big() {
+            let n = match v {
+                Value::Num(n) => *n,
+                v => interp.to_number(v)?,
+            };
+            self.put(i, n);
+            return Ok(());
+        }
+        let bits = interp.to_bigint(v)?.to_u64_wrapping();
+        if i < self.len {
+            let mut b = self.buffer.borrow_mut();
+            if let Kind::Buffer(bytes) = &mut b.kind {
+                let at = self.offset + i * 8;
+                if at + 8 <= bytes.len() {
+                    bytes[at..at + 8].copy_from_slice(&bits.to_le_bytes());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// All the elements, as JS values.
+    pub fn value_list(&self) -> Vec<Value> {
+        if !self.elem.is_big() {
+            return self.values().into_iter().map(Value::Num).collect();
+        }
+        (0..self.len).map_while(|k| self.get_value(k)).collect()
     }
 
     /// Stores element `i` (ignored past the end, as in browsers).
@@ -317,6 +395,20 @@ fn construct(i: &mut Interp, elem: Elem, a: &[Value]) -> Res<Value> {
                 }
             };
             return Ok(new_view(i, View { buffer: o.clone(), elem, offset, len, data_view: false }, None));
+        }
+        if elem.is_big() {
+            // BigInts are stored one by one, each through ToBigInt.
+            let list = match view_of(&first) {
+                Some(v) => v.value_list(),
+                None => i.iterate(&first)?,
+            };
+            let made = new_typed(i, elem, &vec![0.0; list.len()]);
+            if let Some(v) = view_of(&made) {
+                for (k, x) in list.iter().enumerate() {
+                    v.put_value(i, k, x)?;
+                }
+            }
+            return Ok(made);
         }
         let values: Vec<f64> = match view_of(&first) {
             Some(v) => v.values(),
@@ -670,19 +762,22 @@ pub fn install(i: &mut Interp) {
             }
             let b = v.buffer.borrow();
             let Kind::Buffer(bytes) = &b.kind else { return Ok(Value::Undefined) };
-            Ok(Value::Num(elem.read(bytes, v.offset + at as usize, little)))
+            Ok(elem.read_value(bytes, v.offset + at as usize, little))
         });
         def(i, &dp, &format!("set{name}"), move |i, t, a| {
             let v = this_dv(i, &t)?;
             let at = int(i, &a, 0, 0.0)?;
-            let x = num(i, &arg(&a, 1))?;
+            let x = arg(&a, 1);
+            // The value is converted before the bounds check, as in browsers.
+            let x = if elem.is_big() { Value::BigInt(i.to_bigint(&x)?) } else { Value::Num(num(i, &x)?) };
             let little = Interp::truthy(&arg(&a, 2));
             if at < 0.0 || at as usize + elem.size() > v.len {
                 return i.throw("RangeError", "Offset is outside the bounds of the DataView");
             }
-            let mut b = v.buffer.borrow_mut();
+            let buf = v.buffer.clone();
+            let mut b = buf.borrow_mut();
             if let Kind::Buffer(bytes) = &mut b.kind {
-                elem.write(bytes, v.offset + at as usize, x, little);
+                elem.write_value(i, bytes, v.offset + at as usize, &x, little)?;
             }
             Ok(Value::Undefined)
         });

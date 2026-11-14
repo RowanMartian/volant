@@ -645,3 +645,25 @@ fn super_property_receivers() {
     "#;
     assert_eq!(out(src), "11\n61 6 BA6 BAs\nop1\n5,true");
 }
+
+#[test]
+fn bigint_values() {
+    let src = r#"
+        console.log(typeof 1n, 2n ** 64n, -7n / 2n, -7n % 2n, 0x1fn, -5n & 3n, ~5n, -5n >> 1n, 1n << 70n);
+        console.log(1n == 1, 1n === 1, 10n > '9', [3n, 1n, 2n].sort().join(), new Map([[1n, 'a']]).get(1n), Object.is(0n, -0n));
+        let x = 5n; x++; x += 10n; let s = 0n; for (let i = 0n; i < 4n; i++) s += i;
+        console.log(x, s, BigInt('0x10'), BigInt.asIntN(8, 255n), BigInt.asUintN(64, -1n), Number(2n ** 53n + 1n), 255n.toString(16));
+        const a = new BigInt64Array([1n, -2n]); console.log(a[1], typeof a[0], new DataView(new ArrayBuffer(8)).getBigUint64(0));
+        for (const f of [() => 1n + 1, () => 1n >>> 1n, () => BigInt(1.5), () => 1n / 0n, () => JSON.stringify(1n)]) try { f() } catch (e) { console.log(e.name) }
+        class K { constructor() {} } console.log(K.name, new K().constructor.name);
+    "#;
+    assert_eq!(
+        out(src),
+        "bigint 18446744073709551616 -3 -1 31 3 -6 -3 1180591620717411303424\n\
+         true false true 1,2,3 a true\n\
+         16 6 16 -1 18446744073709551615 9007199254740992 ff\n\
+         -2 bigint 0\n\
+         TypeError\nTypeError\nRangeError\nRangeError\nTypeError\n\
+         K K"
+    );
+}

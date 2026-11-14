@@ -15,6 +15,7 @@ enum Key {
     Num(u64),
     Str(Rc<str>),
     Obj(usize),
+    Big(Rc<crate::bigint::BigInt>),
 }
 
 fn key(v: &Value) -> Key {
@@ -28,6 +29,7 @@ fn key(v: &Value) -> Key {
         Value::Num(n) => Key::Num(n.to_bits()),
         Value::Str(s) => Key::Str(s.clone()),
         Value::Obj(o) => Key::Obj(Rc::as_ptr(o) as *const u8 as usize),
+        Value::BigInt(b) => Key::Big(b.clone()),
     }
 }
 
