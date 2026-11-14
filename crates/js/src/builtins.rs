@@ -1,7 +1,7 @@
 //! The standard library: Object, Function, Array, String, Number, Boolean,
 //! Math, JSON, Error types, Map, Set, Date, console and the global functions.
 
-use crate::interp::{num_to_string, str_to_number, to_i32, Callable, Interp, Kind, Obj, Res, Slot, Value};
+use crate::interp::{num_to_string, str_to_number, to_i32, to_u32, Callable, Interp, Kind, Obj, Res, Slot, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -200,15 +200,249 @@ pub fn inspect(i: &mut Interp, v: &Value, top: bool, depth: u32) -> String {
     }
 }
 
-/// An ISO-ish date for a time in ms since the epoch (UTC).
+/// The structured clone algorithm (`structuredClone`, `postMessage`):
+/// a deep copy keeping shared and cyclic references, Maps, Sets, Dates,
+/// RegExps, buffers and errors; functions and symbols cannot be cloned.
+pub fn structured_clone(i: &mut Interp, v: &Value, memo: &mut Vec<(Obj, Value)>) -> Res<Value> {
+    let o = match v {
+        Value::Obj(o) => o.clone(),
+        Value::Str(s) if s.starts_with("\0@") => return Err(i.error("DataCloneError", "Symbol() could not be cloned.")),
+        _ => return Ok(v.clone()),
+    };
+    if let Some((_, c)) = memo.iter().find(|(k, _)| Rc::ptr_eq(k, &o)) {
+        return Ok(c.clone());
+    }
+    enum Shape {
+        Array(usize),
+        Plain,
+        Error,
+        Map(Vec<(Value, Value)>),
+        Set(Vec<Value>),
+        Done(Value),
+        Typed(crate::typed::View),
+    }
+    // Platform objects the prelude makes serializable carry a hidden cloner.
+    if matches!(o.borrow().kind, Kind::Plain) {
+        let cloner = i.get(v, "\0clone")?;
+        if Interp::is_callable(&cloner) {
+            let c = i.call(&cloner, v.clone(), vec![])?;
+            memo.push((o, c.clone()));
+            return Ok(c);
+        }
+    }
+    let shape = match &o.borrow().kind {
+        Kind::Array(a) => Shape::Array(a.len()),
+        Kind::Plain => Shape::Plain,
+        Kind::Error => Shape::Error,
+        Kind::Map(t) => Shape::Map(t.iter().cloned().collect()),
+        Kind::Set(t) => Shape::Set(t.keys().cloned().collect()),
+        Kind::Date(t) => Shape::Done(i.obj(Kind::Date(*t))),
+        Kind::Boxed(p) => Shape::Done(i.obj(Kind::Boxed(p.clone()))),
+        Kind::RegExp(re, src, flags) => Shape::Done(i.obj(Kind::RegExp(re.clone(), src.clone(), flags.clone()))),
+        Kind::Buffer(b) => Shape::Done(crate::typed::new_buffer(i, b.clone())),
+        Kind::Typed(view) => Shape::Typed(view.clone()),
+        Kind::Function(_) => return Err(i.error("DataCloneError", "function could not be cloned.")),
+        _ => return Err(i.error("DataCloneError", "The object could not be cloned.")),
+    };
+    let out = match shape {
+        Shape::Done(c) => {
+            memo.push((o, c.clone()));
+            return Ok(c);
+        }
+        Shape::Typed(view) => {
+            let buffer = structured_clone(i, &Value::Obj(view.buffer.clone()), memo)?;
+            let Value::Obj(buffer) = buffer else { return Ok(Value::Undefined) };
+            let proto = o.borrow().proto.clone();
+            let c = i.obj(Kind::Typed(crate::typed::View { buffer, ..view }));
+            if let Value::Obj(co) = &c {
+                co.borrow_mut().proto = proto;
+            }
+            memo.push((o, c.clone()));
+            return Ok(c);
+        }
+        Shape::Array(n) => {
+            let c = i.array(Vec::with_capacity(n));
+            memo.push((o.clone(), c.clone()));
+            let items = items(i, v)?;
+            let mut out = Vec::with_capacity(items.len());
+            for x in &items {
+                out.push(structured_clone(i, x, memo)?);
+            }
+            if let Value::Obj(co) = &c {
+                co.borrow_mut().kind = Kind::Array(out);
+            }
+            c
+        }
+        Shape::Map(entries) => {
+            let c = i.obj(Kind::Map(Default::default()));
+            memo.push((o.clone(), c.clone()));
+            let mut cloned = Vec::with_capacity(entries.len());
+            for (k, x) in &entries {
+                cloned.push((structured_clone(i, k, memo)?, structured_clone(i, x, memo)?));
+            }
+            if let Value::Obj(co) = &c {
+                if let Kind::Map(t) = &mut co.borrow_mut().kind {
+                    for (k, x) in cloned {
+                        t.set(k, x);
+                    }
+                }
+            }
+            return Ok(c);
+        }
+        Shape::Set(keys) => {
+            let c = i.obj(Kind::Set(Default::default()));
+            memo.push((o.clone(), c.clone()));
+            let mut cloned = Vec::with_capacity(keys.len());
+            for k in &keys {
+                cloned.push(structured_clone(i, k, memo)?);
+            }
+            if let Value::Obj(co) = &c {
+                if let Kind::Set(t) = &mut co.borrow_mut().kind {
+                    for k in cloned {
+                        t.set(k.clone(), k);
+                    }
+                }
+            }
+            return Ok(c);
+        }
+        Shape::Error => {
+            let c = i.obj(Kind::Error);
+            memo.push((o.clone(), c.clone()));
+            let name = i.get(v, "name")?;
+            let name = i.to_str(&name)?;
+            // The clone keeps the standard error type.
+            let proto = ["EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", "URIError"]
+                .contains(&&*name)
+                .then(|| i.global_obj.borrow().get_own(&name).cloned())
+                .flatten();
+            if let (Value::Obj(co), Some(Slot::Data(ctor))) = (&c, proto) {
+                let p = i.get(&ctor, "prototype")?;
+                if let Value::Obj(p) = p {
+                    co.borrow_mut().proto = Some(p);
+                }
+            }
+            for k in ["message", "stack", "cause"] {
+                if o.borrow().get_own(k).is_some() {
+                    let x = i.get(v, k)?;
+                    let x = structured_clone(i, &x, memo)?;
+                    i.set(&c, k, x)?;
+                }
+            }
+            return Ok(c);
+        }
+        Shape::Plain => {
+            let c = i.obj(Kind::Plain);
+            memo.push((o.clone(), c.clone()));
+            c
+        }
+    };
+    // Own enumerable string-keyed properties (arrays' too, past their items).
+    let is_array = matches!(o.borrow().kind, Kind::Array(_));
+    for k in i.keys_of(v)? {
+        if is_array && k.parse::<usize>().is_ok() {
+            continue;
+        }
+        let x = i.get(v, &k)?;
+        if Interp::is_callable(&x) && !is_array {
+            return Err(i.error("DataCloneError", &format!("{k} could not be cloned.")));
+        }
+        let x = structured_clone(i, &x, memo)?;
+        i.set(&out, &k, x)?;
+    }
+    Ok(out)
+}
+
+/// Browser-style text, in local time: "Fri Nov 13 2026 10:00:00 GMT-0500
+/// (Eastern Standard Time)"; part 1 the date, 2 the time, 3 the UTC form.
+fn human(ms: f64, part: u8) -> String {
+    if ms.is_nan() {
+        return "Invalid Date".into();
+    }
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let off = if part == 3 { 0.0 } else { crate::tz::local_offset(ms) };
+    let f = fields(ms + off);
+    let y = f[0] as i64;
+    let year = if y < 0 { format!("-{:06}", -y) } else { format!("{y:04}") };
+    let (day, month, date) = (DAYS[f[7] as usize], MONTHS[f[1] as usize], f[2] as i64);
+    let time = format!("{:02}:{:02}:{:02}", f[3] as i64, f[4] as i64, f[5] as i64);
+    let mins = (off / 60_000.0) as i64;
+    let zone = || {
+        let abbr = crate::tz::local_abbr(ms);
+        let name = match abbr.as_str() {
+            "UTC" | "GMT" if mins == 0 => "Coordinated Universal Time".to_string(),
+            "PST" => "Pacific Standard Time".into(),
+            "PDT" => "Pacific Daylight Time".into(),
+            "MST" => "Mountain Standard Time".into(),
+            "MDT" => "Mountain Daylight Time".into(),
+            "CST" => "Central Standard Time".into(),
+            "CDT" => "Central Daylight Time".into(),
+            "EST" => "Eastern Standard Time".into(),
+            "EDT" => "Eastern Daylight Time".into(),
+            "AKST" => "Alaska Standard Time".into(),
+            "AKDT" => "Alaska Daylight Time".into(),
+            "HST" => "Hawaii-Aleutian Standard Time".into(),
+            "AST" => "Atlantic Standard Time".into(),
+            "ADT" => "Atlantic Daylight Time".into(),
+            "NST" => "Newfoundland Standard Time".into(),
+            "NDT" => "Newfoundland Daylight Time".into(),
+            "GMT" => "Greenwich Mean Time".into(),
+            "BST" => "British Summer Time".into(),
+            "IST" if mins == 60 => "Irish Standard Time".into(),
+            "IST" => "India Standard Time".into(),
+            "WET" => "Western European Standard Time".into(),
+            "WEST" => "Western European Summer Time".into(),
+            "CET" => "Central European Standard Time".into(),
+            "CEST" => "Central European Summer Time".into(),
+            "EET" => "Eastern European Standard Time".into(),
+            "EEST" => "Eastern European Summer Time".into(),
+            "MSK" => "Moscow Standard Time".into(),
+            "JST" => "Japan Standard Time".into(),
+            "KST" => "Korean Standard Time".into(),
+            "AEST" => "Australian Eastern Standard Time".into(),
+            "AEDT" => "Australian Eastern Daylight Time".into(),
+            "ACST" => "Australian Central Standard Time".into(),
+            "AWST" => "Australian Western Standard Time".into(),
+            "NZST" => "New Zealand Standard Time".into(),
+            "NZDT" => "New Zealand Daylight Time".into(),
+            _ => format!("GMT{}{:02}:{:02}", if mins < 0 { '-' } else { '+' }, mins.abs() / 60, mins.abs() % 60),
+        };
+        format!("GMT{}{:02}{:02} ({name})", if mins < 0 { '-' } else { '+' }, mins.abs() / 60, mins.abs() % 60)
+    };
+    match part {
+        0 => format!("{day} {month} {date:02} {year} {time} {}", zone()),
+        1 => format!("{day} {month} {date:02} {year}"),
+        2 => format!("{time} {}", zone()),
+        _ => format!("{day}, {date:02} {month} {year} {time} GMT"),
+    }
+}
+
+/// The ISO 8601 form of a time in ms since the epoch (UTC), as `toISOString` gives.
 pub fn date_string(t: f64) -> String {
     if !t.is_finite() {
         return "Invalid Date".into();
     }
-    let secs = (t / 1000.0).floor() as i64;
-    let ms = (t - secs as f64 * 1000.0) as i64;
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
+    let f = fields(t);
+    let y = f[0] as i64;
+    let year = if (0..=9999).contains(&y) { format!("{y:04}") } else if y < 0 { format!("-{:06}", -y) } else { format!("+{y:06}") };
+    format!("{year}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", f[1] as i64 + 1, f[2] as i64, f[3] as i64, f[4] as i64, f[5] as i64, f[6] as i64)
+}
+
+/// (year, month 0–11, day, hours, minutes, seconds, ms, weekday) of a time, in UTC.
+pub fn fields(t: f64) -> [f64; 8] {
+    if !t.is_finite() {
+        return [f64::NAN; 8];
+    }
+    let ms_total = t.floor() as i64;
+    let days = ms_total.div_euclid(86_400_000);
+    let rem = ms_total.rem_euclid(86_400_000);
+    let (y, m, d) = civil(days);
+    let secs = rem / 1000;
+    [y as f64, (m - 1) as f64, d as f64, (secs / 3600) as f64, (secs % 3600 / 60) as f64, (secs % 60) as f64, (rem % 1000) as f64, (days + 4).rem_euclid(7) as f64]
+}
+
+/// The civil date (year, month 1–12, day) of a day count from 1970-01-01.
+fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -217,8 +451,26 @@ pub fn date_string(t: f64) -> String {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + (m <= 2) as i64;
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    (yoe + era * 400 + (m <= 2) as i64, m, d)
+}
+
+/// The year a time (seconds since 1970, UTC) falls in.
+pub fn year_of_secs(t: i64) -> i64 {
+    civil(t.div_euclid(86_400)).0
+}
+
+/// [`days_from_civil`] for the time-zone rules.
+pub fn days_from_civil_pub(y: i64, m: i64, d: i64) -> i64 {
+    days_from_civil(y, m, d)
+}
+
+/// Times past ±100,000,000 days are invalid (TimeClip).
+fn clip(t: f64) -> f64 {
+    if t.is_finite() && t.abs() <= 8.64e15 {
+        t.trunc() + 0.0
+    } else {
+        f64::NAN
+    }
 }
 
 fn json_stringify(i: &mut Interp, v: &Value, indent: &str, cur: &str, seen: &mut Vec<*const RefCell<crate::interp::Object>>) -> Res<Option<String>> {
@@ -655,9 +907,20 @@ pub fn install(i: &mut Interp) {
         Ok(g)
     });
     def(i, &fp, "toString", |i, t, _a| {
+        let (src, class_ctor) = match &t {
+            Value::Obj(o) => match &o.borrow().kind {
+                Kind::Function(Callable::Closure(c)) => (c.code.src.clone(), c.code.class_ctor),
+                Kind::Function(_) => (None, false),
+                _ => return i.throw("TypeError", "Function.prototype.toString requires that 'this' be a Function"),
+            },
+            _ => return i.throw("TypeError", "Function.prototype.toString requires that 'this' be a Function"),
+        };
+        if let Some(src) = src {
+            return Ok(Value::Str(src.text().into()));
+        }
         let n = i.get(&t, "name")?;
         let n = i.to_str(&n)?;
-        Ok(Value::Str(format!("function {n}() {{ [code] }}").into()))
+        Ok(Value::Str(if class_ctor { format!("class {n} {{ }}") } else { format!("function {n}() {{ [native code] }}") }.into()))
     });
     // new Function(a, b, body): compiled from source, in the global scope.
     let fv = i.native(|i, _t, a| {
@@ -809,17 +1072,88 @@ pub fn install(i: &mut Interp) {
     def(i, &ap, "indexOf", |i, t, a| {
         let v = items(i, &t)?;
         let x = arg(&a, 0);
-        Ok(Value::Num(v.iter().position(|y| Interp::strict_eq(&x, y)).map(|p| p as f64).unwrap_or(-1.0)))
+        let s = rel(int_arg(i, &a, 1, 0.0)?, v.len());
+        Ok(Value::Num(v[s..].iter().position(|y| Interp::strict_eq(&x, y)).map(|p| (p + s) as f64).unwrap_or(-1.0)))
     });
     def(i, &ap, "lastIndexOf", |i, t, a| {
         let v = items(i, &t)?;
         let x = arg(&a, 0);
-        Ok(Value::Num(v.iter().rposition(|y| Interp::strict_eq(&x, y)).map(|p| p as f64).unwrap_or(-1.0)))
+        let n = if a.len() > 1 { int_arg(i, &a, 1, 0.0)? } else { v.len() as f64 - 1.0 };
+        let k = if n < 0.0 { v.len() as f64 + n } else { n.min(v.len() as f64 - 1.0) };
+        if k < 0.0 {
+            return Ok(Value::Num(-1.0));
+        }
+        Ok(Value::Num(v[..=k as usize].iter().rposition(|y| Interp::strict_eq(&x, y)).map(|p| p as f64).unwrap_or(-1.0)))
     });
     def(i, &ap, "includes", |i, t, a| {
         let v = items(i, &t)?;
         let x = arg(&a, 0);
-        Ok(Value::Bool(v.iter().any(|y| Interp::same_value_zero(&x, y))))
+        let s = rel(int_arg(i, &a, 1, 0.0)?, v.len());
+        Ok(Value::Bool(v[s..].iter().any(|y| Interp::same_value_zero(&x, y))))
+    });
+    def(i, &ap, "copyWithin", |i, t, a| {
+        let len = items(i, &t)?.len();
+        let to = rel(int_arg(i, &a, 0, 0.0)?, len);
+        let from = rel(int_arg(i, &a, 1, 0.0)?, len);
+        let end = rel(int_arg(i, &a, 2, len as f64)?, len);
+        let count = end.saturating_sub(from).min(len - to);
+        if count > 0 {
+            with_array(i, &t, |arr| {
+                let part: Vec<Value> = arr[from..from + count].to_vec();
+                arr[to..to + count].clone_from_slice(&part);
+            })?;
+        }
+        Ok(t)
+    });
+    def(i, &ap, "toReversed", |i, t, _a| {
+        let mut v = items(i, &t)?;
+        v.reverse();
+        Ok(i.array(v))
+    });
+    def(i, &ap, "toSorted", |i, t, a| {
+        let cmp = arg(&a, 0);
+        if !matches!(cmp, Value::Undefined) && !Interp::is_callable(&cmp) {
+            return i.throw("TypeError", "The comparison function must be either a function or undefined");
+        }
+        let mut v = items(i, &t)?;
+        sort_values(i, &mut v, &cmp)?;
+        Ok(i.array(v))
+    });
+    def(i, &ap, "toSpliced", |i, t, a| {
+        let mut v = items(i, &t)?;
+        let len = v.len();
+        let s = rel(int_arg(i, &a, 0, 0.0)?, len);
+        let count = match a.len() {
+            0 => 0,
+            1 => len - s,
+            _ => (int_arg(i, &a, 1, 0.0)?.max(0.0) as usize).min(len - s),
+        };
+        v.splice(s..s + count, a.into_iter().skip(2));
+        Ok(i.array(v))
+    });
+    def(i, &ap, "with", |i, t, a| {
+        let mut v = items(i, &t)?;
+        let n = int_arg(i, &a, 0, 0.0)?;
+        let k = if n < 0.0 { v.len() as f64 + n } else { n };
+        if k < 0.0 || k >= v.len() as f64 {
+            return i.throw("RangeError", "Invalid index");
+        }
+        v[k as usize] = arg(&a, 1);
+        Ok(i.array(v))
+    });
+    def(i, &ap, "toLocaleString", |i, t, _a| {
+        let v = items(i, &t)?;
+        let mut parts = Vec::with_capacity(v.len());
+        for x in v {
+            if matches!(x, Value::Undefined | Value::Null) {
+                parts.push(String::new());
+                continue;
+            }
+            let f = i.get(&x, "toLocaleString")?;
+            let r = if Interp::is_callable(&f) { i.call(&f, x, vec![])? } else { x };
+            parts.push(i.to_str(&r)?.to_string());
+        }
+        Ok(Value::Str(parts.join(",").into()))
     });
     def(i, &ap, "at", |i, t, a| {
         let v = items(i, &t)?;
@@ -876,6 +1210,23 @@ pub fn install(i: &mut Interp) {
         })?;
         Ok(found)
     });
+    for (name, want_index) in [("findLast", false), ("findLastIndex", true)] {
+        def(i, &ap, name, move |i, t, a| {
+            let v = items(i, &t)?;
+            let cb = arg(&a, 0);
+            if !Interp::is_callable(&cb) {
+                return i.throw("TypeError", "callback is not a function");
+            }
+            let this = arg(&a, 1);
+            for (k, x) in v.iter().enumerate().rev() {
+                let r = i.call(&cb, this.clone(), vec![x.clone(), Value::Num(k as f64), t.clone()])?;
+                if Interp::truthy(&r) {
+                    return Ok(if want_index { Value::Num(k as f64) } else { x.clone() });
+                }
+            }
+            Ok(if want_index { Value::Num(-1.0) } else { Value::Undefined })
+        });
+    }
     def(i, &ap, "findIndex", |i, t, a| {
         let mut found = -1.0;
         each(i, &t, &a, |_, k, _, r| {
@@ -998,6 +1349,36 @@ pub fn install(i: &mut Interp) {
         let units: Vec<u16> = a.iter().map(|v| i.to_number(v).map(|n| n as u32 as u16)).collect::<Res<_>>()?;
         Ok(Value::Str(String::from_utf16_lossy(&units).into()))
     });
+    def(i, &string, "fromCodePoint", |i, _t, a| {
+        let mut out = String::new();
+        for v in &a {
+            let n = i.to_number(v)?;
+            match (n.fract() == 0.0 && (0.0..=1_114_111.0).contains(&n)).then(|| char::from_u32(n as u32)) {
+                Some(Some(c)) => out.push(c),
+                Some(None) => out.push('\u{FFFD}'),
+                None => {
+                    let shown = i.to_str(v)?;
+                    return i.throw("RangeError", &format!("Invalid code point {shown}"));
+                }
+            }
+        }
+        Ok(Value::Str(out.into()))
+    });
+    def(i, &string, "raw", |i, _t, a| {
+        let strs = arg(&a, 0);
+        let raw = i.get(&strs, "raw")?;
+        let pieces = items(i, &raw)?;
+        let mut out = String::new();
+        for (k, p) in pieces.iter().enumerate() {
+            out.push_str(&i.to_str(p)?);
+            if k + 1 < pieces.len() {
+                if let Some(v) = a.get(k + 1) {
+                    out.push_str(&i.to_str(v)?);
+                }
+            }
+        }
+        Ok(Value::Str(out.into()))
+    });
     def(i, &sp, "toString", |i, t, _a| Ok(Value::Str(this_str(i, &t)?)));
     def(i, &sp, "valueOf", |i, t, _a| Ok(Value::Str(this_str(i, &t)?)));
     def(i, &sp, "charAt", |i, t, a| {
@@ -1103,6 +1484,24 @@ pub fn install(i: &mut Interp) {
     def(i, &sp, "toLocaleLowerCase", |i, t, _a| Ok(Value::Str(this_str(i, &t)?.to_lowercase().into())));
     def(i, &sp, "trim", |i, t, _a| Ok(Value::Str(this_str(i, &t)?.trim().into())));
     def(i, &sp, "trimStart", |i, t, _a| Ok(Value::Str(this_str(i, &t)?.trim_start().into())));
+    def(i, &sp, "normalize", |i, t, a| {
+        let s = this_str(i, &t)?;
+        let form = if matches!(arg(&a, 0), Value::Undefined) { "NFC".into() } else { i.to_str(&arg(&a, 0))? };
+        let compose = match &*form {
+            "NFC" | "NFKC" => true,
+            "NFD" | "NFKD" => false,
+            _ => return i.throw("RangeError", "The normalization form should be one of NFC, NFD, NFKC, NFKD."),
+        };
+        if s.is_ascii() {
+            return Ok(Value::Str(s));
+        }
+        Ok(Value::Str(crate::normalize::normalize(&s, compose).into()))
+    });
+    def(i, &sp, "isWellFormed", |i, t, _a| {
+        this_str(i, &t)?;
+        Ok(Value::Bool(true))
+    });
+    def(i, &sp, "toWellFormed", |i, t, _a| Ok(Value::Str(this_str(i, &t)?)));
     def(i, &sp, "trimEnd", |i, t, _a| Ok(Value::Str(this_str(i, &t)?.trim_end().into())));
     for (name, start) in [("padStart", true), ("padEnd", false)] {
         def(i, &sp, name, move |i, t, a| {
@@ -1243,13 +1642,19 @@ pub fn install(i: &mut Interp) {
     def(i, &np, "toFixed", move |i, t, a| {
         let n = this_num(i, &t)?;
         let d = int_arg(i, &a, 0, 0.0)?.clamp(0.0, 100.0) as usize;
-        Ok(Value::Str(if n.abs() >= 1e21 { num_to_string(n) } else { format!("{n:.d$}") }.into()))
+        Ok(Value::Str(if n.abs() >= 1e21 || !n.is_finite() { num_to_string(n) } else { to_fixed(n, d) }.into()))
     });
     def(i, &np, "toString", move |i, t, a| {
         let n = this_num(i, &t)?;
         let radix = int_arg(i, &a, 0, 10.0)? as u32;
-        if radix == 10 || !(2..=36).contains(&radix) || n.fract() != 0.0 || !n.is_finite() {
+        if !(2..=36).contains(&radix) {
+            return i.throw("RangeError", "toString() radix must be between 2 and 36");
+        }
+        if radix == 10 || !n.is_finite() {
             return Ok(Value::Str(num_to_string(n).into()));
+        }
+        if n.fract() != 0.0 || n.abs() >= 1e30 {
+            return Ok(Value::Str(radix_string(n, radix).into()));
         }
         let mut x = n.abs() as u128;
         let mut digits = Vec::new();
@@ -1374,11 +1779,25 @@ pub fn install(i: &mut Interp) {
         ("sign", |x: f64| if x.is_nan() || x == 0.0 { x } else { x.signum() }),
         ("round", |x: f64| (x + 0.5).floor()),
         ("fround", |x: f64| x as f32 as f64),
+        ("sinh", f64::sinh),
+        ("cosh", f64::cosh),
+        ("tanh", f64::tanh),
+        ("asinh", f64::asinh),
+        ("acosh", f64::acosh),
+        ("atanh", f64::atanh),
+        ("expm1", f64::exp_m1),
+        ("log1p", f64::ln_1p),
+        ("clz32", |x: f64| to_u32(x).leading_zeros() as f64),
     ];
     for &(name, f) in unary {
         def(i, mo, name, move |i, _t, a| Ok(Value::Num(f(i.to_number(&arg(&a, 0))?))));
     }
     def(i, mo, "pow", |i, _t, a| Ok(Value::Num(i.to_number(&arg(&a, 0))?.powf(i.to_number(&arg(&a, 1))?))));
+    def(i, mo, "imul", |i, _t, a| {
+        let x = to_u32(i.to_number(&arg(&a, 0))?);
+        let y = to_u32(i.to_number(&arg(&a, 1))?);
+        Ok(Value::Num(x.wrapping_mul(y) as i32 as f64))
+    });
     def(i, mo, "atan2", |i, _t, a| Ok(Value::Num(i.to_number(&arg(&a, 0))?.atan2(i.to_number(&arg(&a, 1))?))));
     def(i, mo, "max", |i, _t, a| {
         let mut m = f64::NEG_INFINITY;
@@ -1440,10 +1859,38 @@ pub fn install(i: &mut Interp) {
     });
     def(i, jo, "parse", |i, _t, a| {
         let s = i.to_str(&arg(&a, 0))?;
-        match volant_core::json::parse(&s) {
-            Some(v) => Ok(from_json(i, &v)),
-            None => i.throw("SyntaxError", "JSON.parse: not valid JSON"),
+        let Some(v) = volant_core::json::parse(&s) else { return i.throw("SyntaxError", "JSON.parse: not valid JSON") };
+        let v = from_json(i, &v);
+        let reviver = arg(&a, 1);
+        if !Interp::is_callable(&reviver) {
+            return Ok(v);
         }
+        /// The reviver walk: children first, then the holder's own key.
+        fn walk(i: &mut Interp, reviver: &Value, holder: &Value, key: Rc<str>) -> Res<Value> {
+            let v = i.get(holder, &key)?;
+            if let Value::Obj(o) = &v {
+                let len = match &o.borrow().kind {
+                    Kind::Array(a) => Some(a.len()),
+                    _ => None,
+                };
+                let keys: Vec<Rc<str>> = match len {
+                    Some(n) => (0..n).map(|k| k.to_string().into()).collect(),
+                    None => i.keys_of(&v)?,
+                };
+                for k in keys {
+                    let nv = walk(i, reviver, &v, k.clone())?;
+                    if matches!(nv, Value::Undefined) {
+                        i.delete_property(&v, &k)?;
+                    } else {
+                        i.set(&v, &k, nv)?;
+                    }
+                }
+            }
+            i.call(reviver, holder.clone(), vec![Value::Str(key), v])
+        }
+        let root = i.obj(Kind::Plain);
+        i.set(&root, "", v)?;
+        walk(i, &reviver, &root, "".into())
     });
     jo.borrow_mut().set_own("\0@toStringTag", Value::Str("JSON".into()));
     global(i, "JSON", json);
@@ -1624,12 +2071,12 @@ pub fn install(i: &mut Interp) {
                 for (k, v) in a.iter().take(7).enumerate() {
                     p[k] = i.to_number(v)?;
                 }
-                if (0.0..100.0).contains(&p[0]) {
-                    p[0] += 1900.0;
+                if (0.0..100.0).contains(&p[0].trunc()) {
+                    p[0] = p[0].trunc() + 1900.0;
                 }
-                make_time(p)
+                clip(crate::tz::local_to_utc(make_time(p)))
             }
-            Some(Value::Num(n)) => *n,
+            Some(Value::Num(n)) => clip(*n),
             Some(Value::Str(s)) => parse_date(s),
             Some(Value::Obj(o)) if matches!(o.borrow().kind, Kind::Date(_)) => match o.borrow().kind {
                 Kind::Date(t) => t,
@@ -1638,7 +2085,7 @@ pub fn install(i: &mut Interp) {
             Some(v) => i.to_number(v)?,
         };
         if !is_new {
-            return Ok(Value::Str(date_string(now()).into()));
+            return Ok(Value::Str(human(now(), 0).into()));
         }
         Ok(i.obj(Kind::Date(ms)))
     });
@@ -1648,14 +2095,14 @@ pub fn install(i: &mut Interp) {
         for (k, v) in a.iter().take(7).enumerate() {
             p[k] = i.to_number(v)?;
         }
-        Ok(Value::Num(make_time(p)))
+        Ok(Value::Num(clip(make_time(p))))
     });
     def(i, &date, "parse", |i, _t, a| {
         let s = i.to_str(&arg(&a, 0))?;
         Ok(Value::Num(parse_date(&s)))
     });
     def(i, &dp, "setTime", |i, t, a| {
-        let ms = i.to_number(&arg(&a, 0))?;
+        let ms = clip(i.to_number(&arg(&a, 0))?);
         if let Value::Obj(o) = &t {
             if let Kind::Date(d) = &mut o.borrow_mut().kind {
                 *d = ms;
@@ -1664,34 +2111,38 @@ pub fn install(i: &mut Interp) {
         }
         i.throw("TypeError", "not a Date")
     });
-    // setFullYear … setMilliseconds (and their UTC twins; Volant's local time is UTC).
+    // setFullYear … setMilliseconds, in local time, and their UTC twins.
     for (name, at) in [("FullYear", 0usize), ("Month", 1), ("Date", 2), ("Hours", 3), ("Minutes", 4), ("Seconds", 5), ("Milliseconds", 6)] {
-        for n in [format!("set{name}"), format!("setUTC{name}")] {
+        for (n, utc) in [(format!("set{name}"), false), (format!("setUTC{name}"), true)] {
+            let most = match at {
+                0 => 3,
+                1 => 2,
+                2 => 1,
+                3 => 4,
+                4 => 3,
+                5 => 2,
+                _ => 1,
+            };
             def(i, &dp, &n, move |i, t, a| {
                 let Value::Obj(o) = &t else { return i.throw("TypeError", "not a Date") };
                 let Kind::Date(ms) = o.borrow().kind else { return i.throw("TypeError", "not a Date") };
-                let mut p = time_parts(ms);
-                for (k, v) in a.iter().enumerate() {
-                    if at + k < 7 {
-                        p[at + k] = i.to_number(v)?;
-                    }
+                // setFullYear on an invalid date starts from +0.
+                let ms = if ms.is_nan() && at == 0 { 0.0 } else { ms };
+                let off = if utc { 0.0 } else { crate::tz::local_offset(ms) };
+                let mut p = time_parts(ms + off);
+                for (k, v) in a.iter().take(most).enumerate() {
+                    p[at + k] = i.to_number(v)?;
                 }
-                let new = make_time(p);
+                if a.is_empty() {
+                    p[at] = f64::NAN;
+                }
+                let new = clip(if utc { make_time(p) } else { crate::tz::local_to_utc(make_time(p)) });
                 if let Kind::Date(d) = &mut o.borrow_mut().kind {
                     *d = new;
                 }
                 Ok(Value::Num(new))
             });
         }
-    }
-    for n in ["getMilliseconds", "getUTCMilliseconds"] {
-        def(i, &dp, n, |i, t, _a| match &t {
-            Value::Obj(o) => match o.borrow().kind {
-                Kind::Date(ms) => Ok(Value::Num(ms.rem_euclid(1000.0))),
-                _ => i.throw("TypeError", "not a Date"),
-            },
-            _ => i.throw("TypeError", "not a Date"),
-        });
     }
     let this_time = |i: &Interp, t: &Value| -> Res<f64> {
         match t {
@@ -1705,24 +2156,10 @@ pub fn install(i: &mut Interp) {
     def(i, &dp, "getTime", move |i, t, _a| Ok(Value::Num(this_time(i, &t)?)));
     def(i, &dp, "valueOf", move |i, t, _a| Ok(Value::Num(this_time(i, &t)?)));
     def(i, &dp, "toISOString", move |i, t, _a| Ok(Value::Str(date_string(this_time(i, &t)?).into())));
-    // Browser-style text: "Fri Nov 13 2026 10:00:00 GMT+0000 (Coordinated Universal Time)".
-    fn human(ms: f64, part: u8) -> String {
-        if ms.is_nan() {
-            return "Invalid Date".into();
-        }
-        let s = date_string(ms);
-        const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-        let day = DAYS[((ms / 86_400_000.0).floor() + 4.0).rem_euclid(7.0) as usize];
-        let month = MONTHS[s.get(5..7).and_then(|m| m.parse::<usize>().ok()).unwrap_or(1).clamp(1, 12) - 1];
-        let (year, date, time) = (s.get(0..4).unwrap_or(""), s.get(8..10).unwrap_or(""), s.get(11..19).unwrap_or(""));
-        match part {
-            0 => format!("{day} {month} {date} {year} {time} GMT+0000 (Coordinated Universal Time)"),
-            1 => format!("{day} {month} {date} {year}"),
-            2 => format!("{time} GMT+0000 (Coordinated Universal Time)"),
-            _ => format!("{day}, {date} {month} {year} {time} GMT"),
-        }
-    }
+    def(i, &dp, "getTimezoneOffset", move |i, t, _a| {
+        let ms = this_time(i, &t)?;
+        Ok(Value::Num(if ms.is_nan() { f64::NAN } else { -crate::tz::local_offset(ms) / 60_000.0 + 0.0 }))
+    });
     for (name, part) in [("toString", 0u8), ("toDateString", 1), ("toTimeString", 2), ("toUTCString", 3), ("toGMTString", 3)] {
         def(i, &dp, name, move |i, t, _a| Ok(Value::Str(human(this_time(i, &t)?, part).into())));
     }
@@ -1738,24 +2175,25 @@ pub fn install(i: &mut Interp) {
         i.call(&f, t, vec![Value::Num(y)])
     });
     def(i, &dp, "toJSON", move |i, t, _a| Ok(Value::Str(date_string(this_time(i, &t)?).into())));
-    for (name, field) in [("getUTCFullYear", 0), ("getUTCMonth", 1), ("getUTCDate", 2), ("getUTCHours", 3), ("getUTCMinutes", 4), ("getUTCSeconds", 5), ("getUTCDay", 6)] {
-        for n in [name.to_string(), name.replace("UTC", "")] {
+    for (name, field) in [("FullYear", 0usize), ("Month", 1), ("Date", 2), ("Hours", 3), ("Minutes", 4), ("Seconds", 5), ("Milliseconds", 6), ("Day", 7)] {
+        for (n, utc) in [(format!("getUTC{name}"), true), (format!("get{name}"), false)] {
             def(i, &dp, &n, move |i, t, _a| {
                 let ms = this_time(i, &t)?;
-                let s = date_string(ms);
-                let f = |a: usize, b: usize| s.get(a..b).and_then(|x| x.parse::<f64>().ok()).unwrap_or(f64::NAN);
-                Ok(Value::Num(match field {
-                    0 => f(0, 4),
-                    1 => f(5, 7) - 1.0,
-                    2 => f(8, 10),
-                    3 => f(11, 13),
-                    4 => f(14, 16),
-                    5 => f(17, 19),
-                    _ => ((ms / 86_400_000.0).floor() + 4.0).rem_euclid(7.0),
-                }))
+                let ms = if utc { ms } else { ms + crate::tz::local_offset(ms) };
+                Ok(Value::Num(fields(ms)[field]))
             });
         }
     }
+
+    // For Intl.DateTimeFormat: the local zone's name and other zones' offsets.
+    let local_zone = i.native(|_i, _t, _a| Ok(Value::Str(crate::tz::local_name().into())));
+    i.global_obj.borrow_mut().set_hidden("__localZone", local_zone);
+    let zone_offset = i.native(|i, _t, a| {
+        let name = i.to_str(&arg(&a, 0))?;
+        let t = i.to_number(&arg(&a, 1))?;
+        Ok(crate::tz::zone_offset_minutes(&name, t).map(Value::Num).unwrap_or(Value::Null))
+    });
+    i.global_obj.borrow_mut().set_hidden("__zoneOffset", zone_offset);
 
     // ---------------------------------------------------------- URIs
     for (name, keep) in [("encodeURIComponent", "-_.!~*'()"), ("encodeURI", "-_.!~*'();/?:@&=+$,#")] {
@@ -1806,12 +2244,8 @@ pub fn install(i: &mut Interp) {
 
     // ---------------------------------------------------------- misc
     let structured = i.native(|i, _t, a| {
-        // A deep copy through JSON (enough for plain data).
-        let mut seen = Vec::new();
-        match json_stringify(i, &arg(&a, 0), "", "", &mut seen)? {
-            Some(s) => Ok(volant_core::json::parse(&s).map(|v| from_json(i, &v)).unwrap_or(Value::Undefined)),
-            None => Ok(Value::Undefined),
-        }
+        let mut memo = Vec::new();
+        structured_clone(i, &arg(&a, 0), &mut memo)
     });
     global(i, "structuredClone", structured);
     for (name, base) in [("WeakMap", "Map"), ("WeakSet", "Set"), ("WeakRef", "Object")] {
@@ -1821,10 +2255,124 @@ pub fn install(i: &mut Interp) {
         }
     }
 
+    // Object.groupBy and Map.groupBy (ES2024).
+    fn group(i: &mut Interp, a: &[Value]) -> Res<Vec<(Value, Vec<Value>)>> {
+        let cb = arg(a, 1);
+        if !Interp::is_callable(&cb) {
+            return i.throw("TypeError", "callback is not a function");
+        }
+        let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+        for (k, x) in i.iterate(&arg(a, 0))?.into_iter().enumerate() {
+            let key = i.call(&cb, Value::Undefined, vec![x.clone(), Value::Num(k as f64)])?;
+            match groups.iter_mut().find(|(g, _)| Interp::same_value_zero(g, &key)) {
+                Some((_, list)) => list.push(x),
+                None => groups.push((key, vec![x])),
+            }
+        }
+        Ok(groups)
+    }
+    def(i, &object, "groupBy", |i, _t, a| {
+        let groups = group(i, &a)?;
+        let o = i.obj(Kind::Plain);
+        if let Value::Obj(ob) = &o {
+            ob.borrow_mut().proto = None;
+        }
+        for (k, list) in groups {
+            let k = i.key(&k)?;
+            let arr = i.array(list);
+            i.set(&o, &k, arr)?;
+        }
+        Ok(o)
+    });
+    let map_ctor = i.global_obj.borrow().get_own("Map").and_then(|s| if let Slot::Data(v) = s { Some(v.clone()) } else { None });
+    if let Some(Value::Obj(mc)) = map_ctor {
+        def(i, &mc, "groupBy", |i, _t, a| {
+            let groups = group(i, &a)?;
+            let m = i.obj(Kind::Map(Default::default()));
+            let set = i.get(&m, "set")?;
+            for (k, list) in groups {
+                let arr = i.array(list);
+                i.call(&set, m.clone(), vec![k, arr])?;
+            }
+            Ok(m)
+        });
+    }
+
     // Silence the unused-callable lint for Callable (used by interp's matches).
     let _ = |c: &Callable| matches!(c, Callable::Native(_));
     let _ = to_i32;
     let _ = str_to_number;
+}
+
+/// `toFixed`: rounded half away from zero on the exact value, as the spec
+/// asks (Rust's formatting rounds ties to even).
+fn to_fixed(n: f64, d: usize) -> String {
+    let exact = format!("{:.*}", d + 30, n.abs());
+    let (int, frac) = exact.split_once('.').unwrap_or((&exact, ""));
+    let mut digits: Vec<u8> = int.bytes().chain(frac.bytes().take(d)).map(|b| b - b'0').collect();
+    let up = frac.as_bytes().get(d).is_some_and(|&b| b >= b'5');
+    if up {
+        let mut k = digits.len();
+        loop {
+            if k == 0 {
+                digits.insert(0, 1);
+                break;
+            }
+            k -= 1;
+            if digits[k] == 9 {
+                digits[k] = 0;
+            } else {
+                digits[k] += 1;
+                break;
+            }
+        }
+    }
+    let int_len = digits.len() - d;
+    let mut out = String::with_capacity(digits.len() + 2);
+    if n < 0.0 {
+        out.push('-');
+    }
+    for (k, x) in digits.iter().enumerate() {
+        if k == int_len {
+            out.push('.');
+        }
+        out.push((b'0' + x) as char);
+    }
+    out
+}
+
+/// A number in another base, fraction included (as `Math.random().toString(36)` uses).
+fn radix_string(n: f64, radix: u32) -> String {
+    let neg = n < 0.0;
+    let a = n.abs();
+    let mut int = a.trunc();
+    let mut frac = a - int;
+    let mut head = Vec::new();
+    loop {
+        let digit = (int % radix as f64) as u32;
+        head.push(std::char::from_digit(digit, radix).unwrap_or('0'));
+        int = (int / radix as f64).trunc();
+        if int < 1.0 {
+            break;
+        }
+    }
+    let mut out: String = if neg { "-".into() } else { String::new() };
+    out.extend(head.iter().rev());
+    if frac > 0.0 {
+        out.push('.');
+        // Enough digits to tell the double apart, as engines print.
+        let mut delta = 0.5 * (f64::EPSILON * a.max(f64::MIN_POSITIVE)).max(f64::from_bits(1));
+        let mut k = 0;
+        while frac >= delta && k < 1100 {
+            frac *= radix as f64;
+            delta *= radix as f64;
+            let digit = frac.trunc() as u32;
+            frac -= digit as f64;
+            out.push(std::char::from_digit(digit.min(radix - 1), radix).unwrap_or('0'));
+            k += 1;
+        }
+    }
+    out
 }
 
 /// Days from 1970-01-01 to a civil date (month 1–12).
@@ -1851,24 +2399,241 @@ fn make_time(p: [f64; 7]) -> f64 {
 
 /// (year, month 0–11, day, h, m, s, ms) of a time.
 fn time_parts(ms: f64) -> [f64; 7] {
-    let s = date_string(ms);
-    let f = |a: usize, b: usize| s.get(a..b).and_then(|x| x.parse::<f64>().ok()).unwrap_or(f64::NAN);
-    [f(0, 4), f(5, 7) - 1.0, f(8, 10), f(11, 13), f(14, 16), f(17, 19), ms.rem_euclid(1000.0)]
+    let f = fields(ms);
+    [f[0], f[1], f[2], f[3], f[4], f[5], f[6]]
 }
 
 /// `Date.parse` for the ISO forms (`2026-11-12`, `2026-11-12T06:47:13Z`).
 fn parse_date(s: &str) -> f64 {
     let t = s.trim();
-    let num = |a: usize, b: usize| t.get(a..b).and_then(|x| x.parse::<i64>().ok());
-    let (Some(y), Some(m), Some(d)) = (num(0, 4), num(5, 7), num(8, 10)) else { return f64::NAN };
-    let (hh, mm, ss) = (num(11, 13).unwrap_or(0), num(14, 16).unwrap_or(0), num(17, 19).unwrap_or(0));
-    // Days from the civil date (inverse of date_string's algorithm).
-    let y2 = if m <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    ((days * 86_400 + hh * 3600 + mm * 60 + ss) * 1000) as f64
+    iso_date(t).unwrap_or_else(|| loose_date(t))
+}
+
+/// The ECMAScript date-time string format: `[+-YY]YYYY[-MM[-DD]][THH:mm[:ss[.sss]]][Z|+-HH:mm]`.
+/// (A date alone is UTC; a date and time without a zone, local time.)
+fn iso_date(t: &str) -> Option<f64> {
+    let b = t.as_bytes();
+    let mut k = 0;
+    let digits = |k: &mut usize, n: usize| -> Option<i64> {
+        let part = t.get(*k..*k + n)?;
+        if !part.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        *k += n;
+        part.parse().ok()
+    };
+    let year = match b.first()? {
+        b'+' | b'-' => {
+            let neg = b[0] == b'-';
+            k = 1;
+            let y = digits(&mut k, 6)?;
+            if neg { -y } else { y }
+        }
+        _ => digits(&mut k, 4)?,
+    };
+    let (mut month, mut day) = (1, 1);
+    if b.get(k) == Some(&b'-') {
+        k += 1;
+        month = digits(&mut k, 2)?;
+        if b.get(k) == Some(&b'-') {
+            k += 1;
+            day = digits(&mut k, 2)?;
+        }
+    }
+    let (mut h, mut mi, mut sec, mut ms) = (0, 0, 0, 0.0);
+    let mut offset = 0;
+    let (mut timed, mut zoned) = (false, false);
+    if matches!(b.get(k), Some(b'T' | b't' | b' ')) {
+        timed = true;
+        k += 1;
+        h = digits(&mut k, 2)?;
+        if b.get(k) != Some(&b':') {
+            return None;
+        }
+        k += 1;
+        mi = digits(&mut k, 2)?;
+        if b.get(k) == Some(&b':') {
+            k += 1;
+            sec = digits(&mut k, 2)?;
+            if matches!(b.get(k), Some(b'.' | b',')) {
+                k += 1;
+                let from = k;
+                while b.get(k).is_some_and(u8::is_ascii_digit) {
+                    k += 1;
+                }
+                let frac = t.get(from..k)?;
+                if frac.is_empty() {
+                    return None;
+                }
+                ms = (format!("0.{frac}").parse::<f64>().ok()? * 1000.0).trunc();
+            }
+        }
+        match b.get(k) {
+            Some(b'Z' | b'z') => {
+                k += 1;
+                zoned = true;
+            }
+            Some(&c @ (b'+' | b'-')) => {
+                k += 1;
+                zoned = true;
+                let oh = digits(&mut k, 2)?;
+                if b.get(k) == Some(&b':') {
+                    k += 1;
+                }
+                let om = digits(&mut k, 2).unwrap_or(0);
+                offset = (oh * 60 + om) * if c == b'+' { 1 } else { -1 };
+            }
+            _ => {}
+        }
+    }
+    if k != b.len() || !(1..=12).contains(&month) || !(1..=31).contains(&day) || h > 24 || mi > 59 || sec > 59 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let t = ((days * 86_400 + h * 3600 + mi * 60 + sec - offset * 60) * 1000) as f64 + ms;
+    Some(clip(if timed && !zoned { crate::tz::local_to_utc(t) } else { t }))
+}
+
+/// The forms browsers accept beyond ISO: `Thu, 01 Jan 1970 00:00:00 GMT`,
+/// `Jan 2, 2020 10:00 PM`, `2020/01/02`, `1/2/2020`, `Tue Mar 05 2024 10:00:00 GMT+0100 (CET)`.
+fn loose_date(t: &str) -> f64 {
+    const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    // Drop a parenthesised zone name.
+    let t = match t.find('(') {
+        Some(p) => &t[..p],
+        None => t,
+    };
+    let (mut year, mut month, mut day): (Option<i64>, Option<i64>, Option<i64>) = (None, None, None);
+    let (mut h, mut mi, mut sec, mut ms) = (0i64, 0i64, 0i64, 0f64);
+    let mut offset = 0i64;
+    let mut zoned = false;
+    let mut pm: Option<bool> = None;
+    let mut numbers: Vec<i64> = Vec::new();
+    let lower = t.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    while !rest.is_empty() {
+        let c = rest.as_bytes()[0];
+        if c.is_ascii_whitespace() || c == b',' {
+            rest = &rest[1..];
+            continue;
+        }
+        if c.is_ascii_alphabetic() {
+            let end = rest.find(|ch: char| !ch.is_ascii_alphabetic()).unwrap_or(rest.len());
+            let word = &rest[..end];
+            rest = &rest[end..];
+            if let Some(m) = MONTHS.iter().position(|m| word.starts_with(m)) {
+                month = Some(m as i64 + 1);
+            } else if word == "am" || word == "pm" {
+                pm = Some(word == "pm");
+            } else if matches!(word, "gmt" | "utc" | "ut" | "z") {
+                // A following +hhmm is read as the offset below.
+                zoned = true;
+            } else if let Some(z) = match word { "est" => Some(-5), "edt" => Some(-4), "cst" => Some(-6), "cdt" => Some(-5), "mst" => Some(-7), "mdt" => Some(-6), "pst" => Some(-8), "pdt" => Some(-7), _ => None } {
+                offset = z * 60;
+                zoned = true;
+            } else if !matches!(word, "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun" | "t")
+                && !["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].contains(&word)
+            {
+                return f64::NAN;
+            }
+            continue;
+        }
+        if (c == b'+' || c == b'-') && rest[1..].starts_with(|ch: char| ch.is_ascii_digit()) && (year.is_some() || numbers.len() >= 2 || h > 0 || mi > 0) {
+            // A zone offset: +hhmm or +hh:mm.
+            let body = &rest[1..];
+            let end = body.find(|ch: char| !ch.is_ascii_digit() && ch != ':').unwrap_or(body.len());
+            let d: String = body[..end].chars().filter(|ch| *ch != ':').collect();
+            let v: i64 = d.parse().unwrap_or(0);
+            let (oh, om) = if d.len() <= 2 { (v, 0) } else { (v / 100, v % 100) };
+            offset = (oh * 60 + om) * if c == b'+' { 1 } else { -1 };
+            zoned = true;
+            rest = &body[end..];
+            continue;
+        }
+        if c.is_ascii_digit() {
+            let end = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+            let n: i64 = rest[..end].parse().unwrap_or(0);
+            let after = &rest[end..];
+            if after.starts_with(':') {
+                // A time: hh:mm[:ss[.sss]].
+                let mut parts = vec![n];
+                let mut r = after;
+                while let Some(x) = r.strip_prefix(':') {
+                    let e = x.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(x.len());
+                    parts.push(x[..e].parse().unwrap_or(0));
+                    r = &x[e..];
+                }
+                if let Some(x) = r.strip_prefix('.') {
+                    let e = x.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(x.len());
+                    ms = format!("0.{}", &x[..e]).parse::<f64>().unwrap_or(0.0) * 1000.0;
+                    r = &x[e..];
+                }
+                h = parts[0];
+                mi = parts.get(1).copied().unwrap_or(0);
+                sec = parts.get(2).copied().unwrap_or(0);
+                rest = r;
+                continue;
+            }
+            if after.starts_with('/') || (after.starts_with('-') && after[1..].starts_with(|ch: char| ch.is_ascii_digit())) {
+                // A numeric date: y/m/d or m/d/y.
+                let sep = after.as_bytes()[0] as char;
+                let mut parts = vec![(n, end)];
+                let mut r = after;
+                while let Some(x) = r.strip_prefix(sep) {
+                    let e = x.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(x.len());
+                    if e == 0 {
+                        break;
+                    }
+                    parts.push((x[..e].parse().unwrap_or(0), e));
+                    r = &x[e..];
+                }
+                if parts.len() == 3 {
+                    if parts[0].1 >= 3 {
+                        year = Some(parts[0].0);
+                        month = Some(parts[1].0);
+                        day = Some(parts[2].0);
+                    } else {
+                        month = Some(parts[0].0);
+                        day = Some(parts[1].0);
+                        year = Some(parts[2].0);
+                    }
+                } else if parts.len() == 2 {
+                    month = Some(parts[0].0);
+                    day = Some(parts[1].0);
+                }
+                rest = r;
+                continue;
+            }
+            numbers.push(n);
+            rest = after;
+            continue;
+        }
+        if c == b'.' || c == b'/' || c == b'-' {
+            rest = &rest[1..];
+            continue;
+        }
+        return f64::NAN;
+    }
+    for n in numbers {
+        if day.is_none() && (1..=31).contains(&n) && (month.is_some() || year.is_none()) && !(year.is_none() && n > 31) {
+            day = Some(n);
+        } else if year.is_none() {
+            year = Some(if n < 50 { 2000 + n } else if n < 100 { 1900 + n } else { n });
+        } else {
+            return f64::NAN;
+        }
+    }
+    let (Some(year), Some(month)) = (year, month) else { return f64::NAN };
+    let day = day.unwrap_or(1);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || h > 24 || mi > 59 || sec > 59 {
+        return f64::NAN;
+    }
+    match pm {
+        Some(true) if h < 12 => h += 12,
+        Some(false) if h == 12 => h = 0,
+        _ => {}
+    }
+    let days = days_from_civil(year, month, day);
+    let t = ((days * 86_400 + h * 3600 + mi * 60 + sec - offset * 60) * 1000) as f64 + ms.trunc();
+    clip(if zoned { t } else { crate::tz::local_to_utc(t) })
 }

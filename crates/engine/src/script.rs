@@ -3229,6 +3229,14 @@ fn install(i: &mut Interp, st: &S) {
         };
         Ok(wrap_list(i, st, found))
     });
+    method(i, st, &node, "getElementsByName", |i, st, id, a| {
+        let want = i.to_str(&arg(&a, 0))?;
+        let found: Vec<NodeId> = {
+            let s = st.borrow();
+            descendants(&s.dom, id).into_iter().filter(|&n| is_element(&s.dom, n) && s.dom.attr(n, "name") == Some(&*want)).collect()
+        };
+        Ok(wrap_list(i, st, found))
+    });
     method(i, st, &node, "getElementById", |i, st, id, a| {
         let want = i.to_str(&arg(&a, 0))?;
         let found = {
@@ -4961,7 +4969,7 @@ const INTERFACE_MEMBERS: &[(&str, &[&str])] = &[
 /// What Document's prototype holds itself rather than inheriting from Node.
 const DOCUMENT_MEMBERS: &[&str] = &[
     "append", "prepend", "replaceChildren", "querySelector", "querySelectorAll", "getElementsByTagName", "getElementsByTagNameNS", "getElementsByClassName",
-    "getElementById", "children", "firstElementChild", "lastElementChild", "childElementCount", "createElement", "createElementNS", "createTextNode",
+    "getElementsByName", "getElementById", "children", "firstElementChild", "lastElementChild", "childElementCount", "createElement", "createElementNS", "createTextNode",
     "createComment", "createDocumentFragment", "createEvent", "importNode", "adoptNode",
 ];
 

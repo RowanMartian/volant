@@ -363,10 +363,13 @@
   g.isSecureContext = true
   g.crossOriginIsolated = false
   define(g, 'origin', () => location.origin)
-  g.postMessage = (data, origin) => setTimeout(() => {
-    const e = new Event('message'); e.data = data; e.origin = location.origin; e.source = g
-    g.dispatchEvent(e)
-  }, 0)
+  g.postMessage = (data, origin) => {
+    const copy = structuredClone(data)
+    setTimeout(() => {
+      const e = new MessageEvent('message', { data: copy, origin: location.origin, source: g })
+      g.dispatchEvent(e)
+    }, 0)
+  }
   g.matchMedia = q => ({
     media: String(q), matches: __media(String(q)), onchange: null,
     addListener: noop, removeListener: noop, addEventListener: noop, removeEventListener: noop, dispatchEvent: () => true,
@@ -1513,26 +1516,401 @@
   g.XMLSerializer = class XMLSerializer { serializeToString(n) { return n.outerHTML || n.textContent || '' } }
   g.CSS = { supports: () => true, escape: s => String(s).replace(/([^\w-])/g, '\\$1') }
   g.trustedTypes = undefined
-  g.Intl = g.Intl || {
-    NumberFormat: function (loc, o) { return { format: n => (o && o.maximumFractionDigits === 0 ? Math.round(n) : n).toLocaleString(), formatToParts: n => [{ type: 'integer', value: String(n) }], resolvedOptions: () => ({ locale: 'en-US' }) } },
-    DateTimeFormat: function () { return { format: d => new Date(d === undefined ? Date.now() : d).toLocaleDateString(), formatToParts: () => [], resolvedOptions: () => ({ locale: 'en-US', timeZone: 'UTC' }) } },
-    Collator: function () { return { compare: (a, b) => String(a).localeCompare(String(b)) } },
-    PluralRules: function () { return { select: n => (n === 1 ? 'one' : 'other') } },
-    RelativeTimeFormat: function () { return { format: (v, u) => (v < 0 ? -v + ' ' + u + 's ago' : 'in ' + v + ' ' + u + 's') } },
-    ListFormat: function () { return { format: l => Array.from(l).join(', ') } },
-    Segmenter: function () { return { segment: s => Array.from(String(s)).map((c, i) => ({ segment: c, index: i })) } },
-    getCanonicalLocales: l => [].concat(l || []),
-  }
+  // ---------------------------------------------------------------- Intl
+  // Number and date formatting as pages show it: English patterns, the
+  // separators and currency placement of the common locales.
+  g.Intl = (() => {
+    const pick = loc => { const l = Array.isArray(loc) ? loc[0] : loc; return typeof l === 'string' && l ? l : (navigator.language || 'en-US') }
+    const lang = l => l.split('-')[0].toLowerCase()
+    const SEP = { de: ['.', ','], es: ['.', ','], it: ['.', ','], nl: ['.', ','], pt: ['.', ','], da: ['.', ','], tr: ['.', ','], id: ['.', ','], fr: [' ', ','], ru: [' ', ','], pl: [' ', ','], sv: [' ', ','], nb: [' ', ','], fi: [' ', ','], cs: [' ', ','], uk: [' ', ','] }
+    const seps = l => (l === 'de-CH' ? ['’', '.'] : l === 'pt-BR' || l === 'pt-PT' ? ['.', ','] : SEP[lang(l)] || [',', '.'])
+    const SYM = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', INR: '₹', KRW: '₩', CNY: 'CN¥', CAD: 'CA$', AUD: 'A$', NZD: 'NZ$', HKD: 'HK$', MXN: 'MX$', BRL: 'R$', ILS: '₪', VND: '₫', TWD: 'NT$', PHP: '₱', THB: '฿', NGN: '₦', UAH: '₴', RUB: 'RUB', CHF: 'CHF' }
+    const ZERO_DP = ['JPY', 'KRW', 'VND', 'CLP', 'ISK', 'HUF', 'TWD', 'UGX', 'XOF', 'XAF', 'PYG']
+    const symbol = (cur, l) => { if (cur === 'JPY' && lang(l) === 'ja') return '￥'; if (cur === 'USD' && l !== 'en-US' && l !== 'en' && lang(l) === 'en') return 'US$'; if ((cur === 'CAD' && l === 'en-CA') || (cur === 'AUD' && l === 'en-AU') || (cur === 'NZD' && l === 'en-NZ')) return '$'; return SYM[cur] || cur }
+    const group = (int, sep, min, indian) => {
+      if (int.length < (min || 4)) return int
+      let out = ''
+      for (let i = 0; i < int.length; i++) { const left = int.length - i; if (i && (indian ? left === 3 || (left > 3 && (left - 3) % 2 === 0) : left % 3 === 0)) out += sep; out += int[i] }
+      return out
+    }
+    // Plain digits of a big number (toFixed gives exponents from 1e21).
+    const expand = s => { const m = /^(\d+)(?:\.(\d+))?e\+(\d+)$/.exec(s); if (!m) return s; const digits = m[1] + (m[2] || ''); return digits + '0'.repeat(Number(m[3]) - (m[2] || '').length) }
+    const CUR_NAMES = { USD: 'US dollars', EUR: 'euros', GBP: 'British pounds', JPY: 'Japanese yen', CAD: 'Canadian dollars', AUD: 'Australian dollars', INR: 'Indian rupees', CNY: 'Chinese yuan', CHF: 'Swiss francs', MXN: 'Mexican pesos', BRL: 'Brazilian reals', KRW: 'South Korean won' }
+    const COMPACT = [[1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'K']]
+    const LONG_COMPACT = { T: ' trillion', B: ' billion', M: ' million', K: ' thousand' }
+    class NumberFormat {
+      constructor(loc, o) {
+        o = o || {}
+        this._l = pick(loc)
+        const style = o.style || 'decimal'
+        const cur = o.currency ? String(o.currency).toUpperCase() : undefined
+        if (style === 'currency' && !cur) throw new TypeError('Currency code is required with currency style.')
+        const dmin = style === 'currency' ? (ZERO_DP.includes(cur) ? 0 : 2) : 0
+        const dmax = style === 'currency' ? dmin : style === 'percent' ? 0 : 3
+        let min = o.minimumFractionDigits, max = o.maximumFractionDigits
+        if (min === undefined && max === undefined) { min = dmin; max = o.notation === 'compact' ? (style === 'currency' ? 0 : 0) : dmax } else if (min === undefined) min = Math.min(dmin, max); else if (max === undefined) max = Math.max(min, dmax)
+        if (min > max || min < 0 || max > 100) throw new RangeError('maximumFractionDigits value is out of range.')
+        this._o = { locale: this._l, numberingSystem: 'latn', style, currency: cur, currencyDisplay: o.currencyDisplay || 'symbol', unit: o.unit, unitDisplay: o.unitDisplay || 'short', minimumIntegerDigits: o.minimumIntegerDigits || 1, minimumFractionDigits: min, maximumFractionDigits: max, minimumSignificantDigits: o.minimumSignificantDigits, maximumSignificantDigits: o.maximumSignificantDigits, useGrouping: o.useGrouping === undefined ? 'auto' : o.useGrouping, notation: o.notation || 'standard', compactDisplay: o.compactDisplay || 'short', signDisplay: o.signDisplay || 'auto' }
+      }
+      formatToParts(n) {
+        const o = this._o
+        n = typeof n === 'bigint' ? Number(n) : Number(n)
+        const [gs, ds] = seps(this._l)
+        const parts = []
+        const neg = n < 0 || Object.is(n, -0)
+        if (isNaN(n)) parts.push({ type: 'nan', value: 'NaN' })
+        else if (!isFinite(n)) parts.push({ type: 'infinity', value: '∞' })
+        let a = Math.abs(n)
+        if (o.style === 'percent') a *= 100
+        let suffix = ''
+        if (o.notation === 'compact' && isFinite(a)) {
+          for (const [v, s] of COMPACT) if (a >= v * 0.9995) { a /= v; suffix = o.compactDisplay === 'long' ? LONG_COMPACT[s] : s; break }
+          if (suffix && o.maximumSignificantDigits === undefined && this._o.maximumFractionDigits === 0) { const digits = a < 100 ? 2 : 3; a = Number(a.toPrecision(digits)) } else if (!suffix && o.maximumFractionDigits === 0) a = Number(a.toPrecision(Math.max(2, String(Math.round(a)).length)))
+        }
+        if (isFinite(a) && !isNaN(a)) {
+          let txt
+          if (o.maximumSignificantDigits !== undefined) {
+            txt = String(Number(a.toPrecision(o.maximumSignificantDigits)))
+            if (txt.includes('e')) txt = Number(txt).toFixed(0)
+            if (o.minimumSignificantDigits) { const sig = txt.replace('.', '').replace(/^0+/, '').length; if (sig < o.minimumSignificantDigits) txt = Number(txt).toFixed(Math.max(0, (txt.split('.')[1] || '').length + o.minimumSignificantDigits - sig)) }
+          } else if (suffix) {
+            txt = String(a)
+            if (o.maximumFractionDigits > 0 || txt.includes('.')) { const f = txt.split('.')[1] || ''; if (f.length > Math.max(o.maximumFractionDigits, 1)) txt = a.toFixed(Math.max(o.maximumFractionDigits, 1)).replace(/\.?0+$/, '') }
+          } else {
+            txt = expand(a.toFixed(o.maximumFractionDigits))
+            if (txt.includes('.')) { let [i, f] = txt.split('.'); while (f.length > o.minimumFractionDigits && f.endsWith('0')) f = f.slice(0, -1); txt = f ? i + '.' + f : i }
+          }
+          let [int, frac] = txt.split('.')
+          if (int.length < o.minimumIntegerDigits) int = int.padStart(o.minimumIntegerDigits, '0')
+          const grouping = o.useGrouping === false || o.useGrouping === 'false' ? null : gs
+          const minGroup = lang(this._l) === 'es' || lang(this._l) === 'pl' ? 5 : 4
+          const grouped = grouping ? group(int, grouping, o.useGrouping === 'always' || o.useGrouping === true ? 4 : minGroup, this._l === 'en-IN' || this._l === 'hi-IN') : int
+          grouped.split(grouping || '\u0000').forEach((p, i) => { if (i) parts.push({ type: 'group', value: grouping }); parts.push({ type: 'integer', value: p }) })
+          if (frac) { parts.push({ type: 'decimal', value: ds }); parts.push({ type: 'fraction', value: frac }) }
+        }
+        if (suffix) parts.push({ type: 'compact', value: suffix })
+        const zero = isFinite(n) && !isNaN(n) && parts.filter(p => p.type === 'integer' || p.type === 'fraction').every(p => /^0*$/.test(p.value))
+        const sd = o.signDisplay
+        let sign = ''
+        if (neg && sd !== 'never' && !(zero && (sd === 'exceptZero' || sd === 'negative'))) sign = '-'
+        else if (!neg && (sd === 'always' || (sd === 'exceptZero' && !zero))) sign = '+'
+        if (o.style === 'currency') {
+          const code = o.currencyDisplay === 'code', name = o.currencyDisplay === 'name'
+          const sym = code ? o.currency : name ? o.currency : symbol(o.currency, this._l)
+          if (name) { parts.push({ type: 'literal', value: ' ' }, { type: 'currency', value: CUR_NAMES[o.currency] || o.currency }) }
+          else if ([',', '.'].indexOf(gs) === 0 && ds === '.') { parts.unshift({ type: 'currency', value: sym }); if (code) parts.splice(1, 0, { type: 'literal', value: ' ' }) }
+          else parts.push({ type: 'literal', value: ' ' }, { type: 'currency', value: sym })
+        } else if (o.style === 'percent') {
+          if (ds === ',' && lang(this._l) !== 'pt' && lang(this._l) !== 'it' && lang(this._l) !== 'nl') parts.push({ type: 'literal', value: ' ' })
+          parts.push({ type: 'percentSign', value: '%' })
+        } else if (o.style === 'unit' && o.unit) {
+          const U = { kilometer: 'km', meter: 'm', centimeter: 'cm', millimeter: 'mm', mile: 'mi', foot: 'ft', inch: 'in', kilogram: 'kg', gram: 'g', pound: 'lb', liter: 'L', 'kilometer-per-hour': 'km/h', 'mile-per-hour': 'mph', celsius: '°C', fahrenheit: '°F', percent: '%', second: 'sec', minute: 'min', hour: 'hr', day: 'day', byte: 'byte', kilobyte: 'kB', megabyte: 'MB', gigabyte: 'GB', terabyte: 'TB' }
+          const u = U[o.unit] || o.unit
+          const long = o.unitDisplay === 'long'
+          parts.push({ type: 'literal', value: o.unit === 'celsius' || o.unit === 'fahrenheit' || o.unit === 'percent' ? '' : ' ' }, { type: 'unit', value: long ? o.unit + (Math.abs(n) === 1 ? '' : 's') : u })
+        }
+        if (sign) parts.unshift({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign })
+        return parts.filter(p => p.value !== '')
+      }
+      format(n) { return this.formatToParts(n).map(p => p.value).join('') }
+      formatRange(a, b) { return this.format(a) + '–' + this.format(b) }
+      resolvedOptions() { const r = {}; for (const k in this._o) if (this._o[k] !== undefined) r[k] = this._o[k]; return r }
+      static supportedLocalesOf(l) { return [].concat(l || []) }
+    }
+    Object.defineProperty(NumberFormat.prototype, 'format', { get() { const f = n => this.formatToParts(n).map(p => p.value).join(''); Object.defineProperty(this, 'format', { value: f }); return f }, configurable: true })
+
+    const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+    const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+    const LOCAL_MONTHS = {
+      de: ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'],
+      fr: ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'],
+      es: ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'],
+      it: ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre'],
+      pt: ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'],
+      nl: ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'],
+    }
+    const SHORT_MONTHS = {
+      de: ['Jan.', 'Feb.', 'März', 'Apr.', 'Mai', 'Juni', 'Juli', 'Aug.', 'Sept.', 'Okt.', 'Nov.', 'Dez.'],
+      fr: ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'],
+      es: ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sept', 'oct', 'nov', 'dic'],
+      it: ['gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'],
+      pt: ['jan.', 'fev.', 'mar.', 'abr.', 'mai.', 'jun.', 'jul.', 'ago.', 'set.', 'out.', 'nov.', 'dez.'],
+      nl: ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'],
+    }
+    const LOCAL_DAYS = {
+      de: ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'],
+      fr: ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'],
+      es: ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'],
+      it: ['domenica', 'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato'],
+      pt: ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'],
+      nl: ['zondag', 'maandag', 'dinsdag', 'woensdag', 'donderdag', 'vrijdag', 'zaterdag'],
+    }
+    const STYLES = { full: { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }, long: { year: 'numeric', month: 'long', day: 'numeric' }, medium: { year: 'numeric', month: 'short', day: 'numeric' }, short: { year: '2-digit', month: 'numeric', day: 'numeric' } }
+    const TSTYLES = { full: { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'long' }, long: { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short' }, medium: { hour: 'numeric', minute: '2-digit', second: '2-digit' }, short: { hour: 'numeric', minute: '2-digit' } }
+    // The offset of a named zone at an instant, in minutes east of UTC.
+    const zoneOffset = (tz, t) => (!tz || tz === 'UTC' || tz === 'Etc/UTC' || tz === 'GMT' ? 0 : typeof __zoneOffset === 'function' ? __zoneOffset(tz, t) : null)
+    class DateTimeFormat {
+      constructor(loc, o, defaults) {
+        o = Object.assign({}, o || {})
+        this._l = pick(loc)
+        const has = ['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second', 'fractionalSecondDigits', 'dayPeriod', 'timeZoneName'].some(k => o[k] !== undefined)
+        if (o.dateStyle) Object.assign(o, STYLES[o.dateStyle])
+        if (o.timeStyle) Object.assign(o, TSTYLES[o.timeStyle])
+        if (!has && !o.dateStyle && !o.timeStyle) {
+          if (defaults !== 'time') Object.assign(o, { year: 'numeric', month: 'numeric', day: 'numeric' })
+          if (defaults === 'time' || defaults === 'all') Object.assign(o, { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+        }
+        if (o.timeZone !== undefined) { const z = String(o.timeZone); if (z.toUpperCase() === 'UTC') o.timeZone = 'UTC'; else if (zoneOffset(z, 0) === null && !/^[A-Za-z_]+(\/[A-Za-z_+\-0-9]+)*$/.test(z)) throw new RangeError('Invalid time zone specified: ' + z) }
+        const h12 = o.hour12 !== undefined ? o.hour12 : o.hourCycle ? o.hourCycle === 'h12' || o.hourCycle === 'h11' : lang(this._l) === 'en' && this._l !== 'en-GB' && this._l !== 'en-IE'
+        this._o = Object.assign(o, { locale: this._l, calendar: 'gregory', numberingSystem: 'latn', timeZone: o.timeZone || (typeof __localZone === 'function' ? __localZone() : 'UTC'), hour12: o.hour !== undefined ? h12 : undefined })
+      }
+      formatToParts(d) {
+        const o = this._o
+        const t = d === undefined ? Date.now() : +d
+        if (isNaN(t)) throw new RangeError('Invalid time value')
+        let off = zoneOffset(o.timeZone, t)
+        if (off === null) off = -new Date(t).getTimezoneOffset()
+        const u = new Date(t + off * 60000)
+        const Y = u.getUTCFullYear(), M = u.getUTCMonth(), Dd = u.getUTCDate(), W = u.getUTCDay(), h = u.getUTCHours(), mi = u.getUTCMinutes(), s = u.getUTCSeconds()
+        const pad = (n, w) => String(n).padStart(w, '0')
+        const P = []
+        const lit = v => P.push({ type: 'literal', value: v })
+        const en = lang(this._l) === 'en', us = en && !['en-GB', 'en-AU', 'en-NZ', 'en-IE', 'en-IN', 'en-ZA'].includes(this._l)
+        const names = LOCAL_MONTHS[lang(this._l)] || MONTHS
+        const mon = o.month === 'long' ? names[M] : o.month === 'short' ? (names === MONTHS ? MONTHS[M].slice(0, 3) : SHORT_MONTHS[lang(this._l)][M]) : o.month === 'narrow' ? names[M][0] : o.month === '2-digit' ? pad(M + 1, 2) : o.month ? String(M + 1) : null
+        const day = o.day === '2-digit' ? pad(Dd, 2) : o.day ? String(Dd) : null
+        const year = o.year === '2-digit' ? pad(Y % 100, 2) : o.year ? String(Y) : null
+        const dnames = LOCAL_DAYS[lang(this._l)] || DAYS
+        const wd = o.weekday === 'long' ? dnames[W] : o.weekday === 'short' ? (dnames === DAYS ? DAYS[W].slice(0, 3) : dnames[W].slice(0, 2) + (lang(this._l) === 'de' ? '.' : '')) : o.weekday === 'narrow' ? dnames[W][0] : null
+        const textMonth = o.month === 'long' || o.month === 'short' || o.month === 'narrow'
+        let dated = false
+        if (wd) { P.push({ type: 'weekday', value: wd }); if (mon || day || year) lit(', '); dated = true }
+        if (mon || day || year) {
+          dated = true
+          if (textMonth) {
+            if (us) { if (mon) P.push({ type: 'month', value: mon }); if (day) { if (mon) lit(' '); P.push({ type: 'day', value: day }) } if (year) { if (mon || day) lit(day ? ', ' : ' '); P.push({ type: 'year', value: year }) } }
+            else { const dot = lang(this._l) === 'de' ? '. ' : ' '; if (day) { P.push({ type: 'day', value: day }); if (mon) lit(dot) } if (mon) P.push({ type: 'month', value: mon }); if (year) { if (mon || day) lit(' '); P.push({ type: 'year', value: year }) } }
+          } else {
+            const sep = lang(this._l) === 'de' || lang(this._l) === 'ru' || lang(this._l) === 'pl' ? '.' : lang(this._l) === 'nl' ? '-' : '/'
+            const cjk = ['ja', 'zh'].includes(lang(this._l))
+            const iso = cjk || ['sv', 'lt', 'hu'].includes(lang(this._l)) || this._l === 'en-CA' || this._l === 'fr-CA'
+            const order = iso ? ['year', 'month', 'day'] : us ? ['month', 'day', 'year'] : ['day', 'month', 'year']
+            const vals = { year, month: mon, day: iso || !us && lang(this._l) !== 'de' ? day && (o.day === 'numeric' && !iso ? pad(Dd, 2) : day) : day }
+            if (!us && !iso && lang(this._l) !== 'de' && vals.month && o.month === 'numeric') vals.month = pad(M + 1, 2)
+            if (iso && !cjk && vals.month) { vals.month = pad(M + 1, 2); if (vals.day) vals.day = pad(Dd, 2) }
+            if (cjk) { vals.month = mon; vals.day = day }
+            let first = true
+            for (const k of order) if (vals[k]) { if (!first) lit(cjk ? '/' : iso ? '-' : sep); P.push({ type: k, value: vals[k] }); first = false }
+          }
+        }
+        if (o.hour !== undefined || o.minute !== undefined || o.second !== undefined) {
+          if (dated) lit(us || en ? ', ' : ' ')
+          const H = o.hour12 ? (h % 12 || 12) : h
+          if (o.hour !== undefined) P.push({ type: 'hour', value: o.hour === '2-digit' || (!o.hour12 && o.minute !== undefined) ? pad(H, 2) : String(H) })
+          if (o.minute !== undefined) { if (o.hour !== undefined) lit(':'); P.push({ type: 'minute', value: o.hour !== undefined || o.minute === '2-digit' ? pad(mi, 2) : String(mi) }) }
+          if (o.second !== undefined) { lit(':'); P.push({ type: 'second', value: pad(s, 2) }) }
+          if (o.fractionalSecondDigits) { lit('.'); P.push({ type: 'fractionalSecond', value: pad(u.getUTCMilliseconds(), 3).slice(0, o.fractionalSecondDigits) }) }
+          if (o.hour12 && o.hour !== undefined) { lit(' '); P.push({ type: 'dayPeriod', value: h < 12 ? 'AM' : 'PM' }) }
+        }
+        if (o.timeZoneName) {
+          lit(' ')
+          const sign = off < 0 ? '-' : '+', a = Math.abs(off)
+          P.push({ type: 'timeZoneName', value: off === 0 && (o.timeZone === 'UTC' || o.timeZoneName.startsWith('long') === false) ? (o.timeZone === 'UTC' ? 'UTC' : 'GMT') : 'GMT' + sign + Math.floor(a / 60) + (a % 60 ? ':' + pad(a % 60, 2) : '') })
+        }
+        return P
+      }
+      format(d) { return this.formatToParts(d).map(p => p.value).join('') }
+      formatRange(a, b) { return this.format(a) + ' – ' + this.format(b) }
+      resolvedOptions() { const r = {}; for (const k in this._o) if (this._o[k] !== undefined) r[k] = this._o[k]; return r }
+      static supportedLocalesOf(l) { return [].concat(l || []) }
+    }
+    Object.defineProperty(DateTimeFormat.prototype, 'format', { get() { const f = d => this.formatToParts(d).map(p => p.value).join(''); Object.defineProperty(this, 'format', { value: f }); return f }, configurable: true })
+
+    class PluralRules {
+      constructor(loc, o) { this._l = pick(loc); this._t = (o && o.type) || 'cardinal' }
+      select(n) {
+        n = Number(n)
+        if (this._t === 'ordinal') { const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? 'one' : a === 2 && b !== 12 ? 'two' : a === 3 && b !== 13 ? 'few' : 'other' }
+        const l = lang(this._l)
+        if (['ja', 'zh', 'ko', 'th', 'vi', 'id'].includes(l)) return 'other'
+        if (l === 'fr') return n >= 0 && n < 2 ? 'one' : 'other'
+        if (['ru', 'uk', 'pl'].includes(l) && Number.isInteger(n)) { const a = n % 10, b = n % 100; if (a === 1 && b !== 11) return l === 'pl' && n !== 1 ? 'many' : 'one'; if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return 'few'; return 'many' }
+        return n === 1 ? 'one' : 'other'
+      }
+      resolvedOptions() { return { locale: this._l, type: this._t, pluralCategories: ['one', 'other'] } }
+      static supportedLocalesOf(l) { return [].concat(l || []) }
+    }
+    class RelativeTimeFormat {
+      constructor(loc, o) { this._l = pick(loc); this._o = Object.assign({ numeric: 'always', style: 'long' }, o) }
+      format(v, unit) {
+        v = Number(v)
+        unit = String(unit).replace(/s$/, '')
+        if (!['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'].includes(unit)) throw new RangeError('Invalid unit argument for format() \'' + unit + '\'')
+        if (this._o.numeric === 'auto') {
+          const words = { day: ['yesterday', 'today', 'tomorrow'], year: ['last year', 'this year', 'next year'], month: ['last month', 'this month', 'next month'], week: ['last week', 'this week', 'next week'], quarter: ['last quarter', 'this quarter', 'next quarter'] }
+          if (words[unit] && (v === -1 || v === 0 || v === 1)) return words[unit][v + 1]
+          if (v === 0 && (unit === 'second')) return 'now'
+          if (v === 0) return 'this ' + unit
+        }
+        const a = Math.abs(v)
+        const short = { second: 'sec.', minute: 'min.', hour: 'hr.', day: 'day', week: 'wk.', month: 'mo.', quarter: 'qtr.', year: 'yr.' }
+        const name = this._o.style === 'long' ? unit + (a === 1 ? '' : 's') : (short[unit] === 'day' ? (a === 1 ? 'day' : 'days') : short[unit])
+        const num = new NumberFormat(this._l).format(a)
+        return v < 0 || Object.is(v, -0) ? num + ' ' + name + ' ago' : 'in ' + num + ' ' + name
+      }
+      formatToParts(v, unit) { return [{ type: 'literal', value: this.format(v, unit) }] }
+      resolvedOptions() { return Object.assign({ locale: this._l, numberingSystem: 'latn' }, this._o) }
+      static supportedLocalesOf(l) { return [].concat(l || []) }
+    }
+    class ListFormat {
+      constructor(loc, o) { this._l = pick(loc); this._o = Object.assign({ type: 'conjunction', style: 'long' }, o) }
+      format(list) {
+        const a = Array.from(list, String)
+        const word = this._o.type === 'disjunction' ? 'or' : 'and'
+        if (this._o.type === 'unit') return a.join(this._o.style === 'narrow' ? ' ' : ', ')
+        if (a.length < 2) return a.join('')
+        if (a.length === 2) return a[0] + ' ' + (this._o.style === 'long' || word === 'or' ? word : '&') + ' ' + a[1]
+        return a.slice(0, -1).join(', ') + ', ' + (this._o.style === 'long' || word === 'or' ? word + ' ' : this._o.style === 'short' ? '& ' : '') + a[a.length - 1]
+      }
+      formatToParts(list) { return [{ type: 'literal', value: this.format(list) }] }
+      resolvedOptions() { return Object.assign({ locale: this._l }, this._o) }
+      static supportedLocalesOf(l) { return [].concat(l || []) }
+    }
+    class Collator {
+      constructor(loc, o) { this._l = pick(loc); this._o = Object.assign({ usage: 'sort', sensitivity: 'variant', numeric: false, caseFirst: 'false', ignorePunctuation: false }, o); this.compare = this.compare.bind(this) }
+      compare(a, b) {
+        a = String(a); b = String(b)
+        const fold = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+        if (this._o.numeric) {
+          const re = /(\d+)|(\D+)/g, xa = a.match(re) || [], xb = b.match(re) || []
+          for (let i = 0; i < Math.min(xa.length, xb.length); i++) {
+            const p = xa[i], q = xb[i]
+            if (/^\d/.test(p) && /^\d/.test(q)) { const d = Number(p) - Number(q); if (d) return d < 0 ? -1 : 1 } else { const c = this._base(p, q, fold); if (c) return c }
+          }
+          if (xa.length !== xb.length) return xa.length < xb.length ? -1 : 1
+        }
+        const c = this._base(a, b, fold)
+        if (c || this._o.sensitivity === 'base' || this._o.sensitivity === 'accent') return c
+        // Ties broken by accents, then case (lower first).
+        const na = a.normalize('NFD'), nb = b.normalize('NFD')
+        if (na.toLowerCase() !== nb.toLowerCase()) return na.toLowerCase() < nb.toLowerCase() ? -1 : 1
+        if (a === b) return 0
+        for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] === a[i].toLowerCase() ? -1 : 1
+        return a.length < b.length ? -1 : a.length > b.length ? 1 : 0
+      }
+      _base(a, b, fold) { const x = fold(a), y = fold(b); return x < y ? -1 : x > y ? 1 : 0 }
+      resolvedOptions() { return Object.assign({ locale: this._l, collation: 'default' }, this._o) }
+      static supportedLocalesOf(l) { return [].concat(l || []) }
+    }
+    class Segmenter {
+      constructor(loc, o) { this._l = pick(loc); this._g = (o && o.granularity) || 'grapheme' }
+      segment(input) {
+        const s = String(input), g = this._g, out = []
+        if (g === 'word') { const re = /[\p{L}\p{N}_'’]+|\s+|[^\p{L}\p{N}_\s]/gu; let m; while ((m = re.exec(s))) out.push({ segment: m[0], index: m.index, input: s, isWordLike: /[\p{L}\p{N}]/u.test(m[0]) }) }
+        else if (g === 'sentence') { const re = /[^.!?]+[.!?]*\s*/g; let m; while ((m = re.exec(s))) out.push({ segment: m[0], index: m.index, input: s }) }
+        else { let i = 0; for (const ch of s) { const last = out[out.length - 1]; if (last && /[̀-ͯ‍️\u{1f3fb}-\u{1f3ff}]/u.test(ch)) last.segment += ch; else out.push({ segment: ch, index: i, input: s }); i += ch.length } }
+        const it = { [Symbol.iterator]() { return out[Symbol.iterator]() }, containing(k) { return out.find(x => k >= x.index && k < x.index + x.segment.length) } }
+        return it
+      }
+      resolvedOptions() { return { locale: this._l, granularity: this._g } }
+      static supportedLocalesOf(l) { return [].concat(l || []) }
+    }
+    class DisplayNames {
+      constructor(loc, o) { this._l = pick(loc); this._o = Object.assign({ style: 'long', fallback: 'code' }, o) }
+      of(code) {
+        const T = { region: { US: 'United States', GB: 'United Kingdom', CA: 'Canada', DE: 'Germany', FR: 'France', JP: 'Japan', CN: 'China', IN: 'India', AU: 'Australia', BR: 'Brazil', MX: 'Mexico', ES: 'Spain', IT: 'Italy' }, language: { en: 'English', 'en-US': 'American English', 'en-GB': 'British English', fr: 'French', de: 'German', es: 'Spanish', it: 'Italian', ja: 'Japanese', zh: 'Chinese', pt: 'Portuguese', ru: 'Russian', ko: 'Korean', ar: 'Arabic', hi: 'Hindi', nl: 'Dutch' }, currency: { USD: 'US Dollar', EUR: 'Euro', GBP: 'British Pound', JPY: 'Japanese Yen', CAD: 'Canadian Dollar' } }
+        const t = T[this._o.type] || {}
+        return t[code] || (this._o.fallback === 'none' ? undefined : String(code))
+      }
+      resolvedOptions() { return Object.assign({ locale: this._l }, this._o) }
+    }
+    class Locale {
+      constructor(tag, o) { const p = String(tag).split('-'); this.language = p[0]; this.region = p.find((x, i) => i && /^[A-Z]{2}$/.test(x)); this.script = p.find((x, i) => i && /^[A-Z][a-z]{3}$/.test(x)); Object.assign(this, o); this.baseName = [this.language, this.script, this.region].filter(Boolean).join('-') }
+      toString() { return this.baseName }
+      maximize() { return this } minimize() { return this }
+    }
+    const I = { NumberFormat, DateTimeFormat, PluralRules, RelativeTimeFormat, ListFormat, Collator, Segmenter, DisplayNames, Locale, getCanonicalLocales: l => [].concat(l || []).map(String), supportedValuesOf: () => [] }
+    Object.defineProperty(I, Symbol.toStringTag, { value: 'Intl' })
+    // Callable without `new`, as the spec allows for these four.
+    for (const k of ['NumberFormat', 'DateTimeFormat', 'Collator', 'PluralRules']) {
+      const C = I[k]
+      const F = function (a, b) { return new C(a, b) }
+      F.prototype = C.prototype
+      F.supportedLocalesOf = C.supportedLocalesOf
+      Object.defineProperty(F, 'name', { value: k })
+      Object.defineProperty(C.prototype, 'constructor', { value: F, configurable: true, writable: true })
+      I[k] = F
+    }
+    const D = Date.prototype
+    D.toLocaleDateString = function (l, o) { return isNaN(this) ? 'Invalid Date' : new DateTimeFormat(l, o, 'date').format(this) }
+    D.toLocaleTimeString = function (l, o) { return isNaN(this) ? 'Invalid Date' : new DateTimeFormat(l, o, 'time').format(this) }
+    D.toLocaleString = function (l, o) { return isNaN(this) ? 'Invalid Date' : new DateTimeFormat(l, o, 'all').format(this) }
+    Number.prototype.toLocaleString = function (l, o) { return new NumberFormat(l, o).format(this) }
+    let plain
+    String.prototype.localeCompare = function (that, l, o) { return (l === undefined && o === undefined ? plain || (plain = new Collator()) : new Collator(l, o)).compare(this, that) }
+    return I
+  })()
 
   // ---------------------------------------------------------------- the language, filled in
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  const D = Date.prototype
-  D.getTimezoneOffset = function () { return 0 }
-  D.toLocaleDateString = function () { return (this.getMonth() + 1) + '/' + this.getDate() + '/' + this.getFullYear() }
-  D.toLocaleTimeString = function () { const h = this.getHours(); return ((h % 12) || 12) + ':' + String(this.getMinutes()).padStart(2, '0') + ':' + String(this.getSeconds()).padStart(2, '0') + (h < 12 ? ' AM' : ' PM') }
-  D.toLocaleString = function () { return this.toLocaleDateString() + ', ' + this.toLocaleTimeString() }
-  D.toDateString = function () { return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][this.getDay()] + ' ' + months[this.getMonth()] + ' ' + String(this.getDate()).padStart(2, '0') + ' ' + this.getFullYear() }
-  D.toUTCString = D.toGMTString = function () { return this.toDateString() + ' ' + this.toISOString().slice(11, 19) + ' GMT' }
+  // References are held strongly (nothing is collected early); finalizers never run.
+  g.WeakRef = class WeakRef {
+    #t
+    constructor(t) { if (Object(t) !== t && typeof t !== 'symbol') throw new TypeError('WeakRef: target must be an object'); this.#t = t }
+    deref() { return this.#t }
+    get [Symbol.toStringTag]() { return 'WeakRef' }
+  }
+  g.FinalizationRegistry = class FinalizationRegistry {
+    constructor(cb) { if (typeof cb !== 'function') throw new TypeError('FinalizationRegistry: cleanup must be callable') }
+    register() {} unregister() { return false }
+    get [Symbol.toStringTag]() { return 'FinalizationRegistry' }
+  }
+  g.AggregateError = g.AggregateError || class AggregateError extends Error {
+    constructor(errors, message, opts) { super(message, opts); Object.defineProperty(this, 'errors', { value: Array.from(errors), writable: true, configurable: true }) }
+    get name() { return 'AggregateError' }
+  }
+  Promise.try = Promise.try || function (f, ...a) { return new Promise(r => r(f(...a))) }
+  Array.fromAsync = Array.fromAsync || async function (src, map, that) {
+    const out = []
+    let i = 0
+    if (src != null && src[Symbol.asyncIterator]) { for await (const x of src) out.push(map ? await map.call(that, x, i++) : x) }
+    else { for (const x of Array.from(src)) { const v = await x; out.push(map ? await map.call(that, v, i++) : v) } }
+    return out
+  }
+  {
+    const SP = Set.prototype
+    const other = o => { if (o == null || typeof o.has !== 'function' || typeof o.keys !== 'function') throw new TypeError('expected a set-like object'); return o }
+    const def = (k, f) => { if (!SP[k]) Object.defineProperty(SP, k, { value: f, writable: true, configurable: true }) }
+    def('union', function (o) { other(o); const r = new Set(this); for (const x of o.keys()) r.add(x); return r })
+    def('intersection', function (o) { other(o); const r = new Set(); for (const x of this) if (o.has(x)) r.add(x); return r })
+    def('difference', function (o) { other(o); const r = new Set(); for (const x of this) if (!o.has(x)) r.add(x); return r })
+    def('symmetricDifference', function (o) { other(o); const r = new Set(this); for (const x of o.keys()) { if (this.has(x)) r.delete(x); else r.add(x) } return r })
+    def('isSubsetOf', function (o) { other(o); for (const x of this) if (!o.has(x)) return false; return true })
+    def('isSupersetOf', function (o) { other(o); for (const x of o.keys()) if (!this.has(x)) return false; return true })
+    def('isDisjointFrom', function (o) { other(o); for (const x of this) if (o.has(x)) return false; return true })
+  }
+  {
+    // Iterator helpers (lazy, as the spec has them), on %IteratorPrototype%.
+    const IP = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))
+    const fn = f => { if (typeof f !== 'function') throw new TypeError(f + ' is not a function') }
+    const def = (k, f) => { if (!IP[k]) Object.defineProperty(IP, k, { value: f, writable: true, configurable: true }) }
+    def('map', function (f) { fn(f); const it = this; let i = 0; return (function* () { for (let r; !(r = it.next()).done;) yield f(r.value, i++) })() })
+    def('filter', function (f) { fn(f); const it = this; let i = 0; return (function* () { for (let r; !(r = it.next()).done;) if (f(r.value, i++)) yield r.value })() })
+    def('take', function (n) { n = Number(n); if (!(n >= 0)) throw new RangeError(n + ' must be positive'); const it = this; return (function* () { for (let k = 0; k < n; k++) { const r = it.next(); if (r.done) return; yield r.value } if (typeof it.return === 'function') it.return() })() })
+    def('drop', function (n) { n = Number(n); if (!(n >= 0)) throw new RangeError(n + ' must be positive'); const it = this; return (function* () { for (let k = 0; k < n; k++) if (it.next().done) return; for (let r; !(r = it.next()).done;) yield r.value })() })
+    def('flatMap', function (f) { fn(f); const it = this; let i = 0; return (function* () { for (let r; !(r = it.next()).done;) yield* f(r.value, i++) })() })
+    def('reduce', function (f, ...init) { fn(f); let acc, i = 0, r; if (init.length) acc = init[0]; else { r = this.next(); if (r.done) throw new TypeError('Reduce of empty iterator with no initial value'); acc = r.value; i = 1 } while (!(r = this.next()).done) acc = f(acc, r.value, i++); return acc })
+    def('toArray', function () { const out = []; for (let r; !(r = this.next()).done;) out.push(r.value); return out })
+    def('forEach', function (f) { fn(f); let i = 0; for (let r; !(r = this.next()).done;) f(r.value, i++) })
+    def('some', function (f) { fn(f); let i = 0; for (let r; !(r = this.next()).done;) if (f(r.value, i++)) { if (this.return) this.return(); return true } return false })
+    def('every', function (f) { fn(f); let i = 0; for (let r; !(r = this.next()).done;) if (!f(r.value, i++)) { if (this.return) this.return(); return false } return true })
+    def('find', function (f) { fn(f); let i = 0; for (let r; !(r = this.next()).done;) if (f(r.value, i++)) { if (this.return) this.return(); return r.value } })
+  }
+  {
+    const S2 = String.prototype
+    for (const [a, b] of [['trimLeft', 'trimStart'], ['trimRight', 'trimEnd']]) if (!S2[a]) Object.defineProperty(S2, a, { value: S2[b], writable: true, configurable: true })
+    for (const [k, tag, attr] of [['link', 'a', 'href'], ['big', 'big'], ['bold', 'b'], ['italics', 'i'], ['small', 'small'], ['strike', 'strike'], ['sub', 'sub'], ['sup', 'sup'], ['fixed', 'tt'], ['fontcolor', 'font', 'color'], ['fontsize', 'font', 'size']])
+      if (!S2[k]) Object.defineProperty(S2, k, { value: function (v) { return '<' + tag + (attr ? ' ' + attr + '="' + String(v).replace(/"/g, '&quot;') + '"' : '') + '>' + this + '</' + tag + '>' }, writable: true, configurable: true })
+  }
   const A = Array.prototype
   A.findLast = A.findLast || function (f, t) { for (let i = this.length - 1; i >= 0; i--) if (f.call(t, this[i], i, this)) return this[i] }
   A.findLastIndex = A.findLastIndex || function (f, t) { for (let i = this.length - 1; i >= 0; i--) if (f.call(t, this[i], i, this)) return i; return -1 }
@@ -1816,6 +2194,12 @@
       })
     }
     const all = { DOMPointReadOnly, DOMPoint, DOMRectReadOnly, DOMRect, DOMQuad, DOMMatrixReadOnly, DOMMatrix }
+    // Serializable: structuredClone copies the state, not the properties.
+    const cloner = (C, f) => Object.defineProperty(C.prototype, '\0clone', { value: f, configurable: true })
+    cloner(DOMPointReadOnly, function () { const { x, y, z, w } = this._p; return new (this instanceof DOMPoint ? DOMPoint : DOMPointReadOnly)(x, y, z, w) })
+    cloner(DOMRectReadOnly, function () { const { x, y, width, height } = this._r; return new (this instanceof DOMRect ? DOMRect : DOMRectReadOnly)(x, y, width, height) })
+    cloner(DOMQuad, function () { return new DOMQuad(...this._q.map(p => ({ x: p._p.x, y: p._p.y, z: p._p.z, w: p._p.w }))) })
+    cloner(DOMMatrixReadOnly, function () { return (this instanceof DOMMatrix ? DOMMatrix : DOMMatrixReadOnly)._of(this._m.slice(), this._2d) })
     for (const [k, C] of Object.entries(all)) {
       Object.defineProperty(C.prototype, Symbol.toStringTag, { value: k, configurable: true })
       Object.defineProperty(g, k, { value: C, writable: true, configurable: true })
@@ -2607,7 +2991,8 @@
   g.BroadcastChannel = class BroadcastChannel extends EventTarget {
     constructor(name) { super(); this.name = String(name); this.onmessage = null; (channels[this.name] = channels[this.name] || []).push(this) }
     postMessage(data) {
-      for (const c of channels[this.name] || []) if (c !== this) setTimeout(() => { const e = new Event('message'); e.data = data; c.dispatchEvent(e); if (typeof c.onmessage === 'function') c.onmessage(e) }, 0)
+      const copy = structuredClone(data)
+      for (const c of channels[this.name] || []) if (c !== this) setTimeout(() => { const e = new MessageEvent('message', { data: structuredClone(copy) }); c.dispatchEvent(e); if (typeof c.onmessage === 'function') c.onmessage(e) }, 0)
     }
     close() { const l = channels[this.name] || []; const k = l.indexOf(this); if (k >= 0) l.splice(k, 1) }
   }

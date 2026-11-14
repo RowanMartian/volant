@@ -744,15 +744,15 @@ html/dom/documents/dom-tree-accessors/Element.getElementsByClassName-null-undef.
 html/dom/documents/dom-tree-accessors/document.embeds-document.plugins-01.html	0
 html/dom/documents/dom-tree-accessors/document.forms.html	0
 html/dom/documents/dom-tree-accessors/document.getElementsByClassName-same.html	1
-html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-case.html	0
-html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-id.html	0
+html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-case.html	1
+html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-id.html	1
 html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-interface.html	0
 html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-liveness.html	0
 html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-namespace.html	0
-html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-newelements.html	0
-html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-null-undef.html	0
-html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-param.html	0
-html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-same.html	0
+html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-newelements.html	18
+html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-null-undef.html	2
+html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-param.html	1
+html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-same.html	1
 html/dom/documents/dom-tree-accessors/document.head-01.html	1
 html/dom/documents/dom-tree-accessors/document.head-02.html	0
 html/dom/documents/dom-tree-accessors/document.images.html	2
@@ -2103,4 +2103,4 @@ css/geometry/WebKitCSSMatrix.html	3
 css/geometry/historical.html	39
 css/geometry/idlharness.any.html	0
 css/geometry/spec-examples.html	7
-css/geometry/structured-serialization.html	11
+css/geometry/structured-serialization.html	29

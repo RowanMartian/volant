@@ -66,6 +66,23 @@ fn match_array(i: &mut Interp, re: &Regex, caps: &Captures, chars: &[u16], input
         g
     };
     i.set(&arr, "groups", groups)?;
+    if re.indices {
+        let pair = |i: &mut Interp, c: Option<(usize, usize)>| c.map(|(a, b)| i.array(vec![Value::Num(a as f64), Value::Num(b as f64)])).unwrap_or(Value::Undefined);
+        let list: Vec<Value> = caps.iter().map(|c| pair(i, *c)).collect();
+        let indices = i.array(list);
+        let named = if re.names.is_empty() {
+            Value::Undefined
+        } else {
+            let g = i.obj(Kind::Plain);
+            for (name, k) in &re.names {
+                let v = pair(i, caps.get(*k).copied().flatten());
+                i.set(&g, name, v)?;
+            }
+            g
+        };
+        i.set(&indices, "groups", named)?;
+        i.set(&arr, "indices", indices)?;
+    }
     Ok(arr)
 }
 
@@ -344,7 +361,7 @@ pub fn install(i: &mut Interp) {
             _ => Value::Undefined,
         })
     });
-    for (name, flag) in [("global", 'g'), ("ignoreCase", 'i'), ("multiline", 'm'), ("dotAll", 's'), ("unicode", 'u'), ("sticky", 'y'), ("hasIndices", 'd')] {
+    for (name, flag) in [("global", 'g'), ("ignoreCase", 'i'), ("multiline", 'm'), ("dotAll", 's'), ("unicode", 'u'), ("sticky", 'y'), ("hasIndices", 'd'), ("unicodeSets", 'v')] {
         getter(i, &rp, name, move |_i, t, _a| {
             Ok(match &t {
                 Value::Obj(o) => match &o.borrow().kind {

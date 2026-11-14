@@ -640,6 +640,15 @@ impl Interp {
         if let Kind::Date(t) = &o.borrow().kind {
             return Ok(if number { Value::Num(*t) } else { Value::Str(crate::builtins::date_string(*t).into()) });
         }
+        let exotic = self.get(v, "\0@toPrimitive")?;
+        if Self::is_callable(&exotic) {
+            let hint = Value::Str(if number { "number" } else { "string" }.into());
+            let r = self.call(&exotic, v.clone(), vec![hint])?;
+            if matches!(r, Value::Obj(_)) {
+                return self.throw("TypeError", "Cannot convert object to primitive value");
+            }
+            return Ok(r);
+        }
         let order = if number { ["valueOf", "toString"] } else { ["toString", "valueOf"] };
         for m in order {
             let f = self.get(v, m)?;
@@ -1467,10 +1476,19 @@ pub fn string_at(s: &Rc<str>, i: usize) -> Value {
 }
 
 pub fn to_i32(n: f64) -> i32 {
+    to_u32(n) as i32
+}
+
+/// ToUint32: the number modulo 2^32.
+pub fn to_u32(n: f64) -> u32 {
     if !n.is_finite() {
         return 0;
     }
-    (n.trunc() as i64 as u64 & 0xffff_ffff) as u32 as i32
+    let t = n.trunc();
+    if t.abs() < 9.0e15 {
+        return (t as i64 as u64 & 0xffff_ffff) as u32;
+    }
+    t.rem_euclid(4_294_967_296.0) as u32
 }
 
 pub fn str_to_number(s: &str) -> f64 {

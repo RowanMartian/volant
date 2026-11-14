@@ -23,6 +23,7 @@ pub mod builtins;
 pub mod compile;
 pub mod interp;
 pub mod module;
+pub mod normalize;
 pub mod parse;
 pub mod promise;
 pub mod proxy;
@@ -30,6 +31,7 @@ pub mod regex;
 pub mod regexp;
 pub mod table;
 pub mod typed;
+pub mod tz;
 pub mod vm;
 
 pub use interp::{Interp, Value};

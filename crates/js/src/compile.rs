@@ -154,6 +154,12 @@ pub enum Op {
     Arguments,
     /// The parent class (for `super`).
     LoadSuper,
+    /// [this base key] → base[key] read with `this` as the receiver (`super.x`).
+    SuperGet,
+    /// [this base key value] → value, after setting base[key] with `this` as the receiver.
+    SuperSet,
+    /// An object literal's method using `super`: [obj (key) fn] — fn's home is the object `n` below it.
+    SetHome(u8),
     /// The i'th argument / the arguments from i on, as an array.
     Arg(u32),
     ArgsRest(u32),
@@ -250,6 +256,8 @@ pub struct Code {
     pub url: Option<Rc<str>>,
     /// What each call site calls, for "x is not a function": (pc, description).
     pub call_names: Vec<(u32, Rc<str>)>,
+    /// Its source text, for `toString`.
+    pub src: Option<crate::parse::SrcSpan>,
 }
 
 impl std::fmt::Debug for Code {
@@ -329,6 +337,8 @@ enum Top {
 }
 
 struct FnState {
+    /// A static class member (or an arrow inside one).
+    static_member: bool,
     ops: Vec<Op>,
     consts: Vec<Value>,
     const_strs: HashMap<Rc<str>, u32>,
@@ -370,6 +380,8 @@ pub struct Compiler {
     import_names: Vec<Rc<str>>,
     /// Functions the compiler made itself (default constructors, field initialisers).
     keep: Vec<Rc<Func>>,
+    /// The next function compiled is a static class member (its `super` is the parent class itself).
+    next_static: bool,
 }
 
 type FreeCache = HashMap<*const Func, Rc<FreeNames>>;
@@ -722,7 +734,7 @@ impl Default for Compiler {
 
 impl Compiler {
     pub fn new() -> Self {
-        Compiler { fns: Vec::new(), free_cache: HashMap::new(), module: ModuleInfo::default(), url: None, declaring: false, import_names: Vec::new(), keep: Vec::new() }
+        Compiler { fns: Vec::new(), free_cache: HashMap::new(), module: ModuleInfo::default(), url: None, declaring: false, import_names: Vec::new(), keep: Vec::new(), next_static: false }
     }
 
     /// What a nested function mentions without declaring at its own top level.
@@ -926,7 +938,10 @@ impl Compiler {
     // -------------------------------------------------------------- functions
 
     fn push_fn(&mut self, captured: HashSet<Rc<str>>, arrow: bool, is_async: bool, is_gen: bool, strict: bool, top: Top) {
+        let next_static = std::mem::take(&mut self.next_static);
+        let static_member = if arrow { self.fns.last().is_some_and(|f| f.static_member) } else { next_static };
         let mut st = FnState {
+            static_member,
             ops: Vec::new(),
             consts: Vec::new(),
             const_strs: HashMap::new(),
@@ -987,7 +1002,8 @@ impl Compiler {
         r?;
         let nparams = f.params.iter().take_while(|p| !matches!(p, Expr::Default(..) | Expr::Rest(_))).count() as u32;
         let name: Option<Rc<str>> = f.name.clone().or_else(|| name.map(Rc::from));
-        let code = finish(st, name, nparams, method, class_ctor, f.line, self.url.clone());
+        let mut code = finish(st, name, nparams, method, class_ctor, f.line, self.url.clone());
+        code.src = f.src.clone();
         let cur = self.fns.last_mut().expect("an enclosing function");
         cur.funcs.push(Rc::new(code));
         Ok(cur.funcs.len() as u32 - 1)
@@ -1908,7 +1924,7 @@ impl Compiler {
         let ctor = ctor.unwrap_or_else(|| {
             let body =
                 if sup.is_some() { vec![Stmt::Expr(Expr::Call(Box::new(Expr::Ident("super".into())), vec![Expr::Spread(Box::new(Expr::Ident("arguments".into())))], false))] } else { Vec::new() };
-            Rc::new(Func { name: None, params: Vec::new(), body, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 })
+            Rc::new(Func { name: None, params: Vec::new(), body, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0, src: None })
         });
         // Functions made here stay alive while compiling (the analysis cache is keyed by address).
         self.keep.push(ctor.clone());
@@ -1939,6 +1955,7 @@ impl Compiler {
                         };
                     match k {
                         Expr::Str(n) => {
+                            self.next_static = *is_static;
                             let idx = self.func_with(f, Some(n), true, false)?;
                             self.emit(Op::Closure(idx));
                             let c = self.name_const(n);
@@ -1946,6 +1963,7 @@ impl Compiler {
                         }
                         k => {
                             self.expr(k)?;
+                            self.next_static = *is_static;
                             let idx = self.func_with(f, None, true, false)?;
                             self.emit(Op::Closure(idx));
                             self.emit(Op::DefMethodElem(flags));
@@ -1968,8 +1986,9 @@ impl Compiler {
             if list.is_empty() {
                 continue;
             }
-            let f = Rc::new(Func { name: None, params: Vec::new(), body: list, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0 });
+            let f = Rc::new(Func { name: None, params: Vec::new(), body: list, arrow: false, expr_body: false, is_async: false, is_gen: false, line: 0, src: None });
             self.keep.push(f.clone());
+            self.next_static = matches!(op, Op::RunStatic);
             let idx = self.func_with(&f, None, true, false)?;
             self.emit(Op::Closure(idx));
             self.emit(op);
@@ -2280,6 +2299,7 @@ impl Compiler {
                     match p {
                         Prop::KeyValue(Expr::Str(k), v) => {
                             self.expr_named(v, Some(k))?;
+                            self.set_home(v, 1);
                             if &**k == "__proto__" {
                                 self.emit(Op::InitProto);
                             } else {
@@ -2297,6 +2317,7 @@ impl Compiler {
                                 }
                                 _ => self.expr(v)?,
                             }
+                            self.set_home(v, 2);
                             self.emit(Op::InitElem);
                         }
                         Prop::Spread(v) => {
@@ -2309,6 +2330,7 @@ impl Compiler {
                                 Expr::Str(name) => {
                                     let idx = self.func_with(f, Some(name), true, false)?;
                                     self.emit(Op::Closure(idx));
+                                    self.set_home(&Expr::Func(f.clone()), 1);
                                     let c = self.name_const(name);
                                     self.emit(Op::InitAccessor(c, getter));
                                 }
@@ -2316,6 +2338,7 @@ impl Compiler {
                                     self.expr(k)?;
                                     let idx = self.func_with(f, None, true, false)?;
                                     self.emit(Op::Closure(idx));
+                                    self.set_home(&Expr::Func(f.clone()), 2);
                                     self.emit(Op::InitAccessorElem(getter));
                                 }
                             }
@@ -2461,10 +2484,13 @@ impl Compiler {
             Expr::Member(o, k, optional) => {
                 if let Expr::Ident(n) = &**o {
                     if &**n == "super" {
-                        // super.x: from the parent class's prototype.
-                        self.load_name(n)?;
-                        self.get_prop("prototype");
-                        return self.member_key(k);
+                        // super.x: looked up from the parent (its prototype, in
+                        // instance code), with this object as the receiver.
+                        self.load_name(&"this".into())?;
+                        self.super_base()?;
+                        self.expr(k)?;
+                        self.emit(Op::SuperGet);
+                        return Ok(());
                     }
                 }
                 self.chain_part(o, exits)?;
@@ -2500,9 +2526,10 @@ impl Compiler {
                     Expr::Member(o, k, opt_member) => {
                         if matches!(&**o, Expr::Ident(n) if &**n == "super") {
                             self.load_name(&"this".into())?;
-                            self.load_name(&"super".into())?;
-                            self.get_prop("prototype");
-                            self.member_key(k)?;
+                            self.load_name(&"this".into())?;
+                            self.super_base()?;
+                            self.expr(k)?;
+                            self.emit(Op::SuperGet);
                         } else {
                             self.chain_part(o, exits)?;
                             if *opt_member {
@@ -2552,6 +2579,25 @@ impl Compiler {
             Expr::Member(..) | Expr::Call(..) => self.chain(e, exits),
             other => self.expr(other),
         }
+    }
+
+    /// An object literal's method that uses `super` gets the object as its home.
+    fn set_home(&mut self, v: &Expr, depth: u8) {
+        if let Expr::Func(f) = v {
+            if !f.arrow && self.free_names(f).sup {
+                self.emit(Op::SetHome(depth));
+            }
+        }
+    }
+
+    /// Where `super.x` looks: the parent class in static code, its prototype otherwise.
+    fn super_base(&mut self) -> R<()> {
+        self.load_name(&"super".into())?;
+        let in_static = self.fns.iter().rev().find(|f| !f.arrow).is_some_and(|f| f.static_member);
+        if !in_static {
+            self.get_prop("prototype");
+        }
+        Ok(())
     }
 
     fn member_key(&mut self, k: &Expr) -> R<()> {
@@ -2688,10 +2734,18 @@ impl Compiler {
 
     fn assign(&mut self, op: &str, target: &Expr, value: &Expr) -> R<()> {
         let logical = matches!(op, "&&=" | "||=" | "??=");
-        // `super.x = v` sets x on this object (the parent's prototype is only where reads look).
+        // `super.x = v`: the parent's setter runs on this object, or x is set on this object.
         if let Expr::Member(o, k, opt) = target {
             if matches!(&**o, Expr::Ident(s) if &**s == "super") {
-                return self.assign(op, &Expr::Member(Box::new(Expr::Ident("this".into())), k.clone(), *opt), value);
+                if op != "=" {
+                    return self.assign(op, &Expr::Member(Box::new(Expr::Ident("this".into())), k.clone(), *opt), value);
+                }
+                self.load_name(&"this".into())?;
+                self.super_base()?;
+                self.expr(k)?;
+                self.expr(value)?;
+                self.emit(Op::SuperSet);
+                return Ok(());
             }
         }
         match target {
@@ -3007,6 +3061,7 @@ fn finish(st: FnState, name: Option<Rc<str>>, nparams: u32, method: bool, class_
         method,
         class_ctor,
         line,
+        src: None,
     }
 }
 

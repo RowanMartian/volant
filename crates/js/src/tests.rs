@@ -568,3 +568,80 @@ fn for_await() {
     "#;
     assert_eq!(out(src), "a0 a1 s1 s2 g1 x3");
 }
+
+#[test]
+fn array_search_from_index() {
+    assert_eq!(out("var a=[0,10,2,10,4,10]; console.log(a.indexOf(10,2), a.indexOf(10,-1), a.indexOf(10,9), a.lastIndexOf(10,4), a.lastIndexOf(10,-2), a.includes(0,1), a.includes(10,-1))"), "3 5 -1 3 3 false true");
+    assert_eq!(out("var d=new Uint8Array([0,10,2,10]); console.log(d.indexOf(10,2), d.lastIndexOf(10,2), d.includes(0,1))"), "3 1 false");
+    assert_eq!(out("var a=[1,2,3,4,5]; console.log(a.findLast(x=>x<3), a.findLastIndex(x=>x>9), a.toSpliced(1,2,'x').join(), a.with(-1,9).join(), [3,1,2].toSorted().join(), a.toReversed().join(), [1,2,3,4,5].copyWithin(0,3).join(), a.join())"), "2 -1 1,x,4,5 1,2,3,4,9 1,2,3 5,4,3,2,1 4,5,3,4,5 1,2,3,4,5");
+    assert_eq!(out("console.log(JSON.stringify(Object.groupBy([1,2,3],x=>x%2?'o':'e')), Map.groupBy([1,2,3],x=>x>1).get(true).join())"), "{\"o\":[1,3],\"e\":[2]} 2,3");
+}
+
+#[test]
+fn private_names_are_hidden() {
+    let src = r#"
+        class A { #x = 1; static #n = 0; #m() { return this.#x } constructor() { A.#n++ } has(o) { return #x in o } get() { return this.#m() + A.#n } }
+        const a = new A();
+        console.log(a.get(), a.has(a), a.has({}), JSON.stringify(a), Object.keys(a).length, Reflect.ownKeys(a).length);
+        const o = { '#x': 1 }; console.log(Object.keys(o)[0], o['#x']);
+    "#;
+    assert_eq!(out(src), "2 true false {} 0 0\n#x 1");
+}
+
+#[test]
+fn function_source_text() {
+    let src = r#"
+        function f(a, b) { return a + b }
+        const g = async (x) => x * 2;
+        const o = { m(z) { return z }, get p() { return 1 } };
+        class C extends Object { m() {} }
+        console.log(f.toString(), '|', g.toString(), '|', o.m.toString(), '|', String(Object.getOwnPropertyDescriptor(o, 'p').get), '|', C.toString(), '|', Math.max.toString());
+    "#;
+    assert_eq!(out(src), "function f(a, b) { return a + b } | async (x) => x * 2 | m(z) { return z } | get p() { return 1 } | class C extends Object { m() {} } | function max() { [native code] }");
+}
+
+#[test]
+fn json_reviver_and_numbers() {
+    assert_eq!(out(r#"console.log(JSON.stringify(JSON.parse('{"a":[1,{"b":2}],"c":3}', (k, v) => typeof v == 'number' ? v * 2 : v)))"#), r#"{"a":[2,{"b":4}],"c":6}"#);
+    assert_eq!(out("console.log((2.5).toFixed(0), (1.005).toFixed(2), (-2.5).toFixed(0), (1234.5).toFixed(0), (0.5).toString(2), (255.5).toString(16), Math.imul(0xffffffff, 5), Math.clz32(1), Math.atanh(0))"), "3 1.00 -3 1235 0.1 ff.8 -5 31 0");
+    assert_eq!(out("var o={[Symbol.toPrimitive](h){return h=='number'?42:'s'}}; console.log(+o, `${o}`, String.raw`a\\n${1}`, String.fromCodePoint(0x1F600).length)"), "42 s a\\n1 2");
+}
+
+#[test]
+fn date_parsing_and_text() {
+    let src = r#"
+        console.log(Date.parse('Thu, 01 Jan 1970 00:00:00 GMT'), Date.parse('2020-01-02T03:04:05.123Z'), Date.parse('2020-01-02T03:04:05+05:30'), Date.parse('Sat, 13 Mar 2010 11:29:05 -0800'), Date.parse('garbage'));
+        console.log(new Date(Date.UTC(2020, 5, 15, 10, 20, 30)).toUTCString(), new Date(-1e14).toISOString(), new Date(8.64e15 + 1).getTime());
+    "#;
+    assert_eq!(out(src), "0 1577934245123 1577914445000 1268508545000 NaN\nMon, 15 Jun 2020 10:20:30 GMT -001199-02-15T14:13:20.000Z NaN");
+}
+
+#[test]
+fn structured_clone_keeps_shapes() {
+    let src = r#"
+        const a = { d: new Date(5), m: new Map([[1, { y: 2 }]]), s: new Set([1]), t: new Uint8Array([1, 2]), e: new RangeError('bad') };
+        a.self = a;
+        const c = structuredClone(a);
+        console.log(c.self === c, c.d.getTime(), c.m.get(1).y, c.m.get(1) !== a.m.get(1), c.s.has(1), c.t.join(), c.e instanceof RangeError, c.e.message);
+        try { structuredClone({ f() {} }) } catch (e) { console.log(e.name) }
+    "#;
+    assert_eq!(out(src), "true 5 2 true true 1,2 true bad\nDataCloneError");
+}
+
+#[test]
+fn regex_indices_and_normalize() {
+    assert_eq!(out("const m = /(?<n>b+)/d.exec('abbc'); console.log(m.indices[0].join(), m.indices.groups.n.join(), /x/v.unicodeSets)"), "1,3 1,3 true");
+    assert_eq!(out("console.log('Crème'.normalize('NFD').length, 'Cre\\u0300me'.normalize() === 'Crème', 'Crème brûlée'.normalize('NFD').replace(/[\\u0300-\\u036f]/g, ''))"), "6 true Creme brulee");
+}
+
+#[test]
+fn super_property_receivers() {
+    let src = r#"
+        class A { constructor() { this._s = 1 } get speed() { return this._s * 10 } set speed(v) { this._s = v } m() { return 'A' + this._s } static sm() { return 'As' } }
+        class B extends A { get speed() { return super.speed + 1 } set speed(v) { super.speed = v * 2 } m() { return 'B' + super.m() } static sm() { return 'B' + super.sm() } }
+        const b = new B(); console.log(b.speed); b.speed = 3; console.log(b.speed, b._s, b.m(), B.sm());
+        const o = { __proto__: { hi() { return 'p' + this.x } }, x: 1, hi() { return 'o' + super.hi() } }; console.log(o.hi());
+        class C extends A { f() { super.plain = 5; return [this.plain, Object.hasOwn(this, 'plain')].join() } } console.log(new C().f());
+    "#;
+    assert_eq!(out(src), "11\n61 6 BA6 BAs\nop1\n5,true");
+}

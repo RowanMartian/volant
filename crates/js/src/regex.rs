@@ -50,6 +50,8 @@ pub struct Regex {
     pub dot_all: bool,
     pub global: bool,
     pub sticky: bool,
+    /// The `d` flag: matches carry `indices`.
+    pub indices: bool,
     pub unicode: bool,
 }
 
@@ -507,12 +509,12 @@ struct State<'a> {
 impl Regex {
     pub fn new(pattern: &str, flags: &str) -> Result<Regex, String> {
         for f in flags.chars() {
-            if !"gimsuyd".contains(f) || flags.matches(f).count() > 1 {
+            if !"gimsuydv".contains(f) || flags.matches(f).count() > 1 || (f == 'v' && flags.contains('u')) {
                 return Err(format!("invalid regular expression flags '{flags}'"));
             }
         }
         let chars: Vec<char> = pattern.chars().collect();
-        let mut p = Parser { s: &chars, i: 0, groups: 0, names: Vec::new(), unicode: flags.contains('u') };
+        let mut p = Parser { s: &chars, i: 0, groups: 0, names: Vec::new(), unicode: flags.contains('u') || flags.contains('v') };
         let mut node = p.alt().map_err(|e| format!("invalid regular expression /{pattern}/: {e}"))?;
         if p.i < chars.len() {
             return Err(format!("invalid regular expression /{pattern}/: unmatched ')'"));
@@ -528,6 +530,7 @@ impl Regex {
             dot_all: flags.contains('s'),
             global: flags.contains('g'),
             sticky: flags.contains('y'),
+            indices: flags.contains('d'),
             unicode: flags.contains('u'),
         })
     }

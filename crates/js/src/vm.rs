@@ -204,6 +204,68 @@ fn sup_of(f: &Value) -> Option<Value> {
 }
 
 impl Interp {
+    /// `super[k]`: found from `base` up its prototypes, getters run on `this`.
+    fn super_get(&mut self, base: &Value, k: &str, this: &Value) -> Res<Value> {
+        let mut cur = match base {
+            Value::Obj(o) => Some(o.clone()),
+            Value::Undefined | Value::Null => return self.throw("TypeError", &format!("can't read super.{k}")),
+            _ => return self.get(base, k),
+        };
+        while let Some(o) = cur {
+            if matches!(o.borrow().kind, Kind::Proxy(..)) {
+                return self.get(&Value::Obj(o), k);
+            }
+            let slot = o.borrow().get_own(k).cloned();
+            match slot {
+                Some(Slot::Data(v)) => return Ok(v),
+                Some(Slot::Accessor(Some(g), _)) => return self.call(&g, this.clone(), vec![]),
+                Some(Slot::Accessor(None, _)) => return Ok(Value::Undefined),
+                None => {}
+            }
+            let next = o.borrow().proto.clone();
+            cur = next;
+        }
+        Ok(Value::Undefined)
+    }
+
+    /// `super[k] = v`: a setter found from `base` runs on `this`; otherwise
+    /// the property is made or changed on `this` itself.
+    fn super_set(&mut self, base: &Value, k: &str, v: Value, this: &Value) -> Res<()> {
+        let mut cur = match base {
+            Value::Obj(o) => Some(o.clone()),
+            _ => None,
+        };
+        while let Some(o) = cur {
+            if matches!(o.borrow().kind, Kind::Proxy(..)) {
+                break;
+            }
+            let slot = o.borrow().get_own(k).cloned();
+            match slot {
+                Some(Slot::Accessor(Some(_), Some(s))) | Some(Slot::Accessor(None, Some(s))) => {
+                    self.call(&s, this.clone(), vec![v])?;
+                    return Ok(());
+                }
+                Some(Slot::Accessor(_, None)) => return Ok(()),
+                Some(Slot::Data(_)) => break,
+                None => {}
+            }
+            let next = o.borrow().proto.clone();
+            cur = next;
+        }
+        match this {
+            Value::Obj(t) => {
+                let own_accessor = matches!(t.borrow().get_own(k), Some(Slot::Accessor(..)));
+                if own_accessor {
+                    self.set(this, k, v)
+                } else {
+                    t.borrow_mut().set_own(k, v);
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn take_stack(&mut self) -> Vec<Value> {
         self.stack_pool.pop().unwrap_or_else(|| Vec::with_capacity(64))
     }
@@ -1072,6 +1134,40 @@ impl Interp {
                             stack.push(self.array(a));
                         }
                         Op::LoadSuper => stack.push(sup_of(&f.func).unwrap_or(Value::Undefined)),
+                        Op::SuperGet => {
+                            let k = pop!();
+                            let base = pop!();
+                            let this = pop!();
+                            let k = tri!(self.key(&k));
+                            let v = tri!(self.super_get(&base, &k, &this));
+                            stack.push(v);
+                        }
+                        Op::SetHome(depth) => {
+                            // `super` in an object literal's method: the object's
+                            // prototype at the time of each use.
+                            let n = stack.len();
+                            let (fv, home) = (stack[n - 1].clone(), stack[n - 1 - depth as usize].clone());
+                            let base = self.obj(Kind::Plain);
+                            let getter = self.native(move |_i, _t, _a| {
+                                Ok(match &home {
+                                    Value::Obj(h) => h.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null),
+                                    _ => Value::Undefined,
+                                })
+                            });
+                            if let Value::Obj(b) = &base {
+                                b.borrow_mut().set_slot("prototype", Slot::Accessor(Some(getter), None));
+                            }
+                            set_sup(&fv, Some(base));
+                        }
+                        Op::SuperSet => {
+                            let v = pop!();
+                            let k = pop!();
+                            let base = pop!();
+                            let this = pop!();
+                            let k = tri!(self.key(&k));
+                            tri!(self.super_set(&base, &k, v.clone(), &this));
+                            stack.push(v);
+                        }
                         Op::Arg(i) => {
                             let v = if (i as usize) < f.argc { stack[f.bp + i as usize].clone() } else { Value::Undefined };
                             stack.push(v);

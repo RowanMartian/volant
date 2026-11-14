@@ -9,7 +9,8 @@ pub enum Tok {
     Num(f64),
     Str(String),
     /// A template literal: its string pieces and the tokens of each `${...}`.
-    Template(Vec<String>, Vec<Vec<Token>>),
+    /// Cooked pieces, the expressions' tokens, and the raw source of each piece.
+    Template(Vec<String>, Vec<Vec<Token>>, Vec<String>),
     Ident(String),
     Punct(&'static str),
     /// A regular expression literal: (pattern, flags)
@@ -25,6 +26,8 @@ pub struct Token {
     pub line: u32,
     /// The character offset in the source (minified scripts are one long line).
     pub at: u32,
+    /// The offset just past it.
+    pub end: u32,
 }
 
 const PUNCTS: &[&str] = &[
@@ -95,8 +98,8 @@ impl Lexer<'_> {
                 continue;
             }
             if nested && c == '}' && braces == 0 {
+                out.push(Token { tok: Tok::Eof, nl: true, line: self.line, at: self.i as u32, end: self.i as u32 });
                 self.i += 1;
-                out.push(Token { tok: Tok::Eof, nl: true, line: self.line, at: self.i as u32 });
                 return Ok(out);
             }
             if nested && c == '{' {
@@ -119,13 +122,13 @@ impl Lexer<'_> {
                 Tok::Punct("}") => slash_starts_regex = blocks.pop().unwrap_or(true),
                 _ => {}
             }
-            out.push(Token { tok, nl, line, at });
+            out.push(Token { tok, nl, line, at, end: self.i as u32 });
             nl = false;
         }
         if nested {
             return self.err("unterminated template");
         }
-        out.push(Token { tok: Tok::Eof, nl: true, line: self.line, at: s.len() as u32 });
+        out.push(Token { tok: Tok::Eof, nl: true, line: self.line, at: s.len() as u32, end: s.len() as u32 });
         Ok(out)
     }
 
@@ -159,16 +162,22 @@ impl Lexer<'_> {
         }
         if c == '`' {
             self.i += 1;
-            let (mut strs, mut exprs) = (vec![String::new()], Vec::new());
+            let (mut strs, mut exprs, mut raws) = (vec![String::new()], Vec::new(), vec![String::new()]);
             while self.i < s.len() && s[self.i] != '`' {
                 if s[self.i] == '\\' {
+                    let from = self.i;
                     self.i += 1;
                     escape(s, &mut self.i, strs.last_mut().expect("a piece"), &mut self.line);
+                    raws.last_mut().expect("a piece").extend(s[from..self.i.min(s.len())].iter().filter(|&&c| c != '\r'));
                 } else if s[self.i] == '$' && s.get(self.i + 1) == Some(&'{') {
                     self.i += 2;
                     exprs.push(self.tokens(true)?);
                     strs.push(String::new());
+                    raws.push(String::new());
                 } else {
+                    if s[self.i] != '\r' {
+                        raws.last_mut().expect("a piece").push(s[self.i]);
+                    }
                     if s[self.i] == '\n' {
                         self.line += 1;
                     }
@@ -180,13 +189,15 @@ impl Lexer<'_> {
                 return self.err("unterminated template");
             }
             self.i += 1;
-            return Ok(Tok::Template(strs, exprs));
+            return Ok(Tok::Template(strs, exprs, raws));
         }
         let private = c == '#' && s.get(self.i + 1).map(|&d| id_part(d) && !d.is_ascii_digit()).unwrap_or(false);
         if (id_part(c) && !c.is_ascii_digit()) || private || c == '\\' {
             let mut name = String::new();
             if private {
-                name.push('#');
+                // Private names live under a hidden key, so they never show
+                // in keys, for-in or JSON and cannot meet a real "#x" key.
+                name.push_str("\0#");
                 self.i += 1;
             }
             while self.i < s.len() && (id_part(s[self.i]) || s[self.i] == '\\') {
@@ -465,6 +476,18 @@ pub struct Func {
     pub is_gen: bool,
     /// Where it starts in the source, for error messages (see [`Where::packed`]).
     pub line: u32,
+    /// Its source text, for `toString`: the script and a character range in it.
+    pub src: Option<SrcSpan>,
+}
+
+/// A character range of a script's source.
+#[derive(Debug, Clone)]
+pub struct SrcSpan(pub Rc<str>, pub u32, pub u32);
+
+impl SrcSpan {
+    pub fn text(&self) -> String {
+        self.0.chars().skip(self.1 as usize).take(self.2.saturating_sub(self.1) as usize).collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -518,6 +541,8 @@ pub enum Export {
 
 pub struct Parser {
     toks: Vec<Token>,
+    /// The whole script, which functions keep a range of for `toString`.
+    source: Option<Rc<str>>,
     i: usize,
     /// Nesting depth, to stop pathological input before it overflows the stack.
     depth: u32,
@@ -605,16 +630,63 @@ const RESERVED: &[&str] = &[
 
 impl Parser {
     pub fn new(src: &str) -> R<Self> {
-        Ok(Self::from_tokens(lex(src)?))
+        let mut p = Self::from_tokens(lex(src)?);
+        p.source = Some(src.into());
+        Ok(p)
     }
 
     fn from_tokens(toks: Vec<Token>) -> Self {
-        Parser { toks, i: 0, depth: 0, next_async: false, next_gen: false, in_gen: false, module: false }
+        Parser { toks, source: None, i: 0, depth: 0, next_async: false, next_gen: false, in_gen: false, module: false }
+    }
+
+    /// The source from token `from` to the last token read.
+    fn span(&self, from: usize) -> Option<SrcSpan> {
+        let src = self.source.clone()?;
+        let start = self.toks.get(from)?.at;
+        let end = self.toks.get(self.i.checked_sub(1)?)?.end;
+        Some(SrcSpan(src, start, end.max(start)))
+    }
+
+    /// Where a function's text starts, walking back from its `(` over its
+    /// name, `*`, `function`, `async`, `get` / `set`.
+    fn func_start(&self, paren: usize) -> usize {
+        let mut j = paren;
+        let tok = |j: usize| &self.toks[j].tok;
+        if j > 0 && matches!(tok(j - 1), Tok::Ident(_) | Tok::Str(_) | Tok::Num(_)) && !matches!(tok(j - 1), Tok::Ident(w) if w == "function") {
+            j -= 1;
+        } else if j > 0 && matches!(tok(j - 1), Tok::Punct("]")) {
+            // A computed key: back to its `[`.
+            let mut depth = 0;
+            while j > 0 {
+                j -= 1;
+                match tok(j) {
+                    Tok::Punct("]") => depth += 1,
+                    Tok::Punct("[") => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if j > 0 && matches!(tok(j - 1), Tok::Punct("*")) {
+            j -= 1;
+        }
+        if j > 0 && matches!(tok(j - 1), Tok::Ident(w) if w == "function") {
+            j -= 1;
+        }
+        if j > 0 && matches!(tok(j - 1), Tok::Ident(w) if w == "async" || w == "get" || w == "set") && j < paren {
+            j -= 1;
+        }
+        j
     }
 
     /// The expression inside a template's `${...}`.
     fn sub_expr(&self, toks: Vec<Token>) -> R<Expr> {
         let mut p = Self::from_tokens(toks);
+        p.source = self.source.clone();
         p.in_gen = self.in_gen;
         p.depth = self.depth;
         let e = p.expr()?;
@@ -1134,11 +1206,13 @@ impl Parser {
         let (is_async, is_gen) = (std::mem::take(&mut self.next_async), std::mem::take(&mut self.next_gen));
         let outer = std::mem::replace(&mut self.in_gen, is_gen);
         let line = self.line().packed();
+        let from = self.func_start(self.i);
         let r = (|| {
             self.expect("(")?;
             let params = self.params()?;
             let body = self.block()?;
-            Ok(Rc::new(Func { name, params, body, arrow: false, expr_body: false, is_async, is_gen, line }))
+            let src = self.span(from);
+            Ok(Rc::new(Func { name, params, body, arrow: false, expr_body: false, is_async, is_gen, line, src }))
         })();
         self.in_gen = outer;
         r
@@ -1161,6 +1235,13 @@ impl Parser {
     }
 
     fn class_rest(&mut self) -> R<(Option<Expr>, Vec<(Expr, Member, bool)>)> {
+        let mut from = self.i;
+        if from > 0 && matches!(&self.toks[from - 1].tok, Tok::Ident(w) if w != "class") {
+            from -= 1;
+        }
+        if from > 0 && matches!(&self.toks[from - 1].tok, Tok::Ident(w) if w == "class") {
+            from -= 1;
+        }
         let sup = if self.eat_word("extends") { Some(self.unary_and_postfix()?) } else { None };
         self.expect("{")?;
         let mut members = Vec::new();
@@ -1217,6 +1298,29 @@ impl Parser {
                 let init = if self.eat("=") { Some(self.assign()?) } else { None };
                 self.semi()?;
                 members.push((key, Member::Field(init), is_static));
+            }
+        }
+        // A class's text is the whole class, kept on its constructor (made
+        // here when the class has none).
+        let span = self.span(from);
+        let has_ctor = members.iter().any(|(k, m, st)| !st && matches!(m, Member::Method(_)) && matches!(k, Expr::Str(n) if &**n == "constructor"));
+        if !has_ctor {
+            let body = if sup.is_some() {
+                vec![Stmt::Expr(Expr::Call(Box::new(Expr::Ident("super".into())), vec![Expr::Spread(Box::new(Expr::Ident("arguments".into())))], false))]
+            } else {
+                Vec::new()
+            };
+            let line = self.line().packed();
+            let f = Func { name: None, params: Vec::new(), body, arrow: false, expr_body: false, is_async: false, is_gen: false, line, src: None };
+            members.push((Expr::Str("constructor".into()), Member::Method(Rc::new(f)), false));
+        }
+        for (k, m, st) in members.iter_mut() {
+            if let (Expr::Str(n), Member::Method(f), false) = (&*k, m, *st) {
+                if &**n == "constructor" {
+                    if let Some(f) = Rc::get_mut(f) {
+                        f.src = span.clone();
+                    }
+                }
             }
         }
         Ok((sup, members))
@@ -1345,17 +1449,47 @@ impl Parser {
         Ok(Expr::Assign(intern(op), Box::new(target), Box::new(self.assign()?)))
     }
 
+    /// Where an arrow function starts: walking back from its `=>` over the
+    /// parameters (one name, or a bracketed list) and `async`.
+    fn arrow_start(&self) -> Option<usize> {
+        let arrow = (0..=self.i.min(self.toks.len() - 1)).rev().take(2).find(|&j| matches!(self.toks[j].tok, Tok::Punct("=>")))?;
+        let mut j = arrow.checked_sub(1)?;
+        if matches!(self.toks[j].tok, Tok::Punct(")")) {
+            let mut depth = 0;
+            loop {
+                match self.toks[j].tok {
+                    Tok::Punct(")") => depth += 1,
+                    Tok::Punct("(") => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j = j.checked_sub(1)?;
+            }
+        }
+        if j > 0 && matches!(&self.toks[j - 1].tok, Tok::Ident(w) if w == "async") {
+            j -= 1;
+        }
+        Some(j)
+    }
+
     fn arrow_body(&mut self, params: Vec<Expr>) -> R<Expr> {
         let is_async = std::mem::take(&mut self.next_async);
         let outer = std::mem::replace(&mut self.in_gen, false);
         let line = self.line().packed();
+        let from = self.arrow_start();
         let r = (|| {
             if self.is("{") {
                 let body = self.block()?;
-                Ok(Expr::Func(Rc::new(Func { name: None, params, body, arrow: true, expr_body: false, is_async, is_gen: false, line })))
+                let src = from.and_then(|f| self.span(f));
+                Ok(Expr::Func(Rc::new(Func { name: None, params, body, arrow: true, expr_body: false, is_async, is_gen: false, line, src })))
             } else {
                 let e = self.assign()?;
-                Ok(Expr::Func(Rc::new(Func { name: None, params, body: vec![Stmt::Return(Some(e))], arrow: true, expr_body: true, is_async, is_gen: false, line })))
+                let src = from.and_then(|f| self.span(f));
+                Ok(Expr::Func(Rc::new(Func { name: None, params, body: vec![Stmt::Return(Some(e))], arrow: true, expr_body: true, is_async, is_gen: false, line, src })))
             }
         })();
         self.in_gen = outer;
@@ -1486,12 +1620,13 @@ impl Parser {
                 e = Expr::Member(Box::new(e), Box::new(k), false);
             } else if self.eat("(") {
                 e = Expr::Call(Box::new(e), self.args()?, false);
-            } else if let Tok::Template(strs, exprs) = self.peek().clone() {
+            } else if let Tok::Template(strs, exprs, raws) = self.peek().clone() {
                 // A tagged template: called with the pieces and the values.
                 self.next();
-                // The strings array carries `.raw` (the cooked text stands in for the raw source).
+                // The strings array carries `.raw`, the source text of each piece.
                 let pieces = Expr::Array(strs.iter().map(|s| Expr::Str(s.as_str().into())).collect());
-                let raw = Expr::Object(vec![Prop::KeyValue(Expr::Str("raw".into()), pieces.clone())]);
+                let raw_pieces = Expr::Array(raws.iter().map(|s| Expr::Str(s.as_str().into())).collect());
+                let raw = Expr::Object(vec![Prop::KeyValue(Expr::Str("raw".into()), raw_pieces)]);
                 let assign = Expr::Member(Box::new(Expr::Ident("Object".into())), Box::new(Expr::Str("assign".into())), false);
                 let parts = Expr::Call(Box::new(assign), vec![pieces, raw], false);
                 let mut args = vec![parts];
@@ -1533,7 +1668,7 @@ impl Parser {
         match self.next() {
             Tok::Num(n) => Ok(Expr::Num(n)),
             Tok::Str(s) => Ok(Expr::Str(s.into())),
-            Tok::Template(strs, exprs) => {
+            Tok::Template(strs, exprs, _) => {
                 let mut es = Vec::new();
                 for src in exprs {
                     es.push(self.sub_expr(src)?);
@@ -1633,12 +1768,15 @@ impl Parser {
                             is_async: false,
                             is_gen: false,
                             line: 0,
+                            src: None,
                         }))),
                         vec![],
                         false,
                     ))
                 }
                 w if RESERVED.contains(&w) => Err(format!("line {line}: unexpected '{w}'")),
+                // `#x in o`, the brand check.
+                w if w.starts_with("\0#") => Ok(Expr::Str(w.into())),
                 _ => Ok(Expr::Ident(w.into())),
             },
             t => Err(format!("line {line}: unexpected {}", describe(&t))),
