@@ -1047,7 +1047,16 @@ struct Ctx<'a> {
     /// The containing block's content height, when it is fixed (for percentage heights).
     avail_h: Option<f32>,
     dom: &'a Dom,
+    /// Intrinsic widths already worked out in this pass, by (box, width looked past).
+    intrinsic_memo: HashMap<(NodeId, bool), (f32, f32)>,
+    /// Heights (and baselines) of boxes measured at a width in this pass: nested
+    /// flex items are measured before they're laid out, and without this every
+    /// level of nesting would double the work.
+    measure_memo: HashMap<MeasureKey, (f32, Option<(f32, f32)>)>,
 }
+
+/// (box, width, content only, inline-block depth, available height)
+type MeasureKey = (NodeId, u32, bool, u32, u32);
 
 /// An absolutely positioned box placed by `bottom`, waiting for its containing block's height.
 struct Pending {
@@ -1383,6 +1392,16 @@ impl<'r> Ctx<'_> {
 
     /// (min-content, max-content) border-box widths of the content, before min and max widths.
     fn intrinsic_content(&mut self, b: &BlockBox) -> (f32, f32) {
+        let key = (b.node, self.width_free == Some(b.node));
+        if let Some(&r) = self.intrinsic_memo.get(&key) {
+            return r;
+        }
+        let r = self.intrinsic_content_uncached(b);
+        self.intrinsic_memo.insert(key, r);
+        r
+    }
+
+    fn intrinsic_content_uncached(&mut self, b: &BlockBox) -> (f32, f32) {
         let s = self.styles[b.node as usize].clone();
         let (bw, own) = self.borders(b);
         let pad = own || !matches!(b.kind, BoxKind::Table(_));
@@ -2483,6 +2502,16 @@ impl<'r> Ctx<'_> {
 
     /// A box's border-box height laid out `w` wide, and the first and last baselines of the text in it.
     fn measure_lines(&mut self, b: &BlockBox, w: f32, content: bool) -> (f32, Option<(f32, f32)>) {
+        let key = (b.node, w.to_bits(), content, self.line_depth, self.avail_h.map_or(u32::MAX, f32::to_bits));
+        if let Some(&r) = self.measure_memo.get(&key) {
+            return r;
+        }
+        let r = self.measure_lines_uncached(b, w, content);
+        self.measure_memo.insert(key, r);
+        r
+    }
+
+    fn measure_lines_uncached(&mut self, b: &BlockBox, w: f32, content: bool) -> (f32, Option<(f32, f32)>) {
         let (ni, nl, nh, nb) = (self.items.len(), self.links.len(), self.hits.len(), self.baselines.len());
         let floats = self.floats.clone();
         let h = self.block(b, 0.0, 0.0, w, Opts { bfc: true, width: Some(w), content, ..Default::default() });
@@ -3840,7 +3869,7 @@ pub fn layout(dom: &Dom, styled: &css_style::Styled, width: f32, view_h: f32, fo
         (_, Some(b)) if painted(b) => b,
         _ => NodeId::MAX,
     };
-    let mut ctx = Ctx { styles: &all, fonts, images, hrefs: builder.hrefs, items: Vec::new(), links: Vec::new(), hits: Vec::new(), cache: HashMap::new(), floats: Vec::new(), cbs: vec![(0.0, 0.0, width)], layers: Vec::new(), segs: Vec::new(), pending: Vec::new(), canvas_node, collapsed: HashMap::new(), baselines: Vec::new(), line_depth: 0, width_free: None, view_h, root_el: dom.find("html").unwrap_or(NodeId::MAX), avail_h: (view_h > 0.0).then_some(view_h), dom };
+    let mut ctx = Ctx { styles: &all, fonts, images, hrefs: builder.hrefs, items: Vec::new(), links: Vec::new(), hits: Vec::new(), cache: HashMap::new(), floats: Vec::new(), cbs: vec![(0.0, 0.0, width)], layers: Vec::new(), segs: Vec::new(), pending: Vec::new(), canvas_node, collapsed: HashMap::new(), baselines: Vec::new(), line_depth: 0, width_free: None, view_h, root_el: dom.find("html").unwrap_or(NodeId::MAX), avail_h: (view_h > 0.0).then_some(view_h), dom, intrinsic_memo: HashMap::new(), measure_memo: HashMap::new() };
     // The canvas takes the root's background, or else the body's.
     let background = styles.get(canvas_node as usize).map(|s| s.background).filter(|c| c.a > 0).unwrap_or(Color::rgb(255, 255, 255));
     let height = ctx.block(&root, 0.0, 0.0, width, Opts { bfc: true, ..Default::default() });

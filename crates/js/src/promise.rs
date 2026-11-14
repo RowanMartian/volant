@@ -27,6 +27,8 @@ pub struct Reaction {
     derived: Value,
     on_ok: Value,
     on_err: Value,
+    /// A subclass's capability (resolve, reject), used instead of `derived`.
+    cap: Option<Box<(Value, Value)>>,
 }
 
 pub struct Timer {
@@ -172,7 +174,12 @@ impl Interp {
             } else {
                 Err(v.clone())
             };
-            if !matches!(r.derived, Value::Undefined) {
+            if let Some(cap) = &r.cap {
+                match outcome {
+                    Ok(x) => i.call(&cap.0, Value::Undefined, vec![x])?,
+                    Err(e) => i.call(&cap.1, Value::Undefined, vec![e])?,
+                };
+            } else if !matches!(r.derived, Value::Undefined) {
                 match outcome {
                     Ok(x) => i.resolve_promise(&r.derived, x),
                     Err(e) => i.reject_promise(&r.derived, e),
@@ -186,18 +193,84 @@ impl Interp {
     /// `p.then(on_ok, on_err)`: the derived promise.
     pub fn then_promise(&mut self, p: &Value, on_ok: Value, on_err: Value) -> Value {
         let (derived, _) = self.new_promise();
-        let Some(st) = pstate(p) else { return derived };
-        let r = Reaction { derived: derived.clone(), on_ok, on_err };
+        self.add_reaction(p, Reaction { derived: derived.clone(), on_ok, on_err, cap: None });
+        derived
+    }
+
+    /// `p.then(...)` as the spec has it: the derived promise is built by
+    /// `p.constructor[Symbol.species]`, so subclasses get their own kind back.
+    pub fn then_species(&mut self, p: &Value, on_ok: Value, on_err: Value) -> Res<Value> {
+        let c = self.species_constructor(p)?;
+        if self.is_intrinsic_promise(&c) {
+            return Ok(self.then_promise(p, on_ok, on_err));
+        }
+        let (derived, res, rej) = self.promise_capability(&c)?;
+        self.add_reaction(p, Reaction { derived: derived.clone(), on_ok, on_err, cap: Some(Box::new((res, rej))) });
+        Ok(derived)
+    }
+
+    pub fn is_intrinsic_promise(&self, c: &Value) -> bool {
+        match (c, &self.promise_ctor) {
+            (Value::Undefined, _) => true,
+            (Value::Obj(a), Value::Obj(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    /// SpeciesConstructor(p, %Promise%).
+    fn species_constructor(&mut self, p: &Value) -> Res<Value> {
+        let c = self.get(p, "constructor")?;
+        if self.is_intrinsic_promise(&c) {
+            return Ok(Value::Undefined);
+        }
+        if !matches!(c, Value::Obj(_)) {
+            return self.throw("TypeError", "a promise's constructor isn't an object");
+        }
+        let s = self.get(&c, "\0@species")?;
+        match s {
+            Value::Undefined | Value::Null => Ok(Value::Undefined),
+            s if Self::is_callable(&s) => Ok(s),
+            _ => self.throw("TypeError", "Symbol.species isn't a constructor"),
+        }
+    }
+
+    /// NewPromiseCapability(C): `new C(executor)`, keeping what the executor is handed.
+    pub fn promise_capability(&mut self, c: &Value) -> Res<(Value, Value, Value)> {
+        if self.is_intrinsic_promise(c) {
+            let (p, _) = self.new_promise();
+            let (res, rej) = self.resolving_functions(&p);
+            return Ok((p, res, rej));
+        }
+        let slots = Rc::new(RefCell::new((Value::Undefined, Value::Undefined)));
+        let s2 = slots.clone();
+        let exec = self.native(move |i, _t, a| {
+            let mut s = s2.borrow_mut();
+            if !matches!(s.0, Value::Undefined) || !matches!(s.1, Value::Undefined) {
+                drop(s);
+                return i.throw("TypeError", "promise executor already called");
+            }
+            *s = (arg(&a, 0), arg(&a, 1));
+            Ok(Value::Undefined)
+        });
+        let p = self.construct(c, vec![exec])?;
+        let (res, rej) = slots.borrow().clone();
+        if !Self::is_callable(&res) || !Self::is_callable(&rej) {
+            return self.throw("TypeError", "promise constructor didn't supply resolve and reject");
+        }
+        Ok((p, res, rej))
+    }
+
+    fn add_reaction(&mut self, p: &Value, r: Reaction) {
+        let Some(st) = pstate(p) else { return };
         let settled = match &mut *st.borrow_mut() {
             PState::Pending(list) => {
                 list.push(r);
-                return derived;
+                return;
             }
             PState::Fulfilled(v) => (true, v.clone()),
             PState::Rejected(v) => (false, v.clone()),
         };
         self.queue_reaction(r, settled.0, settled.1);
-        derived
     }
 
     /// The resolve and reject functions handed to an executor (each works once).
@@ -554,14 +627,19 @@ pub fn install(i: &mut Interp) {
     po.borrow_mut().set_own("prototype", Value::Obj(pp.clone()));
     po.borrow_mut().set_own("name", Value::Str("Promise".into()));
     pp.borrow_mut().set_own("constructor", promise.clone());
+    i.promise_ctor = promise.clone();
     global(i, "Promise", promise);
     def(i, &pp, "then", |i, t, a| {
         if pstate(&t).is_none() {
             return i.throw("TypeError", "then called on a non-promise");
         }
-        Ok(i.then_promise(&t, arg(&a, 0), arg(&a, 1)))
+        i.then_species(&t, arg(&a, 0), arg(&a, 1))
     });
-    def(i, &pp, "catch", |i, t, a| Ok(i.then_promise(&t, Value::Undefined, arg(&a, 0))));
+    def(i, &pp, "catch", |i, t, a| {
+        // Through `this.then`, as the spec has it (subclasses may override then).
+        let then = i.get(&t, "then")?;
+        i.call(&then, t, vec![Value::Undefined, arg(&a, 0)])
+    });
     def(i, &pp, "finally", |i, t, a| {
         let f = arg(&a, 0);
         let f2 = f.clone();
@@ -577,14 +655,36 @@ pub fn install(i: &mut Interp) {
             }
             Err(arg(&a, 0))
         });
-        Ok(i.then_promise(&t, ok, err))
+        let then = i.get(&t, "then")?;
+        i.call(&then, t, vec![ok, err])
     });
-    def(i, &po, "resolve", |i, _t, a| Ok(i.promise_resolve(arg(&a, 0))));
-    def(i, &po, "reject", |i, _t, a| {
-        let (p, _) = i.new_promise();
-        i.reject_promise(&p, arg(&a, 0));
+    def(i, &po, "resolve", |i, t, a| {
+        if i.is_intrinsic_promise(&t) || !Interp::is_callable(&t) {
+            return Ok(i.promise_resolve(arg(&a, 0)));
+        }
+        let v = arg(&a, 0);
+        if pstate(&v).is_some() {
+            let c = i.get(&v, "constructor")?;
+            if matches!((&c, &t), (Value::Obj(x), Value::Obj(y)) if Rc::ptr_eq(x, y)) {
+                return Ok(v);
+            }
+        }
+        let (p, res, _) = i.promise_capability(&t)?;
+        i.call(&res, Value::Undefined, vec![v])?;
         Ok(p)
     });
+    def(i, &po, "reject", |i, t, a| {
+        if i.is_intrinsic_promise(&t) || !Interp::is_callable(&t) {
+            let (p, _) = i.new_promise();
+            i.reject_promise(&p, arg(&a, 0));
+            return Ok(p);
+        }
+        let (p, _, rej) = i.promise_capability(&t)?;
+        i.call(&rej, Value::Undefined, vec![arg(&a, 0)])?;
+        Ok(p)
+    });
+    let species = i.native(|_i, t, _a| Ok(t));
+    po.borrow_mut().set_slot("\0@species", Slot::accessor(Some(species), None));
     def(i, &po, "withResolvers", |i, _t, _a| {
         let (p, _) = i.new_promise();
         let (res, rej) = i.resolving_functions(&p);
@@ -596,7 +696,19 @@ pub fn install(i: &mut Interp) {
     });
     // all / allSettled / any / race
     for (name, mode) in [("all", 0), ("allSettled", 1), ("any", 2), ("race", 3)] {
-        def(i, &po, name, move |i, _t, a| {
+        def(i, &po, name, move |i, t, a| {
+            if !i.is_intrinsic_promise(&t) && Interp::is_callable(&t) {
+                // A subclass: run the intrinsic combinator, then hand its
+                // outcome to a promise the subclass builds.
+                let (p, res, rej) = i.promise_capability(&t)?;
+                let inner = {
+                    let base = i.promise_ctor.clone();
+                    let f = i.get(&base, name)?;
+                    i.call(&f, base, a)?
+                };
+                i.then_promise(&inner, res, rej);
+                return Ok(p);
+            }
             let items = i.iterate(&arg(&a, 0))?;
             let (out, _) = i.new_promise();
             let n = items.len();

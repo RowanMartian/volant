@@ -666,4 +666,15 @@ fn bigint_values() {
          TypeError\nTypeError\nRangeError\nRangeError\nTypeError\n\
          K K"
     );
+
+}
+
+#[test]
+fn async_arrow_with_defaults() {
+    assert_eq!(out("const g = async ({ f = false } = {}) => { if (!f) return; await 1 }; const h = async (a = 1, b = (() => 2)()) => a + b; console.log(g() instanceof Promise, h() instanceof Promise); h().then(v => console.log(v))"), "true true\n3");
+}
+
+#[test]
+fn promise_subclasses() {
+    assert_eq!(out("class P extends Promise {} const r = P.resolve(1); console.log(r instanceof P, r.then() instanceof P, P.all([]) instanceof P, P.race([1]) instanceof P, P.resolve(r) === r, P[Symbol.species] === P); function F(ex) { ex(() => {}, () => {}) } const q = Promise.resolve(1); q.constructor = { [Symbol.species]: F }; console.log(q.then() instanceof F); P.all([1, P.resolve(2)]).then(v => console.log(v.join()))"), "true true true true true true\ntrue\n1,2");
 }

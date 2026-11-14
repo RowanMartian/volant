@@ -408,6 +408,8 @@ pub struct Interp {
     pub date_proto: Obj,
     pub regexp_proto: Obj,
     pub promise_proto: Obj,
+    /// The intrinsic `Promise` (subclasses take the slower, spec-shaped paths).
+    pub promise_ctor: Value,
     pub generator_proto: Obj,
     pub iterator_proto: Obj,
     /// What the built-in collections' iterators share (`next`), under %IteratorPrototype%.
@@ -490,6 +492,7 @@ impl Interp {
             date_proto: mk(Kind::Plain),
             regexp_proto: mk(Kind::Plain),
             promise_proto: mk(Kind::Plain),
+            promise_ctor: Value::Undefined,
             generator_proto: mk(Kind::Plain),
             iterator_proto: mk(Kind::Plain),
             list_iter_proto: mk(Kind::Plain),

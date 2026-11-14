@@ -4803,12 +4803,32 @@ fn install(i: &mut Interp, st: &S) {
         let Some(node) = node_of(&arg(&a, 0)) else { return Ok(Value::Null) };
         let src = st2.borrow().dom.attr(node, "src").map(|s| s.to_string());
         let Some(src) = src.filter(|s| !s.trim().is_empty()) else { return Ok(Value::Null) };
-        Ok(match canvas_run::picture(&st2, &src) {
+        Ok(match i.waiting(|| canvas_run::picture(&st2, &src)) {
             Some(img) => i.array(vec![Value::Num(img.width as f64), Value::Num(img.height as f64)]),
             None => Value::Null,
         })
     });
     hook(i, "__img", f);
+    let st2 = st.clone();
+    let f = i.native(move |i, _t, a| {
+        // __prefetch(...urls): starts the page's files on their way, side by side
+        let mut urls = Vec::new();
+        let (base, page, host) = {
+            let s = st2.borrow();
+            (s.base(), s.url.clone(), s.host.clone())
+        };
+        for v in &a {
+            let u = resolve_url(&base, i.to_str(v)?.trim());
+            if (u.starts_with("http://") || u.starts_with("https://")) && !st2.borrow().pictures.contains_key(&u) {
+                urls.push(u);
+            }
+        }
+        if !urls.is_empty() {
+            host.prefetch(urls, &page);
+        }
+        Ok(Value::Undefined)
+    });
+    hook(i, "__prefetch", f);
     let st2 = st.clone();
     let f = i.native(move |i, _t, a| {
         let u = i.to_str(&arg(&a, 0))?;

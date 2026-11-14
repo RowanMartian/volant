@@ -1204,15 +1204,15 @@ impl Interp {
                             let this = stack[f.bp - 2].clone();
                             let native = matches!(&parent, Value::Obj(o) if matches!(o.borrow().kind, Kind::Function(Callable::Native(_))));
                             if native {
-                                // A built-in parent (Error, say): copy what it makes onto this.
+                                // A built-in parent (Promise, Map, Error...): what it makes
+                                // becomes `this`, with the subclass's prototype, so it keeps
+                                // its internal slots.
                                 let made = tri!(self.construct(&parent, args));
                                 if let (Value::Obj(src), Value::Obj(dst)) = (&made, &this) {
                                     if !Rc::ptr_eq(src, dst) {
-                                        let keys = src.borrow().own_keys();
-                                        for k in keys {
-                                            let v = tri!(self.get(&made, &k));
-                                            dst.borrow_mut().set_own(&k, v);
-                                        }
+                                        let proto = dst.borrow().proto.clone();
+                                        src.borrow_mut().proto = proto;
+                                        stack[f.bp - 2] = made.clone();
                                     }
                                 }
                             } else if Interp::is_callable(&parent) {

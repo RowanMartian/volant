@@ -86,6 +86,7 @@
   eventClass('PopStateEvent', 'Event', { state: null, hasUAVisualTransition: false })
   eventClass('HashChangeEvent', 'Event', { oldURL: '', newURL: '' })
   eventClass('PageTransitionEvent', 'Event', { persisted: false })
+  eventClass('PromiseRejectionEvent', 'Event', { promise: null, reason: undefined })
   eventClass('StorageEvent', 'Event', { key: null, oldValue: null, newValue: null, url: '', storageArea: null })
   eventClass('AnimationEvent', 'Event', { animationName: '', elapsedTime: 0, pseudoElement: '' })
   eventClass('TransitionEvent', 'Event', { propertyName: '', elapsedTime: 0, pseudoElement: '' })
@@ -2683,6 +2684,7 @@
       const s = info(el)
       if (s.pending) return
       s.pending = true
+      if (wanted(el)) { const u = el.getAttribute('src'); if (u) __prefetch(u) }
       setTimeout(() => {
         s.pending = false
         if (el.getAttribute('src') === null || !wanted(el)) return
@@ -2701,7 +2703,9 @@
     }
     // Pictures in the page's markup with handlers: they load (and say so) once the page is parsed.
     document.addEventListener('DOMContentLoaded', () => {
-      for (const img of document.getElementsByTagName('img')) if (img.getAttribute('src') !== null && wanted(img)) schedule(img)
+      const imgs = Array.from(document.getElementsByTagName('img')).filter(img => img.getAttribute('src') !== null && wanted(img))
+      __prefetch(...imgs.map(img => img.getAttribute('src')))
+      for (const img of imgs) schedule(img)
     })
     g.Image = function Image(w, h) {
       const img = document.createElement('img')

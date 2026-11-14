@@ -1413,7 +1413,7 @@ impl Parser {
     }
 
     fn assign_inner(&mut self) -> R<Expr> {
-        // Arrow functions: `x => ...`, `(a, b) => ...`, `async x => ...` (no event loop yet: async is ignored).
+        // Arrow functions: `x => ...`, `(a, b) => ...`, `async x => ...`.
         let mut is_async = false;
         if self.is_word("async") && !self.toks[self.i + 1].nl {
             let save = self.i;
@@ -1442,8 +1442,10 @@ impl Parser {
         }
         if self.is_arrow_ahead() {
             self.next();
+            // (Default values in the parameters are expressions of their own: they reset next_async.)
             let params = self.params()?;
             self.expect("=>")?;
+            self.next_async = is_async;
             return self.arrow_body(params);
         }
         self.next_async = false;
