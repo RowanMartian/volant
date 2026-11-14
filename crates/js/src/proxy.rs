@@ -11,7 +11,7 @@ impl Interp {
     pub fn proxy_parts(v: &Value) -> Option<(Value, Value)> {
         match v {
             Value::Obj(o) => match &o.borrow().kind {
-                Kind::Proxy(t, h) => Some((t.clone(), h.clone())),
+                Kind::Proxy(t, h) => Some(((**t).clone(), h.clone())),
                 _ => None,
             },
             _ => None,
@@ -153,7 +153,7 @@ pub fn install(i: &mut Interp) {
             return i.throw("TypeError", "Proxy needs a target and a handler object");
         };
         let proto = t.borrow().proto.clone();
-        let p = i.obj(Kind::Proxy(target.clone(), handler));
+        let p = i.obj(Kind::Proxy(Box::new(target.clone()), handler));
         if let Value::Obj(po) = &p {
             po.borrow_mut().proto = proto;
         }

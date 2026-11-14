@@ -1531,7 +1531,7 @@ fn getter(i: &Interp, st: &S, o: &Obj, name: &str, g: impl Fn(&mut Interp, &S, N
         let id = this_node(i, &t)?;
         g(i, &st, id)
     });
-    o.borrow_mut().set_slot(name, Slot::Accessor(Some(gv), None));
+    o.borrow_mut().set_slot(name, Slot::accessor(Some(gv), None));
 }
 
 fn accessor(
@@ -1553,7 +1553,7 @@ fn accessor(
         s(i, &st2, id, arg(&a, 0))?;
         Ok(Value::Undefined)
     });
-    o.borrow_mut().set_slot(name, Slot::Accessor(Some(gv), Some(sv)));
+    o.borrow_mut().set_slot(name, Slot::accessor(Some(gv), Some(sv)));
 }
 
 fn changed(st: &S) {
@@ -2636,8 +2636,8 @@ fn install(i: &mut Interp, st: &S) {
             }
             Ok(Value::Undefined)
         });
-        html_element.borrow_mut().set_slot(&format!("on{ev}"), Slot::Accessor(Some(get.clone()), Some(set.clone())));
-        html_document.borrow_mut().set_slot(&format!("on{ev}"), Slot::Accessor(Some(get), Some(set)));
+        html_element.borrow_mut().set_slot(&format!("on{ev}"), Slot::accessor(Some(get.clone()), Some(set.clone())));
+        html_document.borrow_mut().set_slot(&format!("on{ev}"), Slot::accessor(Some(get), Some(set)));
         // On window they're plain properties, so `onload = f` works as a global too.
         let mut g = i.global_obj.borrow_mut();
         if g.get_own(&format!("on{ev}")).is_none() {
@@ -3979,7 +3979,7 @@ fn install(i: &mut Interp, st: &S) {
             let (id, attr) = list_of(i, &t)?;
             Ok(Value::Num(tokens(&st1, id, &attr).len() as f64))
         });
-        class_list.borrow_mut().set_slot("length", Slot::Accessor(Some(len), None));
+        class_list.borrow_mut().set_slot("length", Slot::accessor(Some(len), None));
         let st2 = st.clone();
         let get = i.native(move |i, t, _a| {
             let (id, attr) = list_of(i, &t)?;
@@ -3993,7 +3993,7 @@ fn install(i: &mut Interp, st: &S) {
             changed(&st3);
             Ok(Value::Undefined)
         });
-        class_list.borrow_mut().set_slot("value", Slot::Accessor(Some(get), Some(set)));
+        class_list.borrow_mut().set_slot("value", Slot::accessor(Some(get), Some(set)));
     }
     // style
     getter(i, st, &element, "style", |i, st, id| {
@@ -4059,7 +4059,7 @@ fn install(i: &mut Interp, st: &S) {
         }
         Ok(Value::Undefined)
     });
-    style_p.borrow_mut().set_slot("cssText", Slot::Accessor(Some(css_text_get), Some(css_text_set)));
+    style_p.borrow_mut().set_slot("cssText", Slot::accessor(Some(css_text_get), Some(css_text_set)));
     // dataset
     getter(i, st, &element, "dataset", |i, st, id| {
         if let Some(v) = st.borrow().datasets.get(&id) {

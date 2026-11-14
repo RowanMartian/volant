@@ -33,7 +33,7 @@ pub struct Closure {
     pub code: Rc<Code>,
     pub env: Option<Rc<Env>>,
     /// The parent class, for `super` in methods and constructors.
-    pub sup: Option<Value>,
+    pub sup: Option<Box<Value>>,
 }
 
 struct Handler {
@@ -51,8 +51,7 @@ pub struct Frame {
     /// Where the locals start (after the arguments).
     lp: usize,
     env: Option<Rc<Env>>,
-    this: Value,
-    func: Value,
+    // `this` and the function itself are on the stack at bp - 2 and bp - 1.
     handlers: Vec<Handler>,
     /// A `new` call: an object it returns replaces `this`.
     construct: bool,
@@ -188,7 +187,7 @@ fn result_obj(i: &Interp, value: Value, done: bool) -> Value {
 fn set_sup(f: &Value, sup: Option<Value>) {
     if let Value::Obj(o) = f {
         if let Kind::Function(Callable::Closure(c)) = &mut o.borrow_mut().kind {
-            c.sup = sup;
+            c.sup = sup.map(Box::new);
         }
     }
 }
@@ -196,7 +195,7 @@ fn set_sup(f: &Value, sup: Option<Value>) {
 fn sup_of(f: &Value) -> Option<Value> {
     match f {
         Value::Obj(o) => match &o.borrow().kind {
-            Kind::Function(Callable::Closure(c)) => c.sup.clone(),
+            Kind::Function(Callable::Closure(c)) => c.sup.as_deref().cloned(),
             _ => None,
         },
         _ => None,
@@ -218,7 +217,7 @@ impl Interp {
             let slot = o.borrow().get_own(k).cloned();
             match slot {
                 Some(Slot::Data(v)) => return Ok(v),
-                Some(Slot::Accessor(Some(g), _)) => return self.call(&g, this.clone(), vec![]),
+                Some(Slot::Accessor(Some(g), _)) => return self.call(&Value::Obj(g), this.clone(), vec![]),
                 Some(Slot::Accessor(None, _)) => return Ok(Value::Undefined),
                 None => {}
             }
@@ -242,7 +241,7 @@ impl Interp {
             let slot = o.borrow().get_own(k).cloned();
             match slot {
                 Some(Slot::Accessor(Some(_), Some(s))) | Some(Slot::Accessor(None, Some(s))) => {
-                    self.call(&s, this.clone(), vec![v])?;
+                    self.call(&Value::Obj(s), this.clone(), vec![v])?;
                     return Ok(());
                 }
                 Some(Slot::Accessor(_, None)) => return Ok(()),
@@ -278,27 +277,36 @@ impl Interp {
     }
 
     #[inline]
-    fn enter(&mut self, code: &Code) {
+    fn enter(&mut self, code: &Rc<Code>) {
         self.frames += 1;
-        self.call_names.push((code.name.clone(), code.line));
-        self.call_urls.push(code.url.clone());
+        self.call_stack.push(code.clone());
     }
 
     #[inline]
     fn leave(&mut self) {
         self.frames = self.frames.saturating_sub(1);
-        self.call_names.pop();
-        self.call_urls.pop();
+        self.call_stack.pop();
     }
 
     /// A frame for `code` whose arguments are already on the stack at `bp`.
     #[allow(clippy::too_many_arguments)]
-    fn make_frame(&self, stack: &mut Vec<Value>, code: Rc<Code>, env: Option<Rc<Env>>, this: Value, func: Value, bp: usize, argc: usize, construct: bool) -> Frame {
-        let this = if !code.strict && !code.arrow && matches!(this, Value::Undefined | Value::Null) { Value::Obj(self.global_obj.clone()) } else { this };
+    /// `nullish_this`: `this` (at bp - 2) is undefined or null.
+    fn make_frame(&self, stack: &mut Vec<Value>, code: Rc<Code>, env: Option<Rc<Env>>, nullish_this: bool, bp: usize, argc: usize, construct: bool) -> Frame {
+        if nullish_this && !code.strict && !code.arrow {
+            stack[bp - 2] = Value::Obj(self.global_obj.clone());
+        }
         let lp = bp + argc;
-        stack.resize(lp + code.nlocals as usize, Value::Undefined);
+        let need = lp + code.nlocals as usize;
+        if stack.len() <= need {
+            stack.reserve(need - stack.len());
+            while stack.len() < need {
+                stack.push(Value::Undefined);
+            }
+        } else {
+            stack.truncate(need);
+        }
         let env = if code.has_env { Some(Rc::new(Env::new(code.env_size, env))) } else { env };
-        Frame { code, pc: 0, bp, argc, lp, env, this, func, handlers: Vec::new(), construct, new_target: Value::Undefined }
+        Frame { code, pc: 0, bp, argc, lp, env, handlers: Vec::new(), construct, new_target: Value::Undefined }
     }
 
     /// A base class's instance fields, set up on `this` before its constructor runs.
@@ -319,7 +327,7 @@ impl Interp {
         let mut stack = self.take_stack();
         stack.push(this.clone());
         stack.push(Value::Undefined);
-        let frame = self.make_frame(&mut stack, code, None, this, Value::Undefined, 2, 0, false);
+        let frame = self.make_frame(&mut stack, code, None, matches!(this, Value::Undefined | Value::Null), 2, 0, false);
         match self.execute(stack, frame, Input::Start)? {
             Exit::Return(v) => Ok(v),
             _ => Ok(Value::Undefined),
@@ -348,7 +356,7 @@ impl Interp {
         stack.push(f.clone());
         let argc = args.len();
         stack.extend(args);
-        let mut frame = self.make_frame(&mut stack, code.clone(), env, this, f.clone(), 2, argc, construct);
+        let mut frame = self.make_frame(&mut stack, code.clone(), env, matches!(this, Value::Undefined | Value::Null), 2, argc, construct);
         frame.new_target = new_target;
         if code.is_gen {
             let st = GenState { susp: Some(Suspended { frame, stack }), started: false, running: false, is_async: code.is_async };
@@ -465,7 +473,7 @@ impl Interp {
         let mut stack = Vec::with_capacity(32);
         stack.push(Value::Undefined);
         stack.push(Value::Undefined);
-        let frame = self.make_frame(&mut stack, code, None, Value::Undefined, Value::Undefined, 2, 0, false);
+        let frame = self.make_frame(&mut stack, code, None, true, 2, 0, false);
         let env = frame.env.clone().expect("a module environment");
         match self.execute(stack, frame, Input::Start)? {
             Exit::InitDone(s) => Ok((s, env)),
@@ -532,8 +540,34 @@ impl Interp {
                     }
                     // Numbers take the fast path; anything else becomes a Number or a
                     // BigInt first (two BigInts use BigInt arithmetic).
+                    // The two numbers on top of the stack, if they are numbers.
+                    macro_rules! nums2 {
+                        () => {{
+                            let n = stack.len();
+                            match (stack.get(n.wrapping_sub(2)), stack.get(n.wrapping_sub(1))) {
+                                (Some(Value::Num(x)), Some(Value::Num(y))) => Some((*x, *y)),
+                                _ => None,
+                            }
+                        }};
+                    }
+                    // Replaces the two numbers on top (just checked by nums2!) with one value.
+                    macro_rules! put2 {
+                        ($v:expr) => {{
+                            let v: Value = $v;
+                            let n = stack.len();
+                            // SAFETY: both slots hold numbers, which need no drop.
+                            unsafe {
+                                stack.set_len(n - 1);
+                                std::ptr::write(stack.as_mut_ptr().add(n - 2), v);
+                            }
+                        }};
+                    }
                     macro_rules! num2 {
                         ($op:expr, $a:ident, $b:ident, $body:expr) => {{
+                            if let Some(($a, $b)) = nums2!() {
+                                put2!(Value::Num($body));
+                                continue;
+                            }
                             let rb = pop!();
                             let ra = pop!();
                             let r = match (&ra, &rb) {
@@ -551,6 +585,11 @@ impl Interp {
                     }
                     macro_rules! int2 {
                         ($op:expr, $a:ident, $b:ident, $body:expr) => {{
+                            if let Some((x, y)) = nums2!() {
+                                let ($a, $b) = (to_i32(x), to_i32(y));
+                                put2!(Value::Num($body));
+                                continue;
+                            }
                             let rb = pop!();
                             let ra = pop!();
                             let r = match (&ra, &rb) {
@@ -579,8 +618,7 @@ impl Interp {
                                     break 'inner self.error("RangeError", "the script ran too long and was stopped");
                                 }
                                 if let Some(p) = &mut self.profile {
-                                    let (name, at) = self.call_names.last().cloned().unwrap_or((None, 0));
-                                    let url = self.call_urls.last().cloned().flatten();
+                                    let (name, at, url) = self.call_stack.last().map_or((None, 0, None), |c| (c.name.clone(), c.line, c.url.clone()));
                                     let now = std::time::Instant::now();
                                     // Gaps longer than a second are time outside scripts (network, layout).
                                     let ns = self.profile_at.map(|t| now.duration_since(t).as_nanos() as u64).filter(|&ns| ns < 1_000_000_000).unwrap_or(0);
@@ -625,6 +663,14 @@ impl Interp {
                     }
                     macro_rules! cmp {
                         ($test:expr) => {{
+                            let t: fn(std::cmp::Ordering) -> bool = $test;
+                            if let Some((x, y)) = nums2!() {
+                                let n = stack.len();
+                                // SAFETY: both slots hold numbers, which need no drop.
+                                unsafe { stack.set_len(n - 2) };
+                                branch!(x.partial_cmp(&y).map(t).unwrap_or(false));
+                                continue;
+                            }
                             let rb = pop!();
                             let ra = pop!();
                             let r = match (&ra, &rb) {
@@ -632,7 +678,6 @@ impl Interp {
                                 (Value::Str(x), Value::Str(y)) => Some(str_cmp(x, y)),
                                 _ => tri!(self.compare(&ra, &rb)),
                             };
-                            let t: fn(std::cmp::Ordering) -> bool = $test;
                             branch!(r.map(t).unwrap_or(false));
                         }};
                     }
@@ -712,21 +757,21 @@ impl Interp {
                             }
                         }
                         Op::GetGlobal(k, ic) => {
-                            let v = tri!(self.get_global(cstr(&code, k), &code.ics[ic as usize]));
+                            let v = tri!(self.get_global(cstr(&code, k), &code.ics[ic as usize..ic as usize + 2]));
                             stack.push(v);
                         }
                         Op::SetGlobal(k, ic) => {
                             let v = top!().clone();
-                            tri!(self.set_global(cstr(&code, k), v, &code.ics[ic as usize]));
+                            tri!(self.set_global(cstr(&code, k), v, &code.ics[ic as usize..ic as usize + 2]));
                         }
                         Op::PutGlobal(k, ic) => {
                             let v = pop!();
-                            tri!(self.set_global(cstr(&code, k), v, &code.ics[ic as usize]));
+                            tri!(self.set_global(cstr(&code, k), v, &code.ics[ic as usize..ic as usize + 2]));
                         }
                         Op::TypeofGlobal(k) => {
                             let k = cstr(&code, k);
                             let v = if self.global_lex.borrow().get_own(k).is_some() || self.has_property(&self.global_obj.clone(), k) {
-                                let v = tri!(self.get_global(k, &Cell::new(0)));
+                                let v = tri!(self.get_global(k, &[Cell::new(0), Cell::new(u32::MAX)]));
                                 Interp::typeof_(&v)
                             } else {
                                 "undefined"
@@ -810,6 +855,28 @@ impl Interp {
                             };
                             stack.push(v);
                         }
+                        Op::PutProp(k, ic) => {
+                            let v = pop!();
+                            let o = pop!();
+                            tri!(self.set_hint(&o, cstr(&code, k), v, Some(&code.ics[ic as usize])));
+                        }
+                        Op::GetLocalProp(l, k, ic) => {
+                            let key = cstr(&code, k);
+                            let cell = &code.ics[ic as usize];
+                            let slot = f.lp + l as usize;
+                            let fast = match &stack[slot] {
+                                Value::Obj(o) => fast_get(o, key, cell),
+                                _ => None,
+                            };
+                            let v = match fast {
+                                Some(v) => v,
+                                None => {
+                                    let o = stack[slot].clone();
+                                    tri!(self.get_hint(&o, key, Some(cell)))
+                                }
+                            };
+                            stack.push(v);
+                        }
                         Op::SetProp(k, ic) => {
                             let v = pop!();
                             let o = pop!();
@@ -827,6 +894,12 @@ impl Interp {
                             let o = top!().clone();
                             let v = tri!(self.get_elem(&o, &k));
                             stack.push(v);
+                        }
+                        Op::PutElem => {
+                            let v = pop!();
+                            let k = pop!();
+                            let o = pop!();
+                            tri!(self.set_elem(&o, &k, v));
                         }
                         Op::SetElem => {
                             let v = pop!();
@@ -868,6 +941,10 @@ impl Interp {
                             stack.push(Value::Bool(r));
                         }
                         Op::Add => {
+                            if let Some((x, y)) = nums2!() {
+                                put2!(Value::Num(x + y));
+                                continue;
+                            }
                             let b = pop!();
                             let a = pop!();
                             let r = match (&a, &b) {
@@ -1019,7 +1096,7 @@ impl Interp {
                         Op::Return => {
                             let mut v = pop!();
                             if f.construct && !matches!(v, Value::Obj(_)) {
-                                v = f.this.clone();
+                                v = stack[f.bp - 2].clone();
                             }
                             self.leave();
                             match frames.pop() {
@@ -1075,19 +1152,25 @@ impl Interp {
                                 if self.frames >= frame_limit {
                                     break 'inner self.recursion_error();
                                 }
-                                let func = stack[fpos].clone();
-                                let (this, bp) = if is_new {
-                                    let this = tri!(self.new_this(&func));
-                                    stack.insert(fpos, this.clone());
-                                    (this, fpos + 2)
+                                let bp = if is_new || base_class {
+                                    let func = stack[fpos].clone();
+                                    let (this, bp) = if is_new {
+                                        let this = tri!(self.new_this(&func));
+                                        stack.insert(fpos, this.clone());
+                                        (this, fpos + 2)
+                                    } else {
+                                        (stack[fpos - 1].clone(), fpos + 1)
+                                    };
+                                    if base_class {
+                                        tri!(self.run_fields(&func, &this));
+                                    }
+                                    bp
                                 } else {
-                                    (stack[fpos - 1].clone(), fpos + 1)
+                                    fpos + 1
                                 };
-                                if base_class {
-                                    tri!(self.run_fields(&func, &this));
-                                }
                                 f.pc = pc;
-                                let nf = self.make_frame(&mut stack, c2, env2, this, func, bp, argc, is_new);
+                                let sloppy = matches!(stack[bp - 2], Value::Undefined | Value::Null);
+                                let nf = self.make_frame(&mut stack, c2, env2, sloppy, bp, argc, is_new);
                                 frames.push(std::mem::replace(&mut f, nf));
                                 code = f.code.clone();
                                 pc = 0;
@@ -1117,8 +1200,8 @@ impl Interp {
                                     tri!(self.iterate(&list))
                                 }
                             };
-                            let parent = sup_of(&f.func).unwrap_or(Value::Undefined);
-                            let this = f.this.clone();
+                            let parent = sup_of(&stack[f.bp - 1]).unwrap_or(Value::Undefined);
+                            let this = stack[f.bp - 2].clone();
                             let native = matches!(&parent, Value::Obj(o) if matches!(o.borrow().kind, Kind::Function(Callable::Native(_))));
                             if native {
                                 // A built-in parent (Error, say): copy what it makes onto this.
@@ -1136,20 +1219,20 @@ impl Interp {
                                 if matches!(&parent, Value::Obj(o) if matches!(o.borrow().kind, Kind::Proxy(..))) {
                                     tri!(self.call(&parent, this.clone(), args));
                                 } else {
-                                    let nt = if matches!(f.new_target, Value::Undefined) { f.func.clone() } else { f.new_target.clone() };
+                                    let nt = if matches!(f.new_target, Value::Undefined) { stack[f.bp - 1].clone() } else { f.new_target.clone() };
                                     let made = tri!(self.call_closure_as(&parent, this.clone(), args, true, nt));
                                     // A parent constructor that returns an object makes it `this`.
                                     if let (Value::Obj(m), Value::Obj(t)) = (&made, &this) {
                                         if !Rc::ptr_eq(m, t) {
-                                            f.this = made.clone();
+                                            stack[f.bp - 2] = made.clone();
                                         }
                                     }
                                 }
                             } else {
                                 break 'inner self.error("TypeError", "super() outside a derived class");
                             }
-                            let ctor = f.func.clone();
-                            let this = f.this.clone();
+                            let ctor = stack[f.bp - 1].clone();
+                            let this = stack[f.bp - 2].clone();
                             tri!(self.run_fields(&ctor, &this));
                             stack.push(Value::Undefined);
                         }
@@ -1158,23 +1241,23 @@ impl Interp {
                             let fo = Object::new(Some(self.function_proto.clone()), Kind::Function(Callable::Closure(Closure { code: c, env: f.env.clone(), sup: None })));
                             stack.push(Value::Obj(Rc::new(RefCell::new(fo))));
                         }
-                        Op::This => stack.push(f.this.clone()),
+                        Op::This => stack.push(stack[f.bp - 2].clone()),
                         Op::NewTarget => stack.push(match (f.construct, &f.new_target) {
                             (false, _) => Value::Undefined,
-                            (true, Value::Undefined) => f.func.clone(),
+                            (true, Value::Undefined) => stack[f.bp - 1].clone(),
                             (true, nt) => nt.clone(),
                         }),
-                        Op::Callee => stack.push(f.func.clone()),
+                        Op::Callee => stack.push(stack[f.bp - 1].clone()),
                         Op::Arguments => {
                             let a = stack[f.bp..f.bp + f.argc].to_vec();
                             let args = self.array(a);
                             // Sloppy-mode `arguments.callee`: the function running.
                             if let Value::Obj(o) = &args {
-                                o.borrow_mut().set_hidden("callee", f.func.clone());
+                                o.borrow_mut().set_hidden("callee", stack[f.bp - 1].clone());
                             }
                             stack.push(args);
                         }
-                        Op::LoadSuper => stack.push(sup_of(&f.func).unwrap_or(Value::Undefined)),
+                        Op::LoadSuper => stack.push(sup_of(&stack[f.bp - 1]).unwrap_or(Value::Undefined)),
                         Op::SuperGet => {
                             let k = pop!();
                             let base = pop!();
@@ -1196,7 +1279,7 @@ impl Interp {
                                 })
                             });
                             if let Value::Obj(b) = &base {
-                                b.borrow_mut().set_slot("prototype", Slot::Accessor(Some(getter), None));
+                                b.borrow_mut().set_slot("prototype", Slot::accessor(Some(getter), None));
                             }
                             set_sup(&fv, Some(base));
                         }
@@ -1208,6 +1291,10 @@ impl Interp {
                             let k = tri!(self.key(&k));
                             tri!(self.super_set(&base, &k, v.clone(), &this));
                             stack.push(v);
+                        }
+                        Op::ArgLocal(i, l) => {
+                            let v = if (i as usize) < f.argc { stack[f.bp + i as usize].clone() } else { Value::Undefined };
+                            stack[f.lp + l as usize] = v;
                         }
                         Op::Arg(i) => {
                             let v = if (i as usize) < f.argc { stack[f.bp + i as usize].clone() } else { Value::Undefined };
@@ -1238,6 +1325,12 @@ impl Interp {
                                 if let Kind::Array(a) = &mut o.borrow_mut().kind {
                                     a.extend(items);
                                 }
+                            }
+                        }
+                        Op::AddProp(k) => {
+                            let v = pop!();
+                            if let Value::Obj(o) = top!() {
+                                o.borrow_mut().append(cstr(&code, k).clone(), v);
                             }
                         }
                         Op::InitProp(k) => {
@@ -1498,11 +1591,20 @@ impl Interp {
 
     // ------------------------------------------------------------ helpers
 
-    fn get_global(&mut self, k: &Rc<str>, ic: &Cell<u32>) -> Res<Value> {
+    /// `ics` is two cells: the slot last found, and (for a global-object slot) how many
+    /// lexical globals there were then: while that is unchanged none can shadow it.
+    fn get_global(&mut self, k: &Rc<str>, ics: &[Cell<u32>]) -> Res<Value> {
+        let (ic, ep) = (&ics[0], &ics[1]);
         let c = ic.get();
         {
             let lex = self.global_lex.borrow();
-            if !lex.is_empty() {
+            let n = lex.len() as u32;
+            if c & IC_LEX == 0 && ep.get() == n {
+                if let Some(v) = self.global_obj.borrow().data_at(k, c) {
+                    return Ok(v.clone());
+                }
+            }
+            if n != 0 {
                 if let Some(i) = lex.find(k, if c & IC_LEX != 0 { c & !IC_LEX } else { u32::MAX }) {
                     ic.set(i as u32 | IC_LEX);
                     if let Slot::Data(v) = lex.slot_at(i) {
@@ -1513,6 +1615,7 @@ impl Interp {
             let g = self.global_obj.borrow();
             if let Some(i) = g.find(k, if c & IC_LEX == 0 { c } else { 0 }) {
                 ic.set(i as u32);
+                ep.set(n);
                 if let Slot::Data(v) = g.slot_at(i) {
                     return Ok(v.clone());
                 }
@@ -1530,11 +1633,19 @@ impl Interp {
         self.throw("ReferenceError", &format!("{k} is not defined"))
     }
 
-    fn set_global(&mut self, k: &Rc<str>, v: Value, ic: &Cell<u32>) -> Res<()> {
+    fn set_global(&mut self, k: &Rc<str>, v: Value, ics: &[Cell<u32>]) -> Res<()> {
+        let (ic, ep) = (&ics[0], &ics[1]);
         let c = ic.get();
+        let n = self.global_lex.borrow().len() as u32;
+        if c & IC_LEX == 0 && ep.get() == n {
+            if let Some(d) = self.global_obj.borrow_mut().data_at_mut(k, c) {
+                *d = v;
+                return Ok(());
+            }
+        }
         {
             let mut lex = self.global_lex.borrow_mut();
-            if !lex.is_empty() {
+            if n != 0 {
                 if let Some(i) = lex.find(k, if c & IC_LEX != 0 { c & !IC_LEX } else { u32::MAX }) {
                     if lex.readonly_at(i) {
                         drop(lex);
@@ -1550,6 +1661,9 @@ impl Interp {
             let mut g = self.global_obj.borrow_mut();
             if let Some(i) = g.find(k, if c & IC_LEX == 0 { c } else { 0 }) {
                 ic.set(i as u32);
+                if !g.readonly_at(i) {
+                    ep.set(n);
+                }
                 if let Slot::Data(d) = g.slot_at_mut(i) {
                     *d = v;
                     return Ok(());
@@ -1877,7 +1991,7 @@ impl Interp {
 fn define_accessor(o: &Obj, k: &str, f: Value, getter: bool, enumerable: bool) {
     let old = o.borrow().get_own(k).cloned();
     let (mut g, mut s) = match old {
-        Some(Slot::Accessor(g, s)) => (g, s),
+        Some(Slot::Accessor(g, s)) => (g.map(Value::Obj), s.map(Value::Obj)),
         _ => (None, None),
     };
     if getter {
@@ -1886,7 +2000,7 @@ fn define_accessor(o: &Obj, k: &str, f: Value, getter: bool, enumerable: bool) {
         s = Some(f);
     }
     let mut b = o.borrow_mut();
-    b.set_slot(k, Slot::Accessor(g, s));
+    b.set_slot(k, Slot::accessor(g, s));
     if !enumerable {
         b.set_enumerable(k, false);
     }

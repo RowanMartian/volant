@@ -445,7 +445,7 @@ fn getter(i: &Interp, proto: &Obj, name: &str, f: impl Fn(&mut Interp, Value) ->
     if let Value::Obj(go) = &g {
         go.borrow_mut().set_hidden("name", Value::Str(format!("get {name}").into()));
     }
-    proto.borrow_mut().set_slot(name, Slot::Accessor(Some(g), None));
+    proto.borrow_mut().set_slot(name, Slot::accessor(Some(g), None));
     proto.borrow_mut().set_enumerable(name, false);
 }
 

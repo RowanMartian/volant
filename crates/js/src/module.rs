@@ -142,14 +142,14 @@ impl Interp {
     fn export_binding(&mut self, ns: &Obj, exported: &str, env: &Rc<Env>, slot: u32) {
         let env = env.clone();
         let getter = self.native(move |_i, _this, _args| Ok(env.vars.borrow().get(slot as usize).cloned().unwrap_or(Value::Undefined)));
-        ns.borrow_mut().set_slot(exported, Slot::Accessor(Some(getter), None));
+        ns.borrow_mut().set_slot(exported, Slot::accessor(Some(getter), None));
     }
 
     /// `ns[exported]` reads `name` of another module's namespace, live.
     fn reexport(&mut self, ns: &Obj, exported: &str, from: &Obj, name: &str) {
         let (from, name): (Obj, Rc<str>) = (from.clone(), name.into());
         let getter = self.native(move |i, _this, _args| i.get(&Value::Obj(from.clone()), &name));
-        ns.borrow_mut().set_slot(exported, Slot::Accessor(Some(getter), None));
+        ns.borrow_mut().set_slot(exported, Slot::accessor(Some(getter), None));
     }
 
     /// Runs a linked module after what it imports (once; a cycle doesn't wait for itself).

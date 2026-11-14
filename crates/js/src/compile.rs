@@ -16,6 +16,8 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+const _: () = assert!(std::mem::size_of::<Op>() == 12);
+
 /// One instruction. The operand stack effect is noted as [before → after].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Op {
@@ -74,10 +76,16 @@ pub enum Op {
     GetProp(u32, u32),
     /// [o v → v]
     SetProp(u32, u32),
+    /// [o v →] (a SetProp whose value isn't used)
+    PutProp(u32, u32),
+    /// (local, name, inline cache): [→ v] a local's property
+    GetLocalProp(u16, u32, u32),
     /// [o k → v]
     GetElem,
     /// [o k v → v]
     SetElem,
+    /// [o k v →] (a SetElem whose value isn't used)
+    PutElem,
     /// [o → o f]: a method, keeping its object (for a call)
     GetMethod(u32, u32),
     /// [o k → o f]
@@ -164,6 +172,8 @@ pub enum Op {
     SetHome(u8),
     /// The i'th argument / the arguments from i on, as an array.
     Arg(u32),
+    /// (argument, local): local = the i'th argument
+    ArgLocal(u32, u32),
     ArgsRest(u32),
     NewObject,
     /// [items… → array]
@@ -174,6 +184,8 @@ pub enum Op {
     ArraySpread,
     /// [o v → o]
     InitProp(u32),
+    /// [o v → o] a key the literal can't have yet (appended without a lookup)
+    AddProp(u32),
     /// [o k v → o]
     InitElem,
     /// [o f → o]: (name, getter?)
@@ -384,6 +396,9 @@ pub struct Compiler {
     keep: Vec<Rc<Func>>,
     /// The next function compiled is a static class member (its `super` is the parent class itself).
     next_static: bool,
+    /// Every name string made so far: functions share one copy of each, so lookups
+    /// of the same name from different functions match by pointer.
+    names: HashSet<Rc<str>>,
 }
 
 type FreeCache = HashMap<*const Func, Rc<FreeNames>>;
@@ -736,7 +751,7 @@ impl Default for Compiler {
 
 impl Compiler {
     pub fn new() -> Self {
-        Compiler { fns: Vec::new(), free_cache: HashMap::new(), module: ModuleInfo::default(), url: None, declaring: false, import_names: Vec::new(), keep: Vec::new(), next_static: false }
+        Compiler { fns: Vec::new(), free_cache: HashMap::new(), module: ModuleInfo::default(), url: None, declaring: false, import_names: Vec::new(), keep: Vec::new(), next_static: false, names: HashSet::new() }
     }
 
     /// What a nested function mentions without declaring at its own top level.
@@ -852,7 +867,7 @@ impl Compiler {
                 let idx = self.func(&f, None)?;
                 self.emit(Op::Closure(idx));
                 let n = self.name_const(f.name.as_deref().unwrap_or(""));
-                let ic = self.ic();
+                let ic = self.ic2();
                 self.emit(Op::PutGlobal(n, ic));
             }
             let mut vars = Vec::new();
@@ -1116,7 +1131,7 @@ impl Compiler {
                 Some((loc, _)) => self.store_loc(loc, true),
                 None => {
                     let n = self.name_const(&name);
-                    let ic = self.ic();
+                    let ic = self.ic2();
                     self.emit(Op::PutGlobal(n, ic));
                 }
             }
@@ -1293,11 +1308,30 @@ impl Compiler {
     fn emit(&mut self, op: Op) -> usize {
         let st = self.st();
         // A store followed by a pop is a store that pops (unless something jumps in between).
+        // (A jump to the first of the pair still works: the pair did what the merged op does.)
         if op == Op::Pop && st.ops.len() > st.barrier.get() {
             let merged = match st.ops.last() {
                 Some(Op::SetLocal(i)) => Some(Op::PutLocal(*i)),
                 Some(Op::SetEnv(d, i)) => Some(Op::PutEnv(*d, *i)),
                 Some(Op::SetGlobal(k, ic)) => Some(Op::PutGlobal(*k, *ic)),
+                Some(Op::SetProp(k, ic)) => Some(Op::PutProp(*k, *ic)),
+                Some(Op::SetElem) => Some(Op::PutElem),
+                // A value pushed only to be dropped (`(0, f)(x)`): neither is needed.
+                Some(Op::Int(_) | Op::Const(_) | Op::Undef | Op::Null | Op::True | Op::False | Op::Dup) => {
+                    st.ops.pop();
+                    return st.ops.len();
+                }
+                _ => None,
+            };
+            if let Some(m) = merged {
+                *st.ops.last_mut().expect("an op") = m;
+                return st.ops.len() - 1;
+            }
+        }
+        if st.ops.len() > st.barrier.get() {
+            let merged = match (st.ops.last(), op) {
+                (Some(Op::Arg(a)), Op::PutLocal(l)) => Some(Op::ArgLocal(*a, l)),
+                (Some(Op::GetLocal(l)), Op::GetProp(k, ic)) if *l < 0x1_0000 => Some(Op::GetLocalProp(*l as u16, k, ic)),
                 _ => None,
             };
             if let Some(m) = merged {
@@ -1350,11 +1384,18 @@ impl Compiler {
     }
 
     fn name_const(&mut self, s: &str) -> u32 {
-        let st = self.st();
-        if let Some(&i) = st.const_strs.get(s) {
+        if let Some(&i) = self.st().const_strs.get(s) {
             return i;
         }
-        let rc: Rc<str> = s.into();
+        let rc: Rc<str> = match self.names.get(s) {
+            Some(r) => r.clone(),
+            None => {
+                let r: Rc<str> = s.into();
+                self.names.insert(r.clone());
+                r
+            }
+        };
+        let st = self.st();
         st.consts.push(Value::Str(rc.clone()));
         let i = st.consts.len() as u32 - 1;
         st.const_strs.insert(rc, i);
@@ -1371,6 +1412,13 @@ impl Compiler {
         let st = self.st();
         st.nics += 1;
         st.nics - 1
+    }
+
+    /// The two cache cells a global variable access uses.
+    fn ic2(&mut self) -> u32 {
+        let st = self.st();
+        st.nics += 2;
+        st.nics - 2
     }
 
     fn get_prop(&mut self, name: &str) {
@@ -1538,7 +1586,7 @@ impl Compiler {
             if let Expr::Ident(n) = p {
                 let c = self.name_const(n);
                 if kind == "var" {
-                    let ic = self.ic();
+                    let ic = self.ic2();
                     self.emit(Op::PutGlobal(c, ic));
                 } else {
                     self.emit(Op::DeclareLex(c, kind == "const"));
@@ -2142,11 +2190,14 @@ impl Compiler {
             }
             None => {
                 let c = self.name_const(n);
-                let ic = self.ic();
+                let ic = self.ic2();
                 self.emit(if pop { Op::PutGlobal(c, ic) } else { Op::SetGlobal(c, ic) });
             }
         }
         // A `with` hit skips the ordinary store (and leaves the value as the store would).
+        if skips.is_empty() {
+            return Ok(());
+        }
         let end = self.here();
         for s in skips {
             if let Op::WithSet(c, _) = self.st().ops[s] {
@@ -2190,7 +2241,7 @@ impl Compiler {
             }
             None => {
                 let c = self.name_const(n);
-                let ic = self.ic();
+                let ic = self.ic2();
                 self.emit(Op::GetGlobal(c, ic));
             }
         }
@@ -2305,6 +2356,9 @@ impl Compiler {
             }
             Expr::Object(props) => {
                 self.emit(Op::NewObject);
+                // Keys known to be new (no spread or computed key before them, no repeat)
+                // are appended without looking for them first.
+                let mut seen: Option<Vec<&str>> = Some(Vec::new());
                 for p in props {
                     match p {
                         Prop::KeyValue(Expr::Str(k), v) => {
@@ -2314,9 +2368,23 @@ impl Compiler {
                                 self.emit(Op::InitProto);
                             } else {
                                 let c = self.name_const(k);
-                                self.emit(Op::InitProp(c));
+                                let fresh = match &mut seen {
+                                    Some(list) if !list.contains(&&**k) && list.len() < 64 => {
+                                        list.push(k);
+                                        true
+                                    }
+                                    _ => false,
+                                };
+                                self.emit(if fresh { Op::AddProp(c) } else { Op::InitProp(c) });
                             }
                         }
+                        Prop::Getter(Expr::Str(k), _) | Prop::Setter(Expr::Str(k), _) if seen.is_some() => {
+                            seen.as_mut().expect("seen").push(k);
+                        }
+                        _ => seen = None,
+                    }
+                    match p {
+                        Prop::KeyValue(Expr::Str(_), _) => {}
                         Prop::KeyValue(k, v) => {
                             self.expr(k)?;
                             match (k, v) {

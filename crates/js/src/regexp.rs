@@ -13,7 +13,7 @@ fn arg(a: &[Value], i: usize) -> Value {
 pub fn regex_of(v: &Value) -> Option<(Rc<Regex>, Obj)> {
     match v {
         Value::Obj(o) => match &o.borrow().kind {
-            Kind::RegExp(r, _, _) => Some((r.clone(), o.clone())),
+            Kind::RegExp(r, _) => Some((r.clone(), o.clone())),
             _ => None,
         },
         _ => None,
@@ -30,7 +30,7 @@ fn def(i: &Interp, o: &Obj, name: &str, f: impl Fn(&mut Interp, Value, Vec<Value
 
 fn getter(i: &Interp, o: &Obj, name: &str, f: impl Fn(&mut Interp, Value, Vec<Value>) -> Res<Value> + 'static) {
     let fv = i.native(f);
-    o.borrow_mut().set_slot(name, Slot::Accessor(Some(fv), None));
+    o.borrow_mut().set_slot(name, Slot::accessor(Some(fv), None));
 }
 
 /// Units a..b of a string as a string (half a surrogate pair becomes U+FFFD).
@@ -292,7 +292,7 @@ pub fn install(i: &mut Interp) {
         let (src, flags): (Rc<str>, Rc<str>) = match (&arg(&a, 0), arg(&a, 1)) {
             (Value::Obj(o), f) if matches!(o.borrow().kind, Kind::RegExp(..)) => {
                 let (s, fl) = match &o.borrow().kind {
-                    Kind::RegExp(_, s, fl) => (s.clone(), fl.clone()),
+                    Kind::RegExp(_, sf) => (sf.0.clone(), sf.1.clone()),
                     _ => unreachable!(),
                 };
                 (s, if matches!(f, Value::Undefined) { fl } else { i.to_str(&f)? })
@@ -337,7 +337,7 @@ pub fn install(i: &mut Interp) {
     def(i, &rp, "toString", |_i, t, _a| {
         Ok(Value::Str(match &t {
             Value::Obj(o) => match &o.borrow().kind {
-                Kind::RegExp(_, s, f) => format!("/{s}/{f}").into(),
+                Kind::RegExp(_, sf) => format!("/{}/{}", sf.0, sf.1).into(),
                 _ => "/(?:)/".into(),
             },
             _ => "/(?:)/".into(),
@@ -346,7 +346,7 @@ pub fn install(i: &mut Interp) {
     getter(i, &rp, "source", |_i, t, _a| {
         Ok(match &t {
             Value::Obj(o) => match &o.borrow().kind {
-                Kind::RegExp(_, s, _) => Value::Str(s.clone()),
+                Kind::RegExp(_, sf) => Value::Str(sf.0.clone()),
                 _ => Value::Undefined,
             },
             _ => Value::Undefined,
@@ -355,7 +355,7 @@ pub fn install(i: &mut Interp) {
     getter(i, &rp, "flags", |_i, t, _a| {
         Ok(match &t {
             Value::Obj(o) => match &o.borrow().kind {
-                Kind::RegExp(_, _, f) => Value::Str(f.clone()),
+                Kind::RegExp(_, sf) => Value::Str(sf.1.clone()),
                 _ => Value::Undefined,
             },
             _ => Value::Undefined,
@@ -365,7 +365,7 @@ pub fn install(i: &mut Interp) {
         getter(i, &rp, name, move |_i, t, _a| {
             Ok(match &t {
                 Value::Obj(o) => match &o.borrow().kind {
-                    Kind::RegExp(_, _, f) => Value::Bool(f.contains(flag)),
+                    Kind::RegExp(_, sf) => Value::Bool(sf.1.contains(flag)),
                     _ => Value::Undefined,
                 },
                 _ => Value::Undefined,

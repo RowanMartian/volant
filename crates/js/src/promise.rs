@@ -422,7 +422,7 @@ pub fn install(i: &mut Interp) {
             _ => Value::Undefined,
         })
     });
-    syp.borrow_mut().set_slot("description", Slot::Accessor(Some(desc), None));
+    syp.borrow_mut().set_slot("description", Slot::accessor(Some(desc), None));
     for k in ["toString", "valueOf", "\0@toPrimitive", "description"] {
         syp.borrow_mut().set_enumerable(k, false);
     }

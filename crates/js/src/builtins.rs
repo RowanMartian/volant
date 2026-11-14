@@ -31,7 +31,7 @@ fn define_property(i: &mut Interp, o: &Obj, k: &str, desc: &Value) -> Res<()> {
     if Interp::is_callable(&g) || Interp::is_callable(&s) {
         let old = o.borrow().get_own(k).cloned();
         let (mut og, mut os) = match old {
-            Some(Slot::Accessor(a, b)) => (a, b),
+            Some(Slot::Accessor(a, b)) => (a.map(Value::Obj), b.map(Value::Obj)),
             _ => (None, None),
         };
         if has(i, "get")? {
@@ -40,7 +40,7 @@ fn define_property(i: &mut Interp, o: &Obj, k: &str, desc: &Value) -> Res<()> {
         if has(i, "set")? {
             os = Interp::is_callable(&s).then_some(s);
         }
-        o.borrow_mut().set_slot(k, Slot::Accessor(og, os));
+        o.borrow_mut().set_slot(k, Slot::accessor(og, os));
     } else if has(i, "value")? || !existed {
         let v = i.get(desc, "value")?;
         let is_array_slot = matches!(o.borrow().kind, Kind::Array(_)) && (k == "length" || k.parse::<usize>().is_ok());
@@ -165,8 +165,8 @@ pub fn inspect(i: &mut Interp, v: &Value, top: bool, depth: u32) -> String {
             if matches!(o.borrow().kind, Kind::Error) {
                 return i.describe(v);
             }
-            if let Kind::RegExp(_, src, flags) = &o.borrow().kind {
-                return format!("/{src}/{flags}");
+            if let Kind::RegExp(_, sf) = &o.borrow().kind {
+                return format!("/{}/{}", sf.0, sf.1);
             }
             if let Kind::Promise(p) = &o.borrow().kind {
                 return match &*p.borrow() {
@@ -238,7 +238,7 @@ pub fn structured_clone(i: &mut Interp, v: &Value, memo: &mut Vec<(Obj, Value)>)
         Kind::Set(t) => Shape::Set(t.keys().cloned().collect()),
         Kind::Date(t) => Shape::Done(i.obj(Kind::Date(*t))),
         Kind::Boxed(p) => Shape::Done(i.obj(Kind::Boxed(p.clone()))),
-        Kind::RegExp(re, src, flags) => Shape::Done(i.obj(Kind::RegExp(re.clone(), src.clone(), flags.clone()))),
+        Kind::RegExp(re, sf) => Shape::Done(i.obj(Kind::RegExp(re.clone(), sf.clone()))),
         Kind::Buffer(b) => Shape::Done(crate::typed::new_buffer(i, b.clone())),
         Kind::Typed(view) => Shape::Typed(view.clone()),
         Kind::Function(_) => return Err(i.error("DataCloneError", "function could not be cloned.")),
@@ -701,7 +701,7 @@ pub fn install(i: &mut Interp) {
                         Kind::Map(_) => "Map".into(),
                         Kind::Set(_) => "Set".into(),
                         Kind::Promise(_) => "Promise".into(),
-                        Kind::Proxy(t, _) if matches!(t, Value::Obj(x) if matches!(x.borrow().kind, Kind::Array(_))) => "Array".into(),
+                        Kind::Proxy(t, _) if matches!(&**t, Value::Obj(x) if matches!(x.borrow().kind, Kind::Array(_))) => "Array".into(),
                         Kind::Boxed(Value::Num(_)) => "Number".into(),
                         Kind::Boxed(Value::Str(s)) if s.starts_with("\0@") => "Symbol".into(),
                         Kind::Boxed(Value::Str(_)) => "String".into(),
@@ -864,8 +864,8 @@ pub fn install(i: &mut Interp) {
         };
         match slot {
             Some(Slot::Accessor(g, s)) => {
-                i.set(&d, "get", g.unwrap_or(Value::Undefined))?;
-                i.set(&d, "set", s.unwrap_or(Value::Undefined))?;
+                i.set(&d, "get", g.map_or(Value::Undefined, Value::Obj))?;
+                i.set(&d, "set", s.map_or(Value::Undefined, Value::Obj))?;
             }
             _ => {
                 let v = i.get(&o, &k)?;
@@ -2092,7 +2092,7 @@ pub fn install(i: &mut Interp) {
                 items.set(v, Value::Undefined);
             }
         }
-        Ok(i.obj(Kind::Set(items)))
+        Ok(i.obj(Kind::Set(Box::new(items))))
     });
     fn set_op<T>(i: &Interp, t: &Value, f: impl FnOnce(&mut crate::table::Table) -> T) -> Res<T> {
         if let Value::Obj(o) = t {
@@ -2137,6 +2137,11 @@ pub fn install(i: &mut Interp) {
             Ok(i.array(items))
         });
     }
+    def(i, &setp, "entries", |i, t, _a| {
+        let items: Vec<Value> = set_op(i, &t, |s| s.keys().cloned().collect())?;
+        let pairs = items.into_iter().map(|v| i.array(vec![v.clone(), v])).collect();
+        Ok(i.array(pairs))
+    });
 
     // ---------------------------------------------------------- Date
     let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);

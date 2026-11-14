@@ -46,16 +46,16 @@ pub enum Kind {
     Function(Callable),
     Error,
     /// Map and Set: entries in insertion order (a Set's values are its keys).
-    Map(crate::table::Table),
-    Set(crate::table::Table),
+    Map(Box<crate::table::Table>),
+    Set(Box<crate::table::Table>),
     Date(f64),
     /// A primitive in an object (`new String("x")`).
     Boxed(Value),
     /// A regular expression: (compiled, source, flags)
-    RegExp(Rc<crate::regex::Regex>, Rc<str>, Rc<str>),
+    RegExp(Rc<crate::regex::Regex>, Box<(Rc<str>, Rc<str>)>),
     Promise(Rc<RefCell<crate::promise::PState>>),
     /// `new Proxy(target, handler)`; a revoked proxy's handler is null.
-    Proxy(Value, Value),
+    Proxy(Box<Value>, Value),
     /// A generator object (its suspended frame).
     Generator(Rc<RefCell<crate::vm::GenState>>),
     /// The VM's own iterators, for `for of` and spreads over built-in collections.
@@ -69,7 +69,19 @@ pub enum Kind {
 #[derive(Clone)]
 pub enum Slot {
     Data(Value),
-    Accessor(Option<Value>, Option<Value>),
+    /// A getter and a setter (functions, so objects).
+    Accessor(Option<Obj>, Option<Obj>),
+}
+
+impl Slot {
+    /// An accessor from getter and setter values (anything but an object counts as none).
+    pub fn accessor(get: Option<Value>, set: Option<Value>) -> Slot {
+        let obj = |v: Option<Value>| match v {
+            Some(Value::Obj(o)) => Some(o),
+            _ => None,
+        };
+        Slot::Accessor(obj(get), obj(set))
+    }
 }
 
 /// An own property: its key, its value (or accessors) and flags.
@@ -112,6 +124,22 @@ impl Object {
         match &self.index {
             Some(ix) => ix.get(k).map(|&i| i as usize),
             None => self.props.iter().position(|e| *e.key == *k),
+        }
+    }
+    /// The data property `k` if it is at `hint` (no search).
+    #[inline]
+    pub fn data_at(&self, k: &str, hint: u32) -> Option<&Value> {
+        match self.props.get(hint as usize) {
+            Some(PropEntry { key, slot: Slot::Data(v), .. }) if std::ptr::eq(key.as_ptr(), k.as_ptr()) || **key == *k => Some(v),
+            _ => None,
+        }
+    }
+    /// The writable data property `k` if it is at `hint` (no search).
+    #[inline]
+    pub fn data_at_mut(&mut self, k: &str, hint: u32) -> Option<&mut Value> {
+        match self.props.get_mut(hint as usize) {
+            Some(PropEntry { key, slot: Slot::Data(v), flags }) if *flags & READONLY == 0 && (std::ptr::eq(key.as_ptr(), k.as_ptr()) || **key == *k) => Some(v),
+            _ => None,
         }
     }
     #[inline]
@@ -179,6 +207,11 @@ impl Object {
             self.index = Some(Box::new(ix));
         }
         at
+    }
+    /// Adds a data property the object is known not to have.
+    pub fn append(&mut self, k: Rc<str>, v: Value) {
+        debug_assert!(self.find(&k, 0).is_none());
+        self.push(k, Slot::Data(v), 0);
     }
     pub fn set_own(&mut self, k: &str, v: Value) {
         match self.find(k, 0) {
@@ -416,10 +449,8 @@ pub struct Interp {
     /// How deep JS calls may nest. Each level costs native stack, so callers
     /// that raise it run the interpreter on a thread with a large stack.
     pub max_depth: u32,
-    /// The names of the JS functions being called, innermost last (for error messages).
-    pub call_names: Vec<(Option<Rc<str>>, u32)>,
-    /// The script each of those came from (for stack traces).
-    pub(crate) call_urls: Vec<Option<Rc<str>>>,
+    /// The JS functions being called, innermost last (for error messages and stack traces).
+    pub(crate) call_stack: Vec<Rc<crate::compile::Code>>,
     /// Fetches modules (`import`); without one, imports fail.
     pub loader: Option<Rc<dyn crate::module::Loader>>,
     /// Modules by URL, loaded once each.
@@ -487,8 +518,7 @@ impl Interp {
             deadline: None,
             depth: 0,
             max_depth: 400,
-            call_names: Vec::new(),
-            call_urls: Vec::new(),
+            call_stack: Vec::new(),
             loader: None,
             modules: HashMap::new(),
             base_url: "".into(),
@@ -580,11 +610,12 @@ impl Interp {
     /// The JS functions being run, innermost first ("    at name (line N)").
     pub fn stack_trace(&self) -> String {
         let mut out = String::new();
-        for (k, (n, line)) in self.call_names.iter().enumerate().rev().take(10) {
-            let at = crate::parse::Where::unpack(*line);
-            match self.call_urls.get(k).cloned().flatten() {
-                Some(u) => out.push_str(&format!("    at {} ({u}: {at})\n", n.as_deref().unwrap_or("<anonymous>"))),
-                None => out.push_str(&format!("    at {} ({at})\n", n.as_deref().unwrap_or("<anonymous>"))),
+        for c in self.call_stack.iter().rev().take(10) {
+            let at = crate::parse::Where::unpack(c.line);
+            let n = c.name.as_deref().unwrap_or("<anonymous>");
+            match &c.url {
+                Some(u) => out.push_str(&format!("    at {n} ({u}: {at})\n")),
+                None => out.push_str(&format!("    at {n} ({at})\n")),
             }
         }
         out
@@ -829,7 +860,7 @@ impl Interp {
                 match &b.kind {
                     Kind::Plain | Kind::Function(_) | Kind::Error => {}
                     Kind::Proxy(t, h) => {
-                        let (t, h) = (t.clone(), h.clone());
+                        let (t, h) = ((**t).clone(), h.clone());
                         drop(b);
                         return self.proxy_get(t, h, k, v);
                     }
@@ -880,7 +911,7 @@ impl Interp {
             };
             if let Some(getter) = slot {
                 return match getter {
-                    Some(g) => self.call(&g, v.clone(), vec![]),
+                    Some(g) => self.call(&Value::Obj(g), v.clone(), vec![]),
                     None => Ok(Value::Undefined),
                 };
             }
@@ -983,7 +1014,7 @@ impl Interp {
             };
             if let Some(s) = setter {
                 if let Some(s) = s {
-                    self.call(&s, v.clone(), vec![val])?;
+                    self.call(&Value::Obj(s), v.clone(), vec![val])?;
                 }
                 return Ok(());
             }
@@ -1088,7 +1119,7 @@ impl Interp {
                 r
             }
         };
-        let o = self.obj(Kind::RegExp(re, body.clone(), flags.clone()));
+        let o = self.obj(Kind::RegExp(re, Box::new((body.clone(), flags.clone()))));
         if let Value::Obj(oo) = &o {
             oo.borrow_mut().set_own("lastIndex", Value::Num(0.0));
         }
@@ -1199,8 +1230,8 @@ impl Interp {
     /// "too much recursion", naming the functions going round (to make the loop findable).
     pub(crate) fn recursion_error(&self) -> Value {
         let mut names: Vec<String> = Vec::new();
-        for (n, line) in self.call_names.iter().rev().take(12) {
-            names.push(format!("{} {}", n.as_deref().unwrap_or("function"), crate::parse::Where::unpack(*line)));
+        for c in self.call_stack.iter().rev().take(12) {
+            names.push(format!("{} {}", c.name.as_deref().unwrap_or("function"), crate::parse::Where::unpack(c.line)));
         }
         self.error("RangeError", &format!("too much recursion (in {})", names.join(" ← ")))
     }
@@ -1547,6 +1578,10 @@ pub fn to_i32(n: f64) -> i32 {
 
 /// ToUint32: the number modulo 2^32.
 pub fn to_u32(n: f64) -> u32 {
+    let i = n as i32;
+    if i as f64 == n {
+        return i as u32;
+    }
     if !n.is_finite() {
         return 0;
     }
