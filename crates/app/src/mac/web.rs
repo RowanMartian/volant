@@ -447,7 +447,7 @@ fn decide_navigation(web: &WKWebView, action: &WKNavigationAction) -> WKNavigati
             return WKNavigationActionPolicy::Cancel;
         }
     }
-    // A link to a site Simple Page draws: Volant's own engine takes the tab from WebKit.
+    // A link to a site Canard draws: Volant's own engine takes the tab from WebKit.
     if kind == WKNavigationType::LinkActivated && main_frame && (scheme == "http" || scheme == "https") {
         let base = |u: &str| u.split('#').next().unwrap_or(u).to_string();
         let here = unsafe { web.URL() }.and_then(|u| u.absoluteString()).map(|s| s.to_string()).unwrap_or_default();
@@ -556,7 +556,7 @@ fn changed(b: &mut Browser, ptr: usize, key: &str) {
     let Some(id) = tab_of(b, ptr) else { return };
     let active = b.tabs.active == Some(id);
     let web = b.webs[&id].web.clone();
-    // Simple Page runs this tab: WebKit's (empty) page isn't what the tab shows.
+    // Canard runs this tab: WebKit's (empty) page isn't what the tab shows.
     if matches!(key, "title" | "URL") && super::engine_view::handles(b, id) {
         return;
     }

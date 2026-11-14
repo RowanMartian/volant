@@ -71,7 +71,7 @@ args_for() {
       mkdir -p "$TMP/volant"; printf 'onboarded=1\nrestore_session=0\nsimple_default=0\n' > "$TMP/volant/settings.txt"
       echo "$@" ;;
     Simple)
-      # The same app, with pages drawn by Volant's own engine (Simple Page) where it can.
+      # The same app, with pages drawn by Volant's own engine (Canard) where it can.
       mkdir -p "$TMP/volant"; printf 'onboarded=1\nrestore_session=0\nsimple_default=1\n' > "$TMP/volant/settings.txt"
       echo "$@" ;;
     Safari) echo "$*" ;;
@@ -95,7 +95,7 @@ JS
   echo "| --- | --- | --- | --- | --- | --- |"
 } > "$OUT/table.md"
 
-label_of() { case "$1" in Simple) echo "Volant (Simple Page)";; *) echo "$1";; esac; }
+label_of() { case "$1" in Simple) echo "Volant (Canard)";; *) echo "$1";; esac; }
 
 for b in Volant Simple Safari Chrome Firefox; do
   [ -e "$(app_of "$b")" ] || { echo "skip $b (not installed)"; continue; }
@@ -139,7 +139,7 @@ done
   cat "$OUT/table.md"
   echo
   echo "Memory is each process's memory footprint (the figure Activity Monitor shows), summed over every process the browser started: app, web content, GPU and networking helpers."
-  echo "Volant (Simple Page) is the same app drawing pages with its own engine where it can (WebKit takes the rest); plain Volant hands every page to WebKit."
-  echo "Safari and Volant render with the WebKit built into macOS, so their app sizes don't include an engine; Chrome and Firefox ship their own."
+  echo "Volant (Canard) is the same app drawing pages with its own engine where it can (WebKit takes the rest); plain Volant hands every page to WebKit."
+  echo "Safari renders with the WebKit built into macOS, so its app size doesn't include an engine; Volant's includes Canard, its own engine, and uses that WebKit for web apps. Chrome and Firefox ship their own."
 } > "$OUT/results.md"
 cat "$OUT/results.md"

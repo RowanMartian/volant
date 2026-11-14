@@ -1,4 +1,4 @@
-//! The compatibility survey: real sites through the same steps as Simple Page
+//! The compatibility survey: real sites through the same steps as Canard
 //! (fetch, parse, scripts, a moment of timers, the fallback check, style
 //! sheets, layout), each in a process of its own so a crash or a hang is one
 //! row of the report, not the end of it.
@@ -20,7 +20,7 @@ const LIMIT: Duration = Duration::from_secs(90);
 #[derive(Default, Clone)]
 struct Row {
     url: String,
-    /// "shown", or why Simple Page wouldn't show it.
+    /// "shown", or why Canard wouldn't show it.
     verdict: String,
     status: u16,
     kb: usize,
@@ -149,7 +149,7 @@ pub fn one(url: &str) {
     rt.run_scripts();
     row.ms[3] = timed.spent.get() + rt.preload_waited() - waited;
     row.ms[2] = (t.elapsed().as_secs_f64() * 1000.0 - row.ms[3]).max(0.0);
-    // Simple Page judges the page 1.5 s after its scripts; timers run meanwhile.
+    // Canard judges the page 1.5 s after its scripts; timers run meanwhile.
     let t = Instant::now();
     let mut console = rt.take_console();
     while t.elapsed() < Duration::from_millis(1500) {
@@ -314,9 +314,9 @@ fn report(rows: &[Row], took: Duration) -> String {
     let refused = rows.iter().filter(|r| r.verdict.starts_with("refused the survey")).count();
     let n = (rows.len() - refused).max(1);
     let shown = rows.iter().filter(|r| r.verdict == "shown").count();
-    let mut out = String::from("## Simple Page compatibility survey\n\n");
+    let mut out = String::from("## Canard compatibility survey\n\n");
     out += &format!(
-        "{} sites in {:.0} s; {refused} turned the survey away (bot protection), leaving {n}. **{shown} of {n} shown by Simple Page ({:.0}%)**; {} of those had script errors.\n\n",
+        "{} sites in {:.0} s; {refused} turned the survey away (bot protection), leaving {n}. **{shown} of {n} shown by Canard ({:.0}%)**; {} of those had script errors.\n\n",
         rows.len(),
         took.as_secs_f64(),
         shown as f64 * 100.0 / n as f64,

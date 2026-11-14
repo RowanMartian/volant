@@ -431,7 +431,7 @@ fn canvas_drawing_is_recorded() {
 }
 
 #[test]
-fn assess_finds_pages_simple_page_cannot_show() {
+fn assess_finds_pages_canard_cannot_show() {
     let check = |html: &str, errors: usize| {
         let mut rt = Runtime::new(html, "https://example.com/", Env { width: 800.0, height: 600.0, dark: false }, Rc::new(FakeHost));
         assess(&rt.snapshot(), errors)

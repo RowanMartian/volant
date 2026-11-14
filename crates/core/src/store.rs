@@ -59,7 +59,7 @@ pub struct Settings {
     pub reader_font: String,
     /// Experimental: Reader drawn by Volant's own engine (volant-engine) instead of WebKit.
     pub engine_reader: bool,
-    /// Web pages open in Simple Page (Volant's own engine) when it handles the site well; WebKit otherwise.
+    /// Web pages open in Canard (Volant's own engine) when it handles the site well; WebKit otherwise.
     pub simple_default: bool,
 }
 

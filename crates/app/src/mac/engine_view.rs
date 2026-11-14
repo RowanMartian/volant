@@ -3,14 +3,14 @@
 //! view is laid out by volant-engine and drawn natively by this view, instead
 //! of by WebKit.
 //!
-//! View → Simple Page goes further: the page is loaded, scripted, laid out and
+//! View → Canard goes further: the page is loaded, scripted, laid out and
 //! drawn by Volant alone. A session thread fetches the HTML, scripts and style
 //! sheets with Volant's own HTTP and runs the page's JavaScript with
 //! volant-js; this view draws the snapshots it sends, and sends back clicks
-//! and typing. While Simple Page is on, the tab belongs to the engine: links,
+//! and typing. While Canard is on, the tab belongs to the engine: links,
 //! forms (GET and POST), the address bar, Back, Forward and Reload all go to
 //! it, with Volant's own history list and cookie jar, and WebKit is left
-//! empty (nothing is loaded or run twice) until Simple Page is turned off.
+//! empty (nothing is loaded or run twice) until Canard is turned off.
 //!
 //! Reader itself works exactly as before: the article still loads as the
 //! `volant://reader` page, so history, Back and the Reader toolbar behave the
@@ -51,11 +51,11 @@ struct Inner {
     tab: Option<TabId>,
     host: String,
     article: Option<volant_core::reader::Article>,
-    /// Simple Page: a whole page drawn by the engine (`toggle_page`).
-    page: Option<SimplePage>,
-    /// The tab Simple Page is on for (it stays on across navigations).
+    /// Canard: a whole page drawn by the engine (`toggle_page`).
+    page: Option<Canard>,
+    /// The tab Canard is on for (it stays on across navigations).
     sticky: Option<TabId>,
-    /// Other tabs in Simple Page, waiting in the background: their history,
+    /// Other tabs in Canard, waiting in the background: their history,
     /// where they are, and for the most recent few, the page itself (frozen,
     /// so it comes back at once); the others reload when they come to the front.
     parked: HashMap<TabId, Parked>,
@@ -65,7 +65,7 @@ struct Inner {
     pending_scroll: Option<f64>,
     /// The page's script thread.
     session: Option<Session>,
-    /// Simple Page's own history for the tab: addresses, and where we are.
+    /// Canard's own history for the tab: addresses, and where we are.
     trail: Vec<String>,
     at: usize,
     /// A page is being fetched (for the reload/stop button).
@@ -75,7 +75,7 @@ struct Inner {
     serial: u64,
     /// The page has a text field focused (typing goes to it).
     focused: bool,
-    /// What the current layout was made for: (width, dark, size, serif, simple page).
+    /// What the current layout was made for: (width, dark, size, serif, canard).
     laid: Option<(i64, bool, u32, bool, bool)>,
     /// The article's pictures: loading, loaded (with their size) or failed.
     images: HashMap<String, ImageState>,
@@ -87,7 +87,7 @@ struct Inner {
 }
 
 /// A page loaded and run by Volant's own engine: its latest snapshot and linked style sheets.
-/// A Simple Page tab in the background.
+/// A Canard tab in the background.
 #[derive(Default)]
 struct Parked {
     trail: Vec<String>,
@@ -99,16 +99,16 @@ struct Parked {
 struct Live {
     session: Session,
     serial: u64,
-    page: Option<SimplePage>,
+    page: Option<Canard>,
     scroll_y: f64,
     /// When it was parked (the oldest is let go first).
     parked_at: u64,
 }
 
-/// How many background Simple Page tabs keep their page alive.
+/// How many background Canard tabs keep their page alive.
 const LIVE_PARKED: usize = 2;
 
-struct SimplePage {
+struct Canard {
     /// The tab's address it belongs to.
     url: String,
     snap: Snapshot,
@@ -381,7 +381,7 @@ pub struct EngineIvars {
     dragged: Cell<bool>,
     /// The address relative links and images resolve against.
     base: RefCell<String>,
-    /// Simple Page: maps the laid-out document's nodes to the page's own (for clicks).
+    /// Canard: maps the laid-out document's nodes to the page's own (for clicks).
     map: RefCell<Vec<u32>>,
     /// Clicks and typing go to a live page's scripts.
     live: Cell<bool>,
@@ -920,7 +920,7 @@ pub fn show(b: &Browser, id: TabId, article: volant_core::reader::Article, url: 
 pub fn sync(b: &Browser) {
     let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
     let active = b.tabs.active;
-    // A parked Simple Page tab came to the front: its page runs again.
+    // A parked Canard tab came to the front: its page runs again.
     if let Some(tab) = active.filter(|t| e.parked.contains_key(t)) {
         let resumed = adopt(&mut e, tab) && e.session.is_some();
         if !resumed {
@@ -931,7 +931,7 @@ pub fn sync(b: &Browser) {
     }
     let on_tab = e.tab.is_some() && e.tab == active;
     let current_url = active.and_then(|id| b.webs.get(&id)).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string());
-    // Simple Page owns its tab's navigation (see `open`); WebKit's address doesn't matter there.
+    // Canard owns its tab's navigation (see `open`); WebKit's address doesn't matter there.
     let sticky = e.sticky.is_some() && e.sticky == active;
     if !sticky && on_tab && e.page.is_some() && current_url.as_deref() != e.page.as_ref().map(|p| p.url.as_str()) {
         e.page = None;
@@ -976,7 +976,7 @@ pub fn sync(b: &Browser) {
     // Just above this tab's web view, below anything Volant puts over the content.
     b.ui.content.addSubview_positioned_relativeTo(&scroll, NSWindowOrderingMode::Above, Some(&web));
     let cb = b.ui.content.bounds();
-    // Reader keeps its own toolbar visible above; a simple page takes the whole area.
+    // Reader keeps its own toolbar visible above; a canard takes the whole area.
     let top = if simple { 0.0 } else { TOOLBAR_H };
     scroll.setFrame(rect(0.0, top, cb.size.width, (cb.size.height - top).max(0.0)));
     scroll.setHidden(false);
@@ -1114,12 +1114,12 @@ fn base64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// View → Simple Page: loads the page in front with Volant's own engine,
+/// View → Canard: loads the page in front with Volant's own engine,
 /// scripts and all (or goes back to WebKit).
 pub fn toggle_page(b: &mut Browser) {
     let Some(id) = b.tabs.active else { return };
     if handles(b, id) {
-        // Back to WebKit, at the page Simple Page had reached; the site stays in WebKit.
+        // Back to WebKit, at the page Canard had reached; the site stays in WebKit.
         let here = {
             let Ok(mut e) = b.engine.0.try_borrow_mut() else { return };
             adopt(&mut e, id);
@@ -1140,17 +1140,17 @@ pub fn toggle_page(b: &mut Browser) {
     }
     let url = b.webs.get(&id).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string()).filter(|u| u.starts_with("http"));
     let Some(url) = url.or_else(|| b.tabs.get(id).map(|t| t.url.clone()).filter(|u| u.starts_with("http"))) else {
-        eprintln!("engine: Simple Page needs a web page");
+        eprintln!("engine: Canard needs a web page");
         objc2_app_kit::NSBeep();
         return;
     };
-    // The person asked for Simple Page here: the site opens in it from now on.
+    // The person asked for Canard here: the site opens in it from now on.
     b.sites.choose_for(&url, volant_core::sites::Engine::Simple);
     b.sites.save(&b.paths.sites);
     claim(b, id, &url);
 }
 
-/// Is Simple Page running this tab (so navigation goes to the engine, not WebKit)?
+/// Is Canard running this tab (so navigation goes to the engine, not WebKit)?
 pub fn handles(b: &Browser, tab: TabId) -> bool {
     b.engine.0.try_borrow().map(|e| e.sticky == Some(tab) || e.parked.contains_key(&tab)).unwrap_or(false)
 }
@@ -1175,7 +1175,7 @@ pub fn scroll_to(b: &Browser, y: f64) {
     }
 }
 
-/// Opens a page in Simple Page (a link, a form, the address bar), as a new history entry.
+/// Opens a page in Canard (a link, a form, the address bar), as a new history entry.
 pub fn open(b: &mut Browser, nav: Navigation) {
     let Some(tab) = b.tabs.active else { return };
     // A page can't take the tab to Volant's own pages, files or scripts in an address;
@@ -1230,7 +1230,7 @@ pub fn open(b: &mut Browser, nav: Navigation) {
     super::ui::update_chrome(b);
 }
 
-/// Back (-1), Forward (+1) or Reload (0) in Simple Page's history; false if there's nowhere to go.
+/// Back (-1), Forward (+1) or Reload (0) in Canard's history; false if there's nowhere to go.
 pub fn travel(b: &mut Browser, step: i32) -> bool {
     let Some(tab) = b.tabs.active else { return false };
     let url = {
@@ -1240,7 +1240,7 @@ pub fn travel(b: &mut Browser, step: i32) -> bool {
         }
         let to = e.at as i64 + step as i64;
         if to < 0 {
-            // Back past Simple Page's first page: to the pages WebKit had before it.
+            // Back past Canard's first page: to the pages WebKit had before it.
             let web_back = b.webs.get(&tab).map(|w| unsafe { w.web.canGoBack() }).unwrap_or(false);
             if web_back {
                 leave(&mut e);
@@ -1266,7 +1266,7 @@ pub fn travel(b: &mut Browser, step: i32) -> bool {
     true
 }
 
-/// For the toolbar: (can go back, can go forward, loading), if Simple Page runs this tab.
+/// For the toolbar: (can go back, can go forward, loading), if Canard runs this tab.
 pub fn nav_state(b: &Browser, tab: TabId) -> Option<(bool, bool, bool)> {
     let e = b.engine.0.try_borrow().ok()?;
     if let Some(p) = e.parked.get(&tab) {
@@ -1284,12 +1284,12 @@ fn send(b: &Browser, cmd: Cmd) {
     }
 }
 
-/// Runs JavaScript in the live Simple Page (for the smoke test).
+/// Runs JavaScript in the live Canard (for the smoke test).
 pub fn eval(b: &Browser, code: &str) {
     send(b, Cmd::Eval(code.to_string()));
 }
 
-/// Types into the live Simple Page and presses a key, as a person would.
+/// Types into the live Canard and presses a key, as a person would.
 pub fn type_and_press(b: &Browser, text: &str, key: &'static str) {
     send(b, Cmd::Type(text.to_string()));
     send(b, Cmd::Key(key));
@@ -1297,7 +1297,7 @@ pub fn type_and_press(b: &Browser, text: &str, key: &'static str) {
 
 /// Starts a page's script thread: it fetches, runs and snapshots the page.
 /// Starts a page's session thread. With `judge`, the page is checked once its
-/// scripts have run, and handed to WebKit if Simple Page can't show it.
+/// scripts have run, and handed to WebKit if Canard can't show it.
 fn start_session(e: &mut Inner, tab: TabId, nav: Navigation, width: f32, dark: bool, judge: bool) {
     e.counter += 1;
     e.serial = e.counter;
@@ -1318,7 +1318,7 @@ fn start_session(e: &mut Inner, tab: TabId, nav: Navigation, width: f32, dark: b
             let url = nav.url.clone();
             let run = std::panic::AssertUnwindSafe(move || run_session(serial, tab, nav, width, dark, judge, rx));
             if std::panic::catch_unwind(run).is_err() {
-                eprintln!("engine: Simple Page stopped on {url}; WebKit shows it");
+                eprintln!("engine: Canard stopped on {url}; WebKit shows it");
                 super::on_main(move || with(move |b| fall_back(b, serial, url, true)));
             }
         });
@@ -1376,7 +1376,7 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
     let mut errors = 0usize;
     // In a background tab: no timers, no work, until it comes back.
     let mut frozen = false;
-    // Simple Page judges the page a moment after its scripts ran (they may still be fetching).
+    // Canard judges the page a moment after its scripts ran (they may still be fetching).
     let mut judge_at = judge.then(|| std::time::Instant::now() + std::time::Duration::from_millis(1500));
     // Web fonts the page's style sheets ask for: (the face, the address its urls are relative to).
     let mut faces: Vec<(volant_engine::css::FontFace, String)> = Vec::new();
@@ -1596,7 +1596,7 @@ fn show_menu(b: &mut Browser, serial: u64, select: u32, items: Vec<script::MenuI
     });
 }
 
-/// Simple Page can't show this page: WebKit loads it instead. With `learn`,
+/// Canard can't show this page: WebKit loads it instead. With `learn`,
 /// the site goes to WebKit for a while (see `volant_core::sites`).
 fn fall_back(b: &mut Browser, serial: u64, url: String, learn: bool) {
     let tab = {
@@ -1623,7 +1623,7 @@ fn fall_back(b: &mut Browser, serial: u64, url: String, learn: bool) {
     super::ui::update_chrome(b);
 }
 
-/// Simple Page stops running the tab it's on.
+/// Canard stops running the tab it's on.
 fn leave(e: &mut Inner) {
     e.sticky = None;
     e.session = None; // dropping the sender ends the thread
@@ -1684,12 +1684,12 @@ fn adopt(e: &mut Inner, tab: TabId) -> bool {
     true
 }
 
-/// Should Simple Page draw this address (see Settings and `volant_core::sites`)?
+/// Should Canard draw this address (see Settings and `volant_core::sites`)?
 pub fn wants(b: &Browser, url: &str) -> bool {
     b.sites.choose(url, b.settings.simple_default, super::now()) == volant_core::sites::Engine::Simple
 }
 
-/// Simple Page takes tab `tab` to `url`: now if it's in front, else when it comes to the front.
+/// Canard takes tab `tab` to `url`: now if it's in front, else when it comes to the front.
 /// WebKit's copy of the tab, if any, stays empty.
 pub fn claim(b: &mut Browser, tab: TabId, url: &str) {
     let mine = handles(b, tab);
@@ -1731,7 +1731,7 @@ pub fn claim(b: &mut Browser, tab: TabId, url: &str) {
     super::ui::update_chrome(b);
 }
 
-/// The tab closed: Simple Page forgets it.
+/// The tab closed: Canard forgets it.
 pub fn forget(b: &Browser, tab: TabId) {
     if let Ok(mut e) = b.engine.0.try_borrow_mut() {
         e.parked.remove(&tab);
@@ -1788,7 +1788,7 @@ fn arrived(b: &mut Browser, serial: u64, tab: TabId, snap: Snapshot, sheets: Vec
             }
         }
         e.tab = Some(tab);
-        e.page = Some(SimplePage { url, snap, sheets });
+        e.page = Some(Canard { url, snap, sheets });
         e.focused = focused;
         e.laid = None;
         e.find_hits.clear();

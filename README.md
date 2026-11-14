@@ -1,19 +1,21 @@
 # Volant
 
-A native macOS browser in Rust. AppKit for the interface, its own engine for the pages it handles well
-(Simple Page), the system WebKit for web apps and as the fallback, and everything in between written from scratch. Ad and tracker blocking is built in, powered by uBlock Origin's filter lists.
+A native macOS browser in Rust. AppKit for the interface, **Canard**, Volant's own engine, for the pages it handles
+well, the system WebKit for web apps and as the fallback, and everything in between written from scratch. Ad and tracker blocking is built in, powered by uBlock Origin's filter lists.
 
 [![Build](https://github.com/RowanMartian/volant/actions/workflows/build-macos.yml/badge.svg)](https://github.com/RowanMartian/volant/actions/workflows/build-macos.yml)
 &nbsp;[Website](https://rowanmartian.github.io/volant/) · [Download](https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg) · macOS 12+, universal (arm64 + x86_64) · MIT
 
-| | Volant | Safari | Chrome | Firefox |
-| --- | --- | --- | --- | --- |
-| Launch to window | **0.30 s** | 3.64 s | 1.47 s | 2.31 s |
-| App size | **2 MB** (1.3 MB download) | 29 MB | 732 MB | 521 MB |
-| Memory, 5 pages | 320 MB | 169 MB | 515 MB | 821 MB |
+| | Volant (Canard) | Volant (WebKit only) | Safari | Chrome | Firefox |
+| --- | --- | --- | --- | --- | --- |
+| Launch to window | 0.54 s | **0.37 s** | 3.10 s | 1.29 s | 2.41 s |
+| App size | **11 MB** (6.7 MB download) | 11 MB | 29 MB | 732 MB | 521 MB |
+| Memory, 5 pages | 233 MB | 356 MB | **158 MB** | 522 MB | 817 MB |
+| Idle CPU, 30 s | 0.05 s | 1.04 s | **0.04 s** | 0.36 s | 2.83 s |
 
 <sub>Latest CI benchmark on GitHub's Apple Silicon runners (`scripts/bench/run.sh`): median of 3 launches after a warm-up,
-memory footprint summed over every process each browser starts. Shared runners vary; across runs Volant launched in 0.29–1.04 s.</sub>
+memory footprint summed over every process each browser starts. Shared runners vary; across runs Volant launched in 0.29–1.04 s.
+Volant (Canard) draws the pages it can with its own engine; Volant (WebKit only) hands every page to WebKit.</sub>
 
 ## Architecture
 
@@ -96,18 +98,18 @@ Elements carry namespaces and prefixes (`createElementNS`, `namespaceURI`, XML d
 iframes get documents of their own: about:blank, `srcdoc`, or a same-origin `src` loaded before the window's load
 event (their scripts don't run yet; cross-origin frames stay empty).
 
-**Simple Page is the default** for web pages (Settings → Experimental → Open pages in Simple Page). `sites.rs` in
+**Canard is the default** for web pages (Settings → Experimental → Open pages in Canard). `sites.rs` in
 volant-core picks the engine per site: WebKit for web apps (video, maps, office suites, chat, social apps), for
-sites the person switched with **View → Simple Page (⌥⌘E)** (remembered in `sites.txt`), and for two weeks after
-Simple Page couldn't show a site. A page falls back to WebKit when the fetch fails, when it isn't HTML, when it
+sites the person switched with **View → Canard (⌥⌘E)** (remembered in `sites.txt`), and for two weeks after
+Canard couldn't show a site. A page falls back to WebKit when the fetch fails, when it isn't HTML, when it
 redirects to a web app, or when `script::assess` finds it came out empty, framed, plug-in only or broken by script
-errors. The two most recent background Simple Page tabs stay alive, frozen (no timers, no work), and come back as
+errors. The two most recent background Canard tabs stay alive, frozen (no timers, no work), and come back as
 they were; older ones keep their history and reload when brought to the front. Cookies (`cookies.rs`, with
 SameSite) and history are Volant's own, and WebKit doesn't load the page as well. Scripts get the same-origin
 policy: `fetch` and `XMLHttpRequest` follow CORS (preflights, credentials modes, opaque `no-cors` replies, exposed
 headers). Volant's HTTP keeps connections alive in a pool and has an HTTP cache (`httpcache.rs`: freshness,
 revalidation, `Vary`), one for requests with cookies and one without.
-It's also used for an opt-in Reader. Simple Page shows a page with nothing but Volant: a session thread fetches the HTML, scripts and style sheets over Volant's own HTTP,
+It's also used for an opt-in Reader. Canard shows a page with nothing but Volant: a session thread fetches the HTML, scripts and style sheets over Volant's own HTTP,
 runs the page's JavaScript, and sends snapshots to be laid out and drawn natively (a first paint before the scripts,
 then after them and after every change). Clicks are hit-tested and sent to the page's scripts, typing goes to its
 focused field, and links and forms navigate the tab, so history works and the next page opens in the engine too.
@@ -204,9 +206,9 @@ allowing what the test's `<meta name=fuzzy>` allows. Text is drawn as a mark per
 box font, exactly), so what's compared is layout. In the latest run 6,921 of the 10,894 reftests pass (63.5%; the first run passed 26.7%);
 `scripts/wpt/reftest-baseline.tsv` holds which, and CI fails when one of them stops passing.
 
-`volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Simple Page and reports what
+`volant-tools survey scripts/compat/sites.txt OUT` loads a list of popular sites through Canard and reports what
 it showed, how long each phase took and the most common script errors. Sites that turn automated clients away are
-counted apart, not worked around. In the latest survey Simple Page showed 108 of the 129 sites that answered (84%).
+counted apart, not worked around. In the latest survey Canard showed 108 of the 129 sites that answered (84%).
 
 ## CI
 
@@ -216,14 +218,14 @@ against the baseline; the site survey runs weekly or by hand.
 `.github/workflows/build-macos.yml`, on every push to `main`:
 
 1. Run core tests, build the app, and render its icon as macOS draws it.
-2. Smoke test: launch, browse, screenshot seventeen views, and record memory; Simple Page opens Wikipedia, searches
+2. Smoke test: launch, browse, screenshot seventeen views, and record memory; Canard opens Wikipedia, searches
    it, goes Back, then a local page (`scripts/smoke`) checks canvas, cookies, typing, same-origin and CORS fetches, a
    web font, sticky and fixed boxes, and a background tab kept alive.
 3. uBlock self-test: sync with uBO's latest release, download the default lists, compile them into WebKit, then check
    network, generic and site cosmetic, procedural, and uBO scriptlets in the page and isolated worlds on a live page,
    and check that trusting the site disables all of it.
 4. Updater test: install the current release over a copy of this build and verify it relaunches.
-5. Benchmark (Volant with WebKit, Volant with Simple Page) against Safari, Chrome and Firefox, then publish the `latest` release if this commit is still the tip.
+5. Benchmark (Volant with WebKit, Volant with Canard) against Safari, Chrome and Firefox, then publish the `latest` release if this commit is still the tip.
 
 The website is `site/` → `cargo run -p volant-tools -- site` → `docs/`, deployed by `.github/workflows/pages.yml`.
 

@@ -331,7 +331,7 @@ fn finish_selftest(dir: &str, report: &str) {
 /// `--smoke-test`: drives the real app through its main screens, saves
 /// screenshots and a short report to $VOLANT_SMOKE_DIR, then quits. CI runs this.
 pub fn smoke_test(b: &mut Browser) {
-    // WebKit draws the pages until the Simple Page steps (which switch the default on).
+    // WebKit draws the pages until the Canard steps (which switch the default on).
     b.settings.simple_default = false;
     let dir = std::env::var("VOLANT_SMOKE_DIR").unwrap_or_else(|_| "/tmp/volant-smoke".into());
     let _ = std::fs::create_dir_all(&dir);
@@ -460,8 +460,8 @@ pub fn smoke_test(b: &mut Browser) {
         rep3.lock().unwrap().push_str(&format!("engine copy: {copied:?}\n"));
     }));
     step(51.0, Box::new(move |_b| s13("13-engine-select")));
-    // Simple Page: the whole Wikipedia page, drawn by Volant's own engine.
-    // Simple Page by default: typing a Wikipedia address opens it in Volant's own engine.
+    // Canard: the whole Wikipedia page, drawn by Volant's own engine.
+    // Canard by default: typing a Wikipedia address opens it in Volant's own engine.
     let rep6 = report.clone();
     step(51.5, Box::new(move |b| {
         b.settings.engine_reader = false;
@@ -469,9 +469,9 @@ pub fn smoke_test(b: &mut Browser) {
         actions::navigate(b, "https://en.wikipedia.org/wiki/Jet_aircraft");
         let simple = b.tabs.active.map(|id| super::engine_view::handles(b, id)).unwrap_or(false);
         let youtube = super::engine_view::wants(b, "https://www.youtube.com/");
-        rep6.lock().unwrap().push_str(&format!("simple page by default: wikipedia {simple}, youtube {youtube}\n"));
+        rep6.lock().unwrap().push_str(&format!("canard by default: wikipedia {simple}, youtube {youtube}\n"));
     }));
-    step(63.0, Box::new(move |_b| s14("14-simple-page")));
+    step(63.0, Box::new(move |_b| s14("14-canard")));
     // Search Wikipedia from its own search box: typing, Enter, the form and the next page, all in the engine.
     step(63.5, Box::new(|b| {
         super::engine_view::eval(b, "var q = document.getElementById('searchInput') || document.querySelector('input[name=search]'); if (q) q.focus(); console.log('search box: ' + !!q)");
@@ -483,7 +483,7 @@ pub fn smoke_test(b: &mut Browser) {
     step(72.5, Box::new(move |b| {
         let url = b.tabs.active.and_then(|id| b.tabs.get(id)).map(|t| t.url.clone()).unwrap_or_default();
         let cookies = super::net::cookie_jar().and_then(|j| j.lock().ok().map(|j| j.len())).unwrap_or(0);
-        rep4.lock().unwrap().push_str(&format!("simple page after search: {url} ({cookies} cookies)\n"));
+        rep4.lock().unwrap().push_str(&format!("canard after search: {url} ({cookies} cookies)\n"));
         actions::back(b);
     }));
     let rep5 = report.clone();
@@ -491,7 +491,7 @@ pub fn smoke_test(b: &mut Browser) {
         let id = b.tabs.active;
         let url = id.and_then(|id| b.tabs.get(id)).map(|t| t.url.clone()).unwrap_or_default();
         let webkit = id.and_then(|id| b.webs.get(&id)).and_then(|w| unsafe { w.web.URL() }).and_then(|u| u.absoluteString()).map(|s| s.to_string()).unwrap_or_default();
-        rep5.lock().unwrap().push_str(&format!("simple page after Back: {url} (WebKit: {:?})\n", webkit));
+        rep5.lock().unwrap().push_str(&format!("canard after Back: {url} (WebKit: {:?})\n", webkit));
     }));
     // A local page (CI serves scripts/smoke on port 8765) for what Wikipedia doesn't show:
     // canvas, cookies, typing, same-origin and cross-origin fetch, a web font, sticky and fixed boxes.
@@ -507,7 +507,7 @@ pub fn smoke_test(b: &mut Browser) {
         let title = b.tabs.active.and_then(|id| b.tabs.get(id)).map(|t| t.title.clone()).unwrap_or_default();
         let simple = b.tabs.active.map(|id| super::engine_view::handles(b, id)).unwrap_or(false);
         let (layers, fonts, _) = super::engine_view::probe(b);
-        rep7.lock().unwrap().push_str(&format!("simple page local: simple {simple}, {layers} fixed/sticky layers, {fonts} web font faces, title {title:?}\n"));
+        rep7.lock().unwrap().push_str(&format!("canard local: simple {simple}, {layers} fixed/sticky layers, {fonts} web font faces, title {title:?}\n"));
         s16("16-simple-local");
         super::engine_view::scroll_to(b, 900.0);
     }));
@@ -523,7 +523,7 @@ pub fn smoke_test(b: &mut Browser) {
     let (rep8, f3) = (report.clone(), first.clone());
     step(89.0, Box::new(move |b| {
         let (_, _, live) = super::engine_view::probe(b);
-        rep8.lock().unwrap().push_str(&format!("simple page background tabs kept alive: {live}\n"));
+        rep8.lock().unwrap().push_str(&format!("canard background tabs kept alive: {live}\n"));
         if let Some(id) = *f3.lock().unwrap() {
             actions::select(b, id);
         }
@@ -531,7 +531,7 @@ pub fn smoke_test(b: &mut Browser) {
     let rep9 = report.clone();
     step(90.5, Box::new(move |b| {
         let title = b.tabs.active.and_then(|id| b.tabs.get(id)).map(|t| t.title.clone()).unwrap_or_default();
-        rep9.lock().unwrap().push_str(&format!("simple page back to the first tab: {}\n", if title.contains("typed volant") { "resumed as it was" } else { "reloaded" }));
+        rep9.lock().unwrap().push_str(&format!("canard back to the first tab: {}\n", if title.contains("typed volant") { "resumed as it was" } else { "reloaded" }));
     }));
     step(91.0, Box::new(move |_b| {
         let _ = std::fs::write(format!("{dir2}/report.txt"), rep.lock().unwrap().as_str());

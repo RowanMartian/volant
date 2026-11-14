@@ -4577,7 +4577,7 @@ pub struct Snapshot {
     pub generation: u64,
 }
 
-/// Does this page look like it came out right in Simple Page? `None` if so,
+/// Does this page look like it came out right in Canard? `None` if so,
 /// otherwise why not: the reasons a browser should hand the page to WebKit.
 /// `errors` is how many uncaught script errors the page had.
 /// The User-Agent pages see, in requests and as `navigator.userAgent` (prelude.js says the same).

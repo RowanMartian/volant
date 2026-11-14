@@ -53,7 +53,7 @@ jobs:
         run: |
           export VOLANT_DATA_DIR="$RUNNER_TEMP/volant-data" VOLANT_SMOKE_DIR="$PWD/smoke"
           mkdir -p "$VOLANT_SMOKE_DIR"
-          # A local page for the Simple Page checks, with a font of the system's as its web font.
+          # A local page for the Canard checks, with a font of the system's as its web font.
           SITE="$RUNNER_TEMP/smoke-site"; mkdir -p "$SITE"; cp scripts/smoke/* "$SITE/"
           cp "$(ls /System/Library/Fonts/Supplemental/*.ttf | head -1)" "$SITE/face.ttf"
           python3 -m http.server 8765 --bind :: --directory "$SITE" > smoke/server-log.txt 2>&1 &

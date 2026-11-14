@@ -2,7 +2,7 @@ name: Engine conformance
 
 # web-platform-tests on Volant's own engine (every change: testharness.js
 # tests and CSS reftests), and the
-# compatibility survey of real sites through Simple Page (weekly, or by hand).
+# compatibility survey of real sites through Canard (weekly, or by hand).
 on:
   push:
     branches: [main]

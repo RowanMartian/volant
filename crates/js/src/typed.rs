@@ -398,7 +398,7 @@ pub fn install(i: &mut Interp) {
     });
     hide_all(&bp);
     i.global_obj.borrow_mut().set_hidden("ArrayBuffer", buffer_ctor.clone());
-    // SharedArrayBuffer needs cross-origin isolation, which Simple Page doesn't offer.
+    // SharedArrayBuffer needs cross-origin isolation, which Canard doesn't offer.
 
     // ---------------------------------------------------------- %TypedArray%
     let tp = i.typed_proto.clone();

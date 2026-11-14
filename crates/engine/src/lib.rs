@@ -13,7 +13,7 @@
 //!    a live DOM, with events, forms and the web platform's APIs.
 //!
 //! What it does today is listed in each module. Volant uses it for an opt-in
-//! Reader and for Simple Page, which loads, runs and draws pages with nothing
+//! Reader and for Canard, which loads, runs and draws pages with nothing
 //! but Volant; ordinary browsing stays on WebKit for now.
 
 pub mod canvas;

@@ -18,7 +18,7 @@
 //!                                              (other files fetched with curl; console printed)
 //! volant-tools js FILE.js                      run a script with Volant's own JavaScript engine
 //! volant-tools survey SITES.txt OUT_DIR [--jobs N] [--only TEXT]
-//!                                              run each site through Simple Page's steps and
+//!                                              run each site through Canard's steps and
 //!                                              report what shows, what falls back, errors and timings
 //! volant-tools wpt WPT_DIR LIST OUT_DIR [--jobs N] [--baseline FILE [--write-baseline]]
 //!                                              web-platform-tests' testharness.js tests (see wpt.rs)

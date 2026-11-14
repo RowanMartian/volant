@@ -1,6 +1,6 @@
-//! Which engine draws a site: Volant's own (Simple Page) or WebKit.
+//! Which engine draws a site: Volant's own (Canard) or WebKit.
 //!
-//! Simple Page is the default for web pages. WebKit takes over for sites that
+//! Canard is the default for web pages. WebKit takes over for sites that
 //! are whole applications (video, maps, office suites, chat), for sites the
 //! person moved to WebKit themselves, and, for a while, for sites where Simple
 //! Page was tried and the page came out empty or broken.
@@ -18,13 +18,13 @@ pub enum Engine {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Source {
-    /// The person chose (View → Simple Page on or off); kept until they change it.
+    /// The person chose (View → Canard on or off); kept until they change it.
     Person,
-    /// Simple Page couldn't show the site; tried again after `until`.
+    /// Canard couldn't show the site; tried again after `until`.
     Learned,
 }
 
-/// How long a site that didn't work in Simple Page stays in WebKit before it's tried again.
+/// How long a site that didn't work in Canard stays in WebKit before it's tried again.
 pub const RETRY_AFTER: u64 = 14 * 24 * 3600;
 
 /// Sites that are applications more than pages: they need WebKit's media,
@@ -60,7 +60,7 @@ fn is_app(site: &str) -> bool {
 }
 
 impl Sites {
-    /// Which engine should draw `url`, if Simple Page is on by default (`default_simple`).
+    /// Which engine should draw `url`, if Canard is on by default (`default_simple`).
     pub fn choose(&self, url: &str, default_simple: bool, now: u64) -> Engine {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Engine::WebKit;
@@ -96,7 +96,7 @@ impl Sites {
         self.dirty = true;
     }
 
-    /// Simple Page couldn't show this site: WebKit draws it for a while.
+    /// Canard couldn't show this site: WebKit draws it for a while.
     pub fn failed(&mut self, url: &str, now: u64) {
         let s = site(url);
         if s.is_empty() || matches!(self.map.get(&s), Some((_, Source::Person, _))) {

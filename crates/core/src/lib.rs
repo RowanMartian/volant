@@ -17,7 +17,7 @@
 //! * [`tabs`]: tab order, pinning, closed-tab memory and sleeping tabs.
 //! * [`json`]: the JSON writer and parser the app needs.
 //! * [`http`]: an HTTP/1.1 client (GET and POST, redirects, chunked, gzip, limits) over any transport.
-//! * [`sites`]: which engine draws each site (Simple Page by default, WebKit for applications and fallbacks).
+//! * [`sites`]: which engine draws each site (Canard by default, WebKit for applications and fallbacks).
 //! * [`httpcache`]: an in-memory HTTP cache (freshness, revalidation, Vary, LRU).
 //! * [`woff`]: WOFF 1 web fonts unpacked to TrueType/OpenType.
 //! * [`cookies`]: the cookie jar (domains, paths, expiry, Secure, HttpOnly), saved as plain lines.

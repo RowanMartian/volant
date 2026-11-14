@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Volant — the featherweight browser for your Mac</title>
-<meta name="description" content="A native macOS browser written in Rust on the WebKit already in macOS. A 1.3 MB download that opens in a third of a second, with ad and tracker blocking powered by uBlock.">
+<meta name="description" content="A native macOS browser written in Rust, with its own engine, Canard, and the WebKit already in macOS for web apps. A 6.7 MB download that opens in a third of a second, with ad and tracker blocking powered by uBlock.">
 <meta name="theme-color" content="#0d0c11">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Volant">
 <meta property="og:title" content="Volant — the featherweight browser for your Mac">
-<meta property="og:description" content="A native macOS browser written in Rust on the WebKit already in macOS. A 1.3 MB download that opens in a third of a second, with ad and tracker blocking powered by uBlock.">
+<meta property="og:description" content="A native macOS browser written in Rust, with its own engine, Canard, and the WebKit already in macOS for web apps. A 6.7 MB download that opens in a third of a second, with ad and tracker blocking powered by uBlock.">
 <meta property="og:image" content="https://rowanmartian.github.io/volant/og.png">
 <meta property="og:url" content="https://rowanmartian.github.io/volant/">
 <link rel="canonical" href="https://rowanmartian.github.io/volant/">
@@ -29,7 +29,7 @@
   <div id="hero-copy">
   <div class="mark" id="mark" role="img" aria-label="Volant"></div>
   <h1>The featherweight browser <em>for your Mac.</em></h1>
-  <p class="lead">Native AppKit and Rust, on the WebKit already inside macOS. A 1.3 MB download that's on screen in a third of a second, with ads and trackers blocked before they load.</p>
+  <p class="lead">Native AppKit and Rust, with its own engine, Canard. A 6.7 MB download that's on screen in a third of a second, with ads and trackers blocked before they load.</p>
   <div class="ctas">
     <a class="btn primary" href="https://github.com/RowanMartian/volant/releases/download/latest/Volant.dmg"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v10M5.5 8.5 10 13l4.5-4.5M4 17h12"/></svg>Download for macOS</a>
     <a class="btn" href="features.html">See what it does</a>
@@ -44,7 +44,7 @@
 
 <section id="numbers"><div class="wrap">
   <div class="numbers">
-    <div class="num"><b data-count="1.3" data-dec="1">1.3<small>MB</small></b><span>to download. Chrome is 732 MB.</span></div>
+    <div class="num"><b data-count="6.7" data-dec="1">6.7<small>MB</small></b><span>to download. Chrome is 732 MB.</span></div>
     <div class="num"><b data-count="0.3" data-dec="1">0.3<small>s</small></b><span>from launch to window on screen.</span></div>
     <div class="num"><b data-count="240">240<small>k</small></b><span>ad and tracker rules, powered by uBlock.</span></div>
     <div class="num"><b data-count="100">100<small>%</small></b><span>open source, MIT licensed.</span></div>
@@ -75,18 +75,19 @@
     <div class="chart"><h3>App size</h3><p>Megabytes on disk. Smaller is better.</p><div id="c-size"></div></div>
     <div class="chart"><h3>Memory, five pages</h3><p>Megabytes, all processes. Lower is better.</p><div id="c-mem"></div></div>
   </div>
-  <p class="note">Volant draws pages with the same engine as Safari, so page loading and JavaScript run at Safari's speed and memory lands in Safari's range. <a href="performance.html">How it's measured</a>.</p>
+  <p class="note">Ordinary pages are drawn by Canard, Volant's own engine; web apps go to the WebKit inside macOS, the same engine as Safari. <a href="performance.html">How it's measured</a>.</p>
 </div></section>
 
 <section id="rust"><div class="wrap">
   <div class="kicker">Built with Rust</div>
-  <h2>Everything that makes it Volant is new.</h2>
-  <p class="lead">The whole browser around the page is written from scratch in Rust; its only libraries are the bindings that let Rust talk to macOS. The page itself is drawn by the WebKit that already ships with every Mac.</p>
+  <h2>Everything that makes it Volant is new. Even the engine.</h2>
+  <p class="lead">The browser and its engine, Canard, are written from scratch in Rust; the only libraries are the bindings that let Rust talk to macOS. Canard draws the pages it handles well, and the WebKit that ships with every Mac takes the web apps.</p>
   <div class="split">
     <div class="card blue">
       <h3><i>R</i>Written in Rust, from scratch</h3>
       <p class="sub">Zero dependencies in the engine pieces, fuzzed with 110,000 random inputs.</p>
       <ul>
+        <li><b>Canard, the engine</b><span>Its own HTML and CSS parsers, style, layout, painting, JavaScript engine and DOM. 6,921 of 10,894 CSS conformance tests pass, and it shows 84% of popular sites by itself.</span></li>
         <li><b>The whole interface</b><span>Window, sidebar, tabs, command bar, find bar and menus, as native AppKit views driven from Rust.</span></li>
         <li><b>Tab engine</b><span>Session restore, sleeping tabs that hand memory back, closed-tab memory.</span></li>
         <li><b>Search as you type</b><span>A frecency-sorted index: under a millisecond per keystroke across 100,000 pages.</span></li>
@@ -99,10 +100,11 @@
       <h3><i>⌘</i>Borrowed from macOS</h3>
       <p class="sub">The parts a single project shouldn't reinvent.</p>
       <ul>
-        <li><b>WebKit</b><span>Rendering, JavaScript, networking, page storage and sandboxed processes. The same engine as Safari.</span></li>
+        <li><b>WebKit</b><span>For web apps (video, maps, office suites, chat) and anything Canard can't show yet. The same engine as Safari.</span></li>
+        <li><b>Network.framework</b><span>The encryption under Volant's own HTTP.</span></li>
         <li><b>AppKit</b><span>Draws the native controls Volant lays out.</span></li>
       </ul>
-      <div class="why">Why not write an engine too? A modern rendering engine is a decade of work for a large team, and ships at hundreds of megabytes. Using the one already on your Mac is what keeps Volant at 1.3.</div>
+      <div class="why">Why keep WebKit? Canard grows a little with every build, and until it can run every web app, the engine already on your Mac fills the gap without adding a byte. Canard itself fits inside the 6.7 MB download.</div>
     </div>
   </div>
 </div></section>

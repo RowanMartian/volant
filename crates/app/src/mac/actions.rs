@@ -169,7 +169,7 @@ pub fn open_tab(b: &mut Browser, url: &str, front: bool) -> TabId {
     if front || b.tabs.active.is_none() {
         select(b, id);
     } else if super::engine_view::wants(b, url) {
-        // Simple Page loads it when the tab comes to the front.
+        // Canard loads it when the tab comes to the front.
         web::create(b, id, None);
         super::engine_view::claim(b, id, url);
     } else {
@@ -301,7 +301,7 @@ pub fn navigate(b: &mut Browser, url: &str) {
         open_tab(b, url, true);
         return;
     };
-    // Simple Page runs this tab, or should draw this site: the engine loads it (WebKit stays empty).
+    // Canard runs this tab, or should draw this site: the engine loads it (WebKit stays empty).
     if url.starts_with("http") && (super::engine_view::handles(b, id) || super::engine_view::wants(b, url)) {
         if !b.webs.contains_key(&id) {
             // Asleep: waking it takes it to the new address.
@@ -344,7 +344,7 @@ pub fn in_reader(b: &Browser, id: TabId) -> bool {
 pub fn toggle_reader(b: &mut Browser) {
     let Some(id) = b.tabs.active else { return };
     if super::engine_view::handles(b, id) {
-        beep(); // Simple Page's WebKit view is empty: nothing to read
+        beep(); // Canard's WebKit view is empty: nothing to read
         return;
     }
     let Some(web) = b.webs.get(&id).map(|w| w.web.clone()) else { return };
