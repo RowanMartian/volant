@@ -2866,14 +2866,27 @@
     SHOW_PROCESSING_INSTRUCTION: 0x40, SHOW_COMMENT: 0x80, SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200, SHOW_DOCUMENT_FRAGMENT: 0x400,
   }
   g.NodeFilter = NodeFilter
+  // DOM's "filter" a node: whatToShow first, then the page's filter (never re-entered).
   const judge = (w, n) => {
-    if (!(w.whatToShow & (1 << (n.nodeType - 1)))) return 3
-    const f = w.filter
-    if (!f) return 1
-    return (typeof f === 'function' ? f(n) : f.acceptNode(n)) || 1
+    if (w._active) throw new DOMException('the filter is already running', 'InvalidStateError')
+    if (!(w._what & (1 << (n.nodeType - 1)))) return 3
+    const f = w._filter
+    if (f === null) return 1
+    w._active = true
+    let r
+    try {
+      if (typeof f === 'function') r = f.call(undefined, n)
+      else {
+        const m = f.acceptNode
+        if (typeof m !== 'function') throw new TypeError("NodeFilter: acceptNode isn't callable")
+        r = m.call(f, n)
+      }
+    } finally { w._active = false }
+    r = Math.trunc(Number(r))
+    return isFinite(r) ? ((r % 65536) + 65536) % 65536 : 0
   }
-  const following = (n, root, skipKids) => {
-    if (!skipKids && n.firstChild) return n.firstChild
+  const following = (n, root) => {
+    if (n.firstChild) return n.firstChild
     for (; n && n !== root; n = n.parentNode) if (n.nextSibling) return n.nextSibling
     return null
   }
@@ -2884,50 +2897,160 @@
     while (p.lastChild) p = p.lastChild
     return p
   }
+  const MAKE = Symbol('make')
+  const walkerFields = (w, root, what, filter) => {
+    if (!(root instanceof Node)) throw new TypeError("parameter 1 is not of type 'Node'.")
+    Object.defineProperties(w, {
+      _root: { value: root }, _what: { value: what === undefined ? 0xFFFFFFFF : what >>> 0 },
+      _filter: { value: filter === undefined ? null : filter }, _active: { value: false, writable: true },
+    })
+  }
   class TreeWalker {
-    constructor(root, what, filter) { this.root = root; this.whatToShow = what === undefined ? 0xFFFFFFFF : what >>> 0; this.filter = filter || null; this.currentNode = root }
-    nextNode() {
-      let n = this.currentNode
-      for (let skip = false; (n = following(n, this.root, skip));) {
-        const r = judge(this, n)
-        if (r === 1) return (this.currentNode = n)
-        skip = r === 2
+    constructor(token, root, what, filter) {
+      if (token !== MAKE) throw new TypeError('Illegal constructor')
+      walkerFields(this, root, what, filter)
+      Object.defineProperty(this, '_cur', { value: root, writable: true })
+    }
+    get root() { return this._root }
+    get whatToShow() { return this._what }
+    get filter() { return this._filter }
+    get currentNode() { return this._cur }
+    set currentNode(n) { if (!(n instanceof Node)) throw new TypeError("TreeWalker.currentNode: not a Node"); this._cur = n }
+    parentNode() {
+      for (let n = this._cur; n && n !== this._root;) {
+        n = n.parentNode
+        if (n && judge(this, n) === 1) return (this._cur = n)
       }
       return null
     }
+    _children(first) {
+      let n = first ? this._cur.firstChild : this._cur.lastChild
+      while (n) {
+        const r = judge(this, n)
+        if (r === 1) return (this._cur = n)
+        if (r === 3) { const c = first ? n.firstChild : n.lastChild; if (c) { n = c; continue } }
+        while (n) {
+          const s = first ? n.nextSibling : n.previousSibling
+          if (s) { n = s; break }
+          const p = n.parentNode
+          if (!p || p === this._root || p === this._cur) return null
+          n = p
+        }
+      }
+      return null
+    }
+    firstChild() { return this._children(true) }
+    lastChild() { return this._children(false) }
+    _siblings(next) {
+      let n = this._cur
+      if (n === this._root) return null
+      for (;;) {
+        let s = next ? n.nextSibling : n.previousSibling
+        while (s) {
+          n = s
+          const r = judge(this, n)
+          if (r === 1) return (this._cur = n)
+          s = next ? n.firstChild : n.lastChild
+          if (r === 2 || !s) s = next ? n.nextSibling : n.previousSibling
+        }
+        n = n.parentNode
+        if (!n || n === this._root) return null
+        if (judge(this, n) === 1) return null
+      }
+    }
+    nextSibling() { return this._siblings(true) }
+    previousSibling() { return this._siblings(false) }
     previousNode() {
-      for (let n = this.currentNode; (n = preceding(n, this.root));) if (judge(this, n) === 1) return (this.currentNode = n)
+      let n = this._cur
+      while (n !== this._root) {
+        let s = n.previousSibling
+        while (s) {
+          n = s
+          let r = judge(this, n)
+          while (r !== 2 && n.lastChild) { n = n.lastChild; r = judge(this, n) }
+          if (r === 1) return (this._cur = n)
+          s = n.previousSibling
+        }
+        if (n === this._root || !n.parentNode) return null
+        n = n.parentNode
+        if (judge(this, n) === 1) return (this._cur = n)
+      }
       return null
     }
-    parentNode() {
-      for (let n = this.currentNode; n && n !== this.root;) { n = n.parentNode; if (n && judge(this, n) === 1) return (this.currentNode = n) }
-      return null
-    }
-    firstChild() { for (let n = this.currentNode.firstChild; n; n = n.nextSibling) if (judge(this, n) === 1) return (this.currentNode = n); return null }
-    lastChild() { for (let n = this.currentNode.lastChild; n; n = n.previousSibling) if (judge(this, n) === 1) return (this.currentNode = n); return null }
-    nextSibling() { for (let n = this.currentNode.nextSibling; n; n = n.nextSibling) if (judge(this, n) === 1) return (this.currentNode = n); return null }
-    previousSibling() { for (let n = this.currentNode.previousSibling; n; n = n.previousSibling) if (judge(this, n) === 1) return (this.currentNode = n); return null }
-  }
-  class NodeIterator {
-    constructor(root, what, filter) { this.root = root; this.whatToShow = what === undefined ? 0xFFFFFFFF : what >>> 0; this.filter = filter || null; this.referenceNode = root; this.pointerBeforeReferenceNode = true }
     nextNode() {
-      let n = this.referenceNode
-      if (this.pointerBeforeReferenceNode) { this.pointerBeforeReferenceNode = false; if (judge(this, n) === 1) return n }
-      while ((n = following(n, this.root, false))) { this.referenceNode = n; if (judge(this, n) === 1) return n }
-      return null
+      let n = this._cur, r = 1
+      for (;;) {
+        while (r !== 2 && n.firstChild) {
+          n = n.firstChild
+          r = judge(this, n)
+          if (r === 1) return (this._cur = n)
+        }
+        let s = null
+        for (let t = n; t; t = t.parentNode) {
+          if (t === this._root) return null
+          s = t.nextSibling
+          if (s) break
+        }
+        if (!s) return null
+        n = s
+        r = judge(this, n)
+        if (r === 1) return (this._cur = n)
+      }
     }
-    previousNode() {
-      let n = this.referenceNode
-      if (!this.pointerBeforeReferenceNode) { this.pointerBeforeReferenceNode = true; if (judge(this, n) === 1) return n }
-      while ((n = preceding(n, this.root))) { this.referenceNode = n; if (judge(this, n) === 1) return n }
-      return null
+  }
+  // Iterators move off a node that's taken out of the tree (DOM's pre-removing steps),
+  // which the tree's change records tell about afterwards.
+  const iterators = new Set()
+  class NodeIterator {
+    constructor(token, root, what, filter) {
+      if (token !== MAKE) throw new TypeError('Illegal constructor')
+      walkerFields(this, root, what, filter)
+      Object.defineProperties(this, { _ref: { value: root, writable: true }, _before: { value: true, writable: true } })
+      iterators.add(this)
+      if (iterators.size > 2000) iterators.delete(iterators.values().next().value)
+      __watchDom()
     }
+    get root() { return this._root }
+    get whatToShow() { return this._what }
+    get filter() { return this._filter }
+    get referenceNode() { return this._ref }
+    get pointerBeforeReferenceNode() { return this._before }
+    _go(next) {
+      let n = this._ref, before = this._before
+      for (;;) {
+        if (next) {
+          if (!before) { n = following(n, this._root); if (!n) return null } else before = false
+        } else {
+          if (before) { n = preceding(n, this._root); if (!n) return null } else before = true
+        }
+        if (judge(this, n) === 1) break
+      }
+      this._ref = n; this._before = before
+      return n
+    }
+    nextNode() { return this._go(true) }
+    previousNode() { return this._go(false) }
     detach() {}
   }
+  g.__iteratorsRemoved = (parent, node, prev, next) => {
+    for (const it of iterators) {
+      if (node.contains(it._root) || !node.contains(it._ref)) continue
+      if (it._before) {
+        // The first node after the removed one (and outside it) that's still in root.
+        let f = next
+        for (let p = parent; !f && p && p !== it._root; p = p.parentNode) f = p.nextSibling
+        if (f && it._root.contains(f)) { it._ref = f; continue }
+        it._before = false
+      }
+      if (!prev) it._ref = parent
+      else { let d = prev; while (d.lastChild) d = d.lastChild; it._ref = d }
+    }
+  }
+  for (const C of [TreeWalker, NodeIterator]) Object.defineProperty(C.prototype, Symbol.toStringTag, { value: C.name, configurable: true })
   g.TreeWalker = TreeWalker
   g.NodeIterator = NodeIterator
-  Document.prototype.createTreeWalker = (root, what, filter) => new TreeWalker(root, what, filter)
-  Document.prototype.createNodeIterator = (root, what, filter) => new NodeIterator(root, what, filter)
+  Document.prototype.createTreeWalker = function (root, what, filter) { return new TreeWalker(MAKE, root, what, filter) }
+  Document.prototype.createNodeIterator = function (root, what, filter) { return new NodeIterator(MAKE, root, what, filter) }
 
   // ------------------------------------------------- node comparisons, hit tests
   Node.prototype.isEqualNode = function (o) {
@@ -3575,6 +3698,7 @@
       Object.defineProperty(Range, k, { value: v, enumerable: true })
       Object.defineProperty(Range.prototype, k, { value: v, enumerable: true })
     }
+    for (const C of [AbstractRange, StaticRange, Range]) Object.defineProperty(C.prototype, Symbol.toStringTag, { value: C.name, configurable: true })
     g.AbstractRange = AbstractRange
     g.StaticRange = StaticRange
     g.Range = Range
@@ -3708,6 +3832,7 @@
       }
       takeRecords() { const r = this._records; this._records = []; return r }
     }
+    for (const C of [Selection, MutationObserver, MutationRecord]) Object.defineProperty(C.prototype, Symbol.toStringTag, { value: C.name, configurable: true })
     g.MutationObserver = MutationObserver
     g.MutationRecord = MutationRecord
     g.WebKitMutationObserver = MutationObserver
@@ -3724,6 +3849,7 @@
           // boundary that's connected can't be inside it (a moved node is back in, though).
           const conn = k === 0 && liveRanges.size && parent.isConnected && !node.isConnected
           const inside = n => (!conn || !n.isConnected) && inclusiveAncestor(node, n)
+          if (k === 0 && g.__iteratorsRemoved) g.__iteratorsRemoved(parent, node, prev, next)
           for (const R of liveRanges) {
             if (k === 0) {
               if (inside(R._sc)) { R._sc = parent; R._so = index } else if (R._sc === parent && R._so > index) R._so--
