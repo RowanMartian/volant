@@ -28,6 +28,7 @@ pub mod promise;
 pub mod proxy;
 pub mod regex;
 pub mod regexp;
+pub mod table;
 pub mod typed;
 pub mod vm;
 
@@ -43,6 +44,8 @@ pub fn run(src: &str) -> (Vec<String>, Result<(), String>) {
     let spawned = std::thread::Builder::new().stack_size(256 << 20).spawn(move || {
         let mut i = Interp::new();
         i.max_depth = 4000;
+        // A standalone script (a benchmark, a test) may run for a long time.
+        i.max_steps = 2_000_000_000;
         let r = i.run(&src).map(|_| ());
         // Then the event loop: timers in order of their (virtual) due times.
         i.run_jobs(f64::INFINITY, 100_000);

@@ -219,7 +219,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     rt.run_scripts();
                     let ran = started.elapsed();
                     if let Some(code) = value("--eval") {
-                        rt.interp.reset_steps(50_000_000);
+                        rt.interp.reset_steps(5_000_000);
                         match rt.interp.run(&code) {
                             Ok(v) => {
                                 let shown = rt.interp.to_str(&v).map(|s| s.to_string()).unwrap_or_default();
@@ -233,7 +233,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         rt.tick();
                     }
                     if let Some(code) = value("--then") {
-                        rt.interp.reset_steps(50_000_000);
+                        rt.interp.reset_steps(5_000_000);
                         match rt.interp.run(&code) {
                             Ok(v) => println!("then: {}", rt.interp.to_str(&v).map(|s| s.to_string()).unwrap_or_default()),
                             Err(e) => println!("then error: {e}"),

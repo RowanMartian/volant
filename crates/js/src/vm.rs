@@ -417,6 +417,12 @@ impl Interp {
     pub(crate) fn execute(&mut self, mut stack: Vec<Value>, mut f: Frame, input: Input) -> Res<Exit> {
         let mut frames: Vec<Frame> = Vec::new();
         self.enter(&f.code);
+        // A call from native code (a callback, a getter) counts against the budget too.
+        self.steps += 1;
+        if self.steps > self.max_steps {
+            self.leave();
+            return Err(self.error("RangeError", "the script ran too long and was stopped"));
+        }
         let mut code = f.code.clone();
         let mut pc = f.pc;
         let mut pending = None;
@@ -475,6 +481,55 @@ impl Interp {
                             stack.push(Value::Num($body));
                         }};
                     }
+                    // The budget is counted at each loop's backward jump and each call
+                    // (not at every instruction), so straight-line code pays nothing.
+                    macro_rules! tick {
+                        () => {
+                            self.steps += 1;
+                            if self.steps & 127 == 0 {
+                                if self.steps > self.max_steps {
+                                    break 'inner self.error("RangeError", "the script ran too long and was stopped");
+                                }
+                                if let Some(p) = &mut self.profile {
+                                    let at = self.call_names.last().cloned().unwrap_or((None, 0));
+                                    *p.entry(at).or_insert(0) += 1;
+                                }
+                            }
+                        };
+                    }
+                    macro_rules! jump {
+                        ($to:expr) => {{
+                            let to = $to as usize;
+                            if to < pc {
+                                tick!();
+                            }
+                            pc = to
+                        }};
+                    }
+                    // A comparison and the conditional jump after it, taken together:
+                    // the boolean never goes onto the stack.
+                    macro_rules! branch {
+                        ($b:expr) => {{
+                            let b: bool = $b;
+                            match code.ops.get(pc) {
+                                Some(Op::JumpIfFalse(to)) => {
+                                    if b {
+                                        pc += 1
+                                    } else {
+                                        jump!(*to)
+                                    }
+                                }
+                                Some(Op::JumpIfTrue(to)) => {
+                                    if b {
+                                        jump!(*to)
+                                    } else {
+                                        pc += 1
+                                    }
+                                }
+                                _ => stack.push(Value::Bool(b)),
+                            }
+                        }};
+                    }
                     macro_rules! cmp {
                         ($test:expr) => {{
                             let rb = pop!();
@@ -485,23 +540,8 @@ impl Interp {
                                 _ => tri!(self.compare(&ra, &rb)),
                             };
                             let t: fn(std::cmp::Ordering) -> bool = $test;
-                            stack.push(Value::Bool(r.map(t).unwrap_or(false)));
+                            branch!(r.map(t).unwrap_or(false));
                         }};
-                    }
-                    macro_rules! jump {
-                        ($to:expr) => {
-                            pc = $to as usize
-                        };
-                    }
-                    self.steps += 1;
-                    if self.steps & 1023 == 0 {
-                        if self.steps > self.max_steps {
-                            break 'inner self.error("RangeError", "the script ran too long and was stopped");
-                        }
-                        if let Some(p) = &mut self.profile {
-                            let at = self.call_names.last().cloned().unwrap_or((None, 0));
-                            *p.entry(at).or_insert(0) += 1;
-                        }
                     }
                     let op = code.ops[pc];
                     pc += 1;
@@ -779,7 +819,7 @@ impl Interp {
                             let b = pop!();
                             let a = pop!();
                             let r = Interp::strict_eq(&a, &b);
-                            stack.push(Value::Bool(r == matches!(op, Op::StrictEq)));
+                            branch!(r == matches!(op, Op::StrictEq));
                         }
                         Op::Lt => cmp!(|o| o.is_lt()),
                         Op::Gt => cmp!(|o| o.is_gt()),
@@ -917,6 +957,7 @@ impl Interp {
                                 },
                                 _ => None,
                             };
+                            tick!();
                             if let Some((c2, env2, base_class)) = inline {
                                 if self.frames >= frame_limit {
                                     break 'inner self.recursion_error();
@@ -1466,7 +1507,7 @@ impl Interp {
             Value::Obj(o) => match &o.borrow().kind {
                 Kind::Array(_) => return Ok(self.obj(Kind::Iter(IterState::Array(o.clone(), 0)))),
                 Kind::Typed(t) if !t.data_view => Some(t.values().into_iter().map(Value::Num).collect()),
-                Kind::Set(s) => Some(s.clone()),
+                Kind::Set(s) => Some(s.keys().cloned().collect()),
                 Kind::Map(m) => Some(m.iter().map(|(k, v)| self.array(vec![k.clone(), v.clone()])).collect()),
                 _ => None,
             },

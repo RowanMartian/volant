@@ -130,7 +130,7 @@ fn render(host: &WptHost, url: &str) -> Result<(Canvas, String), String> {
     let env = volant_engine::Env { width: W as f32, height: H as f32, dark: false };
     let mut rt = script::Runtime::new_typed(&html, url, &reply.content_type, env, host.clone());
     rt.state.borrow_mut().charset = charset;
-    rt.budget = 500_000_000;
+    rt.budget = 50_000_000;
     rt.run_scripts();
     // `class=reftest-wait` on the root: the page says when it's ready by taking it off.
     let waiting = "(function(){var e=document.documentElement;return !!(e&&e.classList&&e.classList.contains('reftest-wait'))})()";

@@ -463,6 +463,13 @@ pub fn install(i: &mut Interp) {
         }
         Ok(Value::Bool(false))
     });
+    def(i, &object, "is", |_i, _t, a| {
+        // SameValue: NaN is NaN, and 0 isn't -0.
+        Ok(Value::Bool(match (arg(&a, 0), arg(&a, 1)) {
+            (Value::Num(x), Value::Num(y)) => (x.is_nan() && y.is_nan()) || (x == y && x.is_sign_negative() == y.is_sign_negative()),
+            (x, y) => Interp::strict_eq(&x, &y),
+        }))
+    });
     def(i, &object, "keys", |i, _t, a| {
         let v = arg(&a, 0);
         let keys = i.keys_of(&v)?;
@@ -1465,7 +1472,7 @@ pub fn install(i: &mut Interp) {
     // ---------------------------------------------------------- Map, Set
     let mp = i.map_proto.clone();
     ctor(i, "Map", &mp, |i, _t, a| {
-        let m = i.obj(Kind::Map(Vec::new()));
+        let m = i.obj(Kind::Map(Default::default()));
         if !matches!(arg(&a, 0), Value::Undefined | Value::Null) {
             let set = i.get(&m, "set")?;
             for pair in i.iterate(&arg(&a, 0))? {
@@ -1476,7 +1483,7 @@ pub fn install(i: &mut Interp) {
         }
         Ok(m)
     });
-    fn map_op<T>(i: &Interp, t: &Value, f: impl FnOnce(&mut Vec<(Value, Value)>) -> T) -> Res<T> {
+    fn map_op<T>(i: &Interp, t: &Value, f: impl FnOnce(&mut crate::table::Table) -> T) -> Res<T> {
         if let Value::Obj(o) = t {
             if let Kind::Map(m) = &mut o.borrow_mut().kind {
                 return Ok(f(m));
@@ -1486,34 +1493,27 @@ pub fn install(i: &mut Interp) {
     }
     def(i, &mp, "get", |i, t, a| {
         let k = arg(&a, 0);
-        map_op(i, &t, |m| m.iter().find(|(x, _)| Interp::same_value_zero(x, &k)).map(|p| p.1.clone()).unwrap_or(Value::Undefined))
+        map_op(i, &t, |m| m.get(&k).cloned().unwrap_or(Value::Undefined))
     });
     def(i, &mp, "set", |i, t, a| {
         let (k, v) = (arg(&a, 0), arg(&a, 1));
-        map_op(i, &t, |m| match m.iter_mut().find(|(x, _)| Interp::same_value_zero(x, &k)) {
-            Some(p) => p.1 = v,
-            None => m.push((k, v)),
-        })?;
+        map_op(i, &t, |m| m.set(k, v))?;
         Ok(t)
     });
     def(i, &mp, "has", |i, t, a| {
         let k = arg(&a, 0);
-        map_op(i, &t, |m| Value::Bool(m.iter().any(|(x, _)| Interp::same_value_zero(x, &k))))
+        map_op(i, &t, |m| Value::Bool(m.has(&k)))
     });
     def(i, &mp, "delete", |i, t, a| {
         let k = arg(&a, 0);
-        map_op(i, &t, |m| {
-            let before = m.len();
-            m.retain(|(x, _)| !Interp::same_value_zero(x, &k));
-            Value::Bool(m.len() != before)
-        })
+        map_op(i, &t, |m| Value::Bool(m.delete(&k)))
     });
     def(i, &mp, "clear", |i, t, _a| map_op(i, &t, |m| {
         m.clear();
         Value::Undefined
     }));
     def(i, &mp, "forEach", |i, t, a| {
-        let entries = map_op(i, &t, |m| m.clone())?;
+        let entries: Vec<(Value, Value)> = map_op(i, &t, |m| m.iter().cloned().collect())?;
         let cb = arg(&a, 0);
         for (k, v) in entries {
             i.call(&cb, Value::Undefined, vec![v, k, t.clone()])?;
@@ -1522,7 +1522,7 @@ pub fn install(i: &mut Interp) {
     });
     for (name, which) in [("keys", 0), ("values", 1), ("entries", 2)] {
         def(i, &mp, name, move |i, t, _a| {
-            let entries = map_op(i, &t, |m| m.clone())?;
+            let entries: Vec<(Value, Value)> = map_op(i, &t, |m| m.iter().cloned().collect())?;
             let out = entries.into_iter().map(|(k, v)| match which {
                 0 => k,
                 1 => v,
@@ -1534,17 +1534,15 @@ pub fn install(i: &mut Interp) {
     }
     let setp = i.set_proto.clone();
     ctor(i, "Set", &setp, |i, _t, a| {
-        let mut items: Vec<Value> = Vec::new();
+        let mut items = crate::table::Table::default();
         if !matches!(arg(&a, 0), Value::Undefined | Value::Null) {
             for v in i.iterate(&arg(&a, 0))? {
-                if !items.iter().any(|x| Interp::same_value_zero(x, &v)) {
-                    items.push(v);
-                }
+                items.set(v, Value::Undefined);
             }
         }
         Ok(i.obj(Kind::Set(items)))
     });
-    fn set_op<T>(i: &Interp, t: &Value, f: impl FnOnce(&mut Vec<Value>) -> T) -> Res<T> {
+    fn set_op<T>(i: &Interp, t: &Value, f: impl FnOnce(&mut crate::table::Table) -> T) -> Res<T> {
         if let Value::Obj(o) = t {
             if let Kind::Set(s) = &mut o.borrow_mut().kind {
                 return Ok(f(s));
@@ -1555,30 +1553,26 @@ pub fn install(i: &mut Interp) {
     def(i, &setp, "add", |i, t, a| {
         let v = arg(&a, 0);
         set_op(i, &t, |s| {
-            if !s.iter().any(|x| Interp::same_value_zero(x, &v)) {
-                s.push(v)
+            if !s.has(&v) {
+                s.set(v, Value::Undefined)
             }
         })?;
         Ok(t)
     });
     def(i, &setp, "has", |i, t, a| {
         let v = arg(&a, 0);
-        set_op(i, &t, |s| Value::Bool(s.iter().any(|x| Interp::same_value_zero(x, &v))))
+        set_op(i, &t, |s| Value::Bool(s.has(&v)))
     });
     def(i, &setp, "delete", |i, t, a| {
         let v = arg(&a, 0);
-        set_op(i, &t, |s| {
-            let before = s.len();
-            s.retain(|x| !Interp::same_value_zero(x, &v));
-            Value::Bool(s.len() != before)
-        })
+        set_op(i, &t, |s| Value::Bool(s.delete(&v)))
     });
     def(i, &setp, "clear", |i, t, _a| set_op(i, &t, |s| {
         s.clear();
         Value::Undefined
     }));
     def(i, &setp, "forEach", |i, t, a| {
-        let items = set_op(i, &t, |s| s.clone())?;
+        let items: Vec<Value> = set_op(i, &t, |s| s.keys().cloned().collect())?;
         let cb = arg(&a, 0);
         for v in items {
             i.call(&cb, Value::Undefined, vec![v.clone(), v, t.clone()])?;
@@ -1587,7 +1581,7 @@ pub fn install(i: &mut Interp) {
     });
     for name in ["values", "keys"] {
         def(i, &setp, name, |i, t, _a| {
-            let items = set_op(i, &t, |s| s.clone())?;
+            let items: Vec<Value> = set_op(i, &t, |s| s.keys().cloned().collect())?;
             Ok(i.array(items))
         });
     }

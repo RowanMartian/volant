@@ -44,8 +44,8 @@ pub enum Kind {
     Function(Callable),
     Error,
     /// Map and Set: entries in insertion order (a Set's values are its keys).
-    Map(Vec<(Value, Value)>),
-    Set(Vec<Value>),
+    Map(crate::table::Table),
+    Set(crate::table::Table),
     Date(f64),
     /// A primitive in an object (`new String("x")`).
     Boxed(Value),
@@ -417,7 +417,8 @@ pub struct Interp {
     pub(crate) modules: HashMap<Rc<str>, crate::module::ModuleRef>,
     /// What classic scripts' `import()` resolves against (the document's URL).
     pub base_url: Rc<str>,
-    /// When set, a sample every 1024 steps of the function running (a JS profile).
+    /// When set, a sample every 128 steps (loop iterations and calls) of the
+    /// function running (a JS profile).
     pub profile: Option<HashMap<(Option<Rc<str>>, u32), u64>>,
 }
 
@@ -469,7 +470,7 @@ impl Interp {
             yielded: None,
             regex_cache: HashMap::new(),
             steps: 0,
-            max_steps: 50_000_000,
+            max_steps: 5_000_000,
             depth: 0,
             max_depth: 400,
             call_names: Vec::new(),
@@ -949,7 +950,7 @@ impl Interp {
         let total: u64 = p.values().sum::<u64>().max(1);
         let mut rows: Vec<_> = p.iter().collect();
         rows.sort_by(|a, b| b.1.cmp(a.1));
-        let head = format!("{total} samples (about {:.1} million steps)\n", total as f64 * 1024.0 / 1e6);
+        let head = format!("{total} samples (about {:.1} million loop iterations and calls)\n", total as f64 * 128.0 / 1e6);
         head + &rows
             .iter()
             .take(top)
@@ -1014,7 +1015,7 @@ impl Interp {
                 let kind_list = match &o.borrow().kind {
                     Kind::Array(a) => Some(a.clone()),
                     Kind::Typed(t) if !t.data_view => Some(t.values().into_iter().map(Value::Num).collect()),
-                    Kind::Set(s) => Some(s.clone()),
+                    Kind::Set(s) => Some(s.keys().cloned().collect()),
                     Kind::Map(m) => Some(m.iter().map(|(k, v)| self.array(vec![k.clone(), v.clone()])).collect()),
                     _ => None,
                 };

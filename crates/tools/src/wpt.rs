@@ -120,7 +120,7 @@ pub fn one(root: &str, path: &str) {
     let mut rt = script::Runtime::new(&html, &url, volant_engine::Env { width: 800.0, height: 600.0, dark: false }, host);
     rt.state.borrow_mut().charset = charset;
     // Test files run thousands of tests in one script; the wall-clock limits apply instead.
-    rt.budget = 2_000_000_000;
+    rt.budget = 200_000_000;
     rt.run_scripts();
     let long = html.contains("name=timeout content=long") || html.contains("name=\"timeout\" content=\"long\"") || html.contains("META: timeout=long");
     let wait = if long { WAIT_LONG } else { WAIT };
@@ -128,7 +128,7 @@ pub fn one(root: &str, path: &str) {
     let probe = "typeof __wpt_result == 'string' ? __wpt_result : ''";
     let mut result = String::new();
     loop {
-        rt.interp.reset_steps(50_000_000);
+        rt.interp.reset_steps(5_000_000);
         if let Ok(v) = rt.interp.run(probe) {
             result = rt.interp.to_str(&v).map(|s| s.to_string()).unwrap_or_default();
         }

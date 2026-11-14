@@ -365,7 +365,7 @@ fn is_doctype_name(s: &str) -> bool {
 pub const STACK: usize = 512 << 20;
 /// The step budget for each script and each event (about three seconds of
 /// work), unless [`Runtime::budget`] says otherwise.
-const BUDGET: u64 = 100_000_000;
+const BUDGET: u64 = 10_000_000;
 
 struct Listener {
     ty: String,
