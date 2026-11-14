@@ -1031,43 +1031,56 @@ pub fn install(i: &mut Interp) {
             None => Value::Undefined,
         })
     });
-    fn char_index(s: &str, byte: usize) -> f64 {
-        s[..byte].chars().count() as f64
-    }
-    def(i, &sp, "indexOf", |i, t, a| {
+    // Positions are UTF-16 indexes, as JavaScript counts them.
+    use crate::interp::{byte_at16, index16, slice16, utf16_len};
+    let pos_arg = |i: &mut Interp, a: &[Value], k: usize, dflt: f64, len: usize| -> Res<usize> { Ok(int_arg(i, a, k, dflt)?.clamp(0.0, len as f64) as usize) };
+    def(i, &sp, "indexOf", move |i, t, a| {
         let s = this_str(i, &t)?;
         let n = i.to_str(&arg(&a, 0))?;
-        let from = int_arg(i, &a, 1, 0.0)?.max(0.0) as usize;
-        let start = s.char_indices().nth(from).map(|x| x.0).unwrap_or(s.len());
-        Ok(Value::Num(s[start..].find(&*n).map(|p| char_index(&s, start + p)).unwrap_or(-1.0)))
+        let from = pos_arg(i, &a, 1, 0.0, utf16_len(&s))?;
+        let start = byte_at16(&s, from);
+        Ok(Value::Num(s[start..].find(&*n).map(|p| index16(&s, start + p) as f64).unwrap_or(-1.0)))
     });
-    def(i, &sp, "lastIndexOf", |i, t, a| {
+    def(i, &sp, "lastIndexOf", move |i, t, a| {
         let s = this_str(i, &t)?;
         let n = i.to_str(&arg(&a, 0))?;
-        Ok(Value::Num(s.rfind(&*n).map(|p| char_index(&s, p)).unwrap_or(-1.0)))
+        let len = utf16_len(&s);
+        let from = match arg(&a, 1) {
+            Value::Undefined => len,
+            v => {
+                let f = i.to_number(&v)?;
+                if f.is_nan() { len } else { f.clamp(0.0, len as f64) as usize }
+            }
+        };
+        Ok(Value::Num(s.rmatch_indices(&*n).map(|(p, _)| index16(&s, p)).find(|&p| p <= from).map(|p| p as f64).unwrap_or(-1.0)))
     });
-    def(i, &sp, "includes", |i, t, a| {
+    def(i, &sp, "includes", move |i, t, a| {
         let s = this_str(i, &t)?;
-        let n = i.to_str(&arg(&a, 0))?;
-        Ok(Value::Bool(s.contains(&*n)))
+        let nv = arg(&a, 0);
+        if crate::regexp::regex_of(&nv).is_some() {
+            return i.throw("TypeError", "the first argument to includes can't be a regular expression");
+        }
+        let n = i.to_str(&nv)?;
+        let from = pos_arg(i, &a, 1, 0.0, utf16_len(&s))?;
+        Ok(Value::Bool(s[byte_at16(&s, from)..].contains(&*n)))
     });
-    def(i, &sp, "startsWith", |i, t, a| {
+    def(i, &sp, "startsWith", move |i, t, a| {
         let s = this_str(i, &t)?;
         let n = i.to_str(&arg(&a, 0))?;
-        let from = int_arg(i, &a, 1, 0.0)?.max(0.0) as usize;
-        let rest: String = s.chars().skip(from).collect();
-        Ok(Value::Bool(rest.starts_with(&*n)))
+        let from = pos_arg(i, &a, 1, 0.0, utf16_len(&s))?;
+        Ok(Value::Bool(s[byte_at16(&s, from)..].starts_with(&*n)))
     });
-    def(i, &sp, "endsWith", |i, t, a| {
+    def(i, &sp, "endsWith", move |i, t, a| {
         let s = this_str(i, &t)?;
         let n = i.to_str(&arg(&a, 0))?;
-        Ok(Value::Bool(s.ends_with(&*n)))
+        let len = utf16_len(&s);
+        let end = pos_arg(i, &a, 1, len as f64, len)?;
+        Ok(Value::Bool(s[..byte_at16(&s, end)].ends_with(&*n)))
     });
     for name in ["slice", "substring", "substr"] {
         def(i, &sp, name, move |i, t, a| {
             let s = this_str(i, &t)?;
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len();
+            let len = utf16_len(&s);
             let (start, end) = match name {
                 "slice" => (rel(int_arg(i, &a, 0, 0.0)?, len), rel(int_arg(i, &a, 1, len as f64)?, len)),
                 "substring" => {
@@ -1081,7 +1094,7 @@ pub fn install(i: &mut Interp) {
                     (x, (x + n).min(len))
                 }
             };
-            Ok(Value::Str(if start < end { chars[start..end].iter().collect::<String>().into() } else { "".into() }))
+            Ok(Value::Str(slice16(&s, start, end)))
         });
     }
     def(i, &sp, "toUpperCase", |i, t, _a| Ok(Value::Str(this_str(i, &t)?.to_uppercase().into())));
@@ -1099,11 +1112,24 @@ pub fn install(i: &mut Interp) {
                 Value::Undefined => " ".into(),
                 f => i.to_str(&f)?,
             };
-            let len = s.chars().count();
+            let len = utf16_len(&s);
             if target <= len || fill.is_empty() {
                 return Ok(Value::Str(s));
             }
-            let pad: String = fill.chars().cycle().take(target - len).collect();
+            // The filler repeated to exactly the missing number of UTF-16 units.
+            let mut pad = String::new();
+            let mut have = 0;
+            for c in fill.chars().cycle() {
+                let w = c.len_utf16();
+                if have + w > target - len {
+                    if have < target - len {
+                        pad.push('\u{FFFD}');
+                    }
+                    break;
+                }
+                pad.push(c);
+                have += w;
+            }
             Ok(Value::Str(if start { format!("{pad}{s}") } else { format!("{s}{pad}") }.into()))
         });
     }
@@ -1124,10 +1150,9 @@ pub fn install(i: &mut Interp) {
     });
     def(i, &sp, "at", |i, t, a| {
         let s = this_str(i, &t)?;
-        let chars: Vec<char> = s.chars().collect();
         let n = int_arg(i, &a, 0, 0.0)?;
-        let k = if n < 0.0 { chars.len() as f64 + n } else { n };
-        Ok(if k >= 0.0 { chars.get(k as usize).map(|c| Value::Str(c.to_string().into())).unwrap_or(Value::Undefined) } else { Value::Undefined })
+        let k = if n < 0.0 { utf16_len(&s) as f64 + n } else { n };
+        Ok(if k >= 0.0 { crate::interp::string_at(&s, k as usize) } else { Value::Undefined })
     });
     def(i, &sp, "split", |i, t, a| {
         let s = this_str(i, &t)?;
@@ -1160,7 +1185,7 @@ pub fn install(i: &mut Interp) {
                 let Some(p) = rest.find(&*pat) else { break };
                 out.push_str(&rest[..p]);
                 let rep = if Interp::is_callable(&with) {
-                    let r = i.call(&with, Value::Undefined, vec![Value::Str(pat.clone()), Value::Num((offset + p) as f64), Value::Str(s.clone())])?;
+                    let r = i.call(&with, Value::Undefined, vec![Value::Str(pat.clone()), Value::Num(index16(&s, offset + p) as f64), Value::Str(s.clone())])?;
                     i.to_str(&r)?
                 } else {
                     i.to_str(&with)?.replace("$&", &pat).into()

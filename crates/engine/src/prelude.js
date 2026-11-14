@@ -35,23 +35,102 @@
 
   // ---------------------------------------------------------------- events
   const EventProto = Object.getPrototypeOf(__makeEvent('x'))
-  const eventClass = (name, defaults) => {
+  // The Event interfaces, each a real subclass of its parent: an event's
+  // dictionary members start from its init dictionary, else their defaults,
+  // and the defaults also sit on the prototype for events the engine makes.
+  const eventClass = (name, parent, members) => {
+    const P = parent ? g[parent] : null
+    const all = Object.assign({}, P ? P.__members : {}, members)
     function E(type, init) {
+      if (!new.target) throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator.")
+      if (arguments.length < 1) throw new TypeError("Failed to construct '" + name + "': 1 argument required, but only 0 present.")
+      if (init !== undefined && init !== null && typeof init !== 'object' && typeof init !== 'function') throw new TypeError("Failed to construct '" + name + "': The provided value is not of type '" + name + "Init'.")
       const e = __makeEvent(String(type), init)
-      if (defaults) for (const k in defaults) if (!(init && k in init)) e[k] = defaults[k]
+      Object.setPrototypeOf(e, new.target.prototype)
+      for (const k in all) {
+        const v = init != null ? init[k] : undefined
+        e[k] = v === undefined ? all[k] : v
+      }
       return e
     }
-    E.prototype = EventProto
+    E.prototype = P ? Object.create(P.prototype) : EventProto
+    Object.defineProperty(E.prototype, 'constructor', { value: E, writable: true, configurable: true })
+    if (P) {
+      Object.setPrototypeOf(E, P)
+      for (const k in members) Object.defineProperty(E.prototype, k, { value: members[k], writable: true, configurable: true, enumerable: true })
+    }
     Object.defineProperty(E, 'name', { value: name })
+    Object.defineProperty(E, 'length', { value: 1 })
+    Object.defineProperty(E, '__members', { value: all })
     g[name] = E
   }
-  eventClass('Event')
-  eventClass('CustomEvent', { detail: null })
-  for (const n of ['UIEvent', 'FocusEvent', 'InputEvent', 'SubmitEvent', 'ErrorEvent', 'ProgressEvent', 'MessageEvent', 'PopStateEvent',
-    'HashChangeEvent', 'AnimationEvent', 'TransitionEvent', 'StorageEvent', 'PageTransitionEvent', 'WheelEvent', 'TouchEvent', 'DragEvent', 'ClipboardEvent']) eventClass(n)
-  eventClass('MouseEvent', { button: 0, buttons: 0, clientX: 0, clientY: 0, pageX: 0, pageY: 0, screenX: 0, screenY: 0, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false })
-  eventClass('PointerEvent', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 0, clientY: 0 })
-  eventClass('KeyboardEvent', { key: '', code: '', keyCode: 0, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, repeat: false })
+  const MODS = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false }
+  eventClass('Event', null, {})
+  eventClass('CustomEvent', 'Event', { detail: null })
+  eventClass('UIEvent', 'Event', { view: null, detail: 0, which: 0 })
+  eventClass('FocusEvent', 'UIEvent', { relatedTarget: null })
+  eventClass('MouseEvent', 'UIEvent', Object.assign({ screenX: 0, screenY: 0, clientX: 0, clientY: 0, button: 0, buttons: 0, relatedTarget: null,
+    pageX: 0, pageY: 0, offsetX: 0, offsetY: 0, movementX: 0, movementY: 0, layerX: 0, layerY: 0 }, MODS))
+  eventClass('WheelEvent', 'MouseEvent', { deltaX: 0, deltaY: 0, deltaZ: 0, deltaMode: 0 })
+  eventClass('DragEvent', 'MouseEvent', { dataTransfer: null })
+  eventClass('PointerEvent', 'MouseEvent', { pointerId: 0, width: 1, height: 1, pressure: 0, tangentialPressure: 0, tiltX: 0, tiltY: 0, twist: 0,
+    altitudeAngle: Math.PI / 2, azimuthAngle: 0, pointerType: '', isPrimary: false })
+  eventClass('KeyboardEvent', 'UIEvent', Object.assign({ key: '', code: '', location: 0, repeat: false, isComposing: false, charCode: 0, keyCode: 0 }, MODS))
+  eventClass('InputEvent', 'UIEvent', { data: null, inputType: '', isComposing: false, dataTransfer: null })
+  eventClass('CompositionEvent', 'UIEvent', { data: '' })
+  eventClass('TextEvent', 'UIEvent', { data: '' })
+  eventClass('TouchEvent', 'UIEvent', Object.assign({ touches: [], targetTouches: [], changedTouches: [] }, MODS))
+  eventClass('ErrorEvent', 'Event', { message: '', filename: '', lineno: 0, colno: 0, error: undefined })
+  eventClass('ProgressEvent', 'Event', { lengthComputable: false, loaded: 0, total: 0 })
+  eventClass('MessageEvent', 'Event', { data: null, origin: '', lastEventId: '', source: null, ports: [] })
+  eventClass('PopStateEvent', 'Event', { state: null, hasUAVisualTransition: false })
+  eventClass('HashChangeEvent', 'Event', { oldURL: '', newURL: '' })
+  eventClass('PageTransitionEvent', 'Event', { persisted: false })
+  eventClass('StorageEvent', 'Event', { key: null, oldValue: null, newValue: null, url: '', storageArea: null })
+  eventClass('AnimationEvent', 'Event', { animationName: '', elapsedTime: 0, pseudoElement: '' })
+  eventClass('TransitionEvent', 'Event', { propertyName: '', elapsedTime: 0, pseudoElement: '' })
+  eventClass('SubmitEvent', 'Event', { submitter: null })
+  eventClass('FormDataEvent', 'Event', { formData: null })
+  eventClass('ClipboardEvent', 'Event', { clipboardData: null })
+  eventClass('BeforeUnloadEvent', 'Event', { returnValue: '' })
+  eventClass('PromiseRejectionEvent', 'Event', { promise: undefined, reason: undefined })
+  eventClass('CloseEvent', 'Event', { wasClean: false, code: 0, reason: '' })
+  eventClass('ToggleEvent', 'Event', { oldState: '', newState: '' })
+  eventClass('DeviceMotionEvent', 'Event', { acceleration: null, accelerationIncludingGravity: null, rotationRate: null, interval: 0 })
+  eventClass('DeviceOrientationEvent', 'Event', { alpha: null, beta: null, gamma: null, absolute: false })
+  eventClass('SecurityPolicyViolationEvent', 'Event', { documentURI: '', referrer: '', blockedURI: '', violatedDirective: '', effectiveDirective: '', originalPolicy: '',
+    sourceFile: '', sample: '', disposition: 'enforce', statusCode: 0, lineNumber: 0, columnNumber: 0 })
+  for (const C of [g.MouseEvent, g.KeyboardEvent, g.TouchEvent]) C.prototype.getModifierState = function (k) { return !!this[{ Control: 'ctrlKey', Shift: 'shiftKey', Alt: 'altKey', Meta: 'metaKey' }[k]] }
+  g.UIEvent.prototype.initUIEvent = function (type, bubbles, cancelable, view, detail) { this.initEvent(type, bubbles, cancelable); this.view = view ?? null; this.detail = detail | 0 }
+  g.MouseEvent.prototype.initMouseEvent = function (type, bubbles, cancelable, view, detail, sx, sy, cx, cy, ctrl, alt, shift, meta, button, related) {
+    this.initUIEvent(type, bubbles, cancelable, view, detail)
+    Object.assign(this, { screenX: sx | 0, screenY: sy | 0, clientX: cx | 0, clientY: cy | 0, ctrlKey: !!ctrl, altKey: !!alt, shiftKey: !!shift, metaKey: !!meta, button: button | 0, relatedTarget: related ?? null })
+  }
+  g.KeyboardEvent.prototype.initKeyboardEvent = function (type, bubbles, cancelable, view, key, location, ctrl, alt, shift, meta) {
+    this.initUIEvent(type, bubbles, cancelable, view, 0)
+    Object.assign(this, { key: key === undefined ? '' : String(key), location: location >>> 0, ctrlKey: !!ctrl, altKey: !!alt, shiftKey: !!shift, metaKey: !!meta })
+  }
+  g.CompositionEvent.prototype.initCompositionEvent = function (type, bubbles, cancelable, view, data) { this.initUIEvent(type, bubbles, cancelable, view, 0); this.data = data === undefined ? '' : String(data) }
+  g.TextEvent.prototype.initTextEvent = function (type, bubbles, cancelable, view, data) { this.initUIEvent(type, bubbles, cancelable, view, 0); this.data = data === undefined ? 'undefined' : String(data) }
+  g.MessageEvent.prototype.initMessageEvent = function (type, bubbles, cancelable, data, origin, lastEventId, source, ports) {
+    this.initEvent(type, bubbles, cancelable); Object.assign(this, { data: data ?? null, origin: String(origin ?? ''), lastEventId: String(lastEventId ?? ''), source: source ?? null, ports: ports ? Array.from(ports) : [] })
+  }
+  g.StorageEvent.prototype.initStorageEvent = function (type, bubbles, cancelable, key, oldValue, newValue, url, area) {
+    this.initEvent(type, bubbles, cancelable); Object.assign(this, { key: key ?? null, oldValue: oldValue ?? null, newValue: newValue ?? null, url: String(url ?? ''), storageArea: area ?? null })
+  }
+  // document.createEvent's legacy interface names.
+  const CREATE_EVENT = { beforeunloadevent: 'BeforeUnloadEvent', compositionevent: 'CompositionEvent', customevent: 'CustomEvent', devicemotionevent: 'DeviceMotionEvent',
+    deviceorientationevent: 'DeviceOrientationEvent', dragevent: 'DragEvent', event: 'Event', events: 'Event', focusevent: 'FocusEvent', hashchangeevent: 'HashChangeEvent',
+    htmlevents: 'Event', keyboardevent: 'KeyboardEvent', messageevent: 'MessageEvent', mouseevent: 'MouseEvent', mouseevents: 'MouseEvent', storageevent: 'StorageEvent',
+    svgevents: 'Event', textevent: 'TextEvent', uievent: 'UIEvent', uievents: 'UIEvent' }
+  g.__createEvent = name => {
+    const C = CREATE_EVENT[String(name).toLowerCase()]
+    if (!C) throw new DOMException("The provided event type ('" + name + "') is invalid.", 'NotSupportedError')
+    const e = new g[C]('')
+    e.isTrusted = false
+    e.__uninit = true
+    return e
+  }
   EventProto.initEvent = function (type, bubbles, cancelable) { this.type = type; this.bubbles = !!bubbles; this.cancelable = !!cancelable }
   EventProto.initCustomEvent = function (type, bubbles, cancelable, detail) { this.initEvent(type, bubbles, cancelable); this.detail = detail }
 
@@ -259,6 +338,8 @@
     permissions: { query: () => Promise.resolve({ state: 'prompt', onchange: null }) },
     sendBeacon(url) { if (!__urlParse(String(url), document.baseURI)) throw new TypeError('sendBeacon: ' + url + ' is not a valid URL.'); return true }, vibrate: () => false, share: () => Promise.reject(new Error('NotAllowedError')),
     javaEnabled: () => false,
+    plugins: Object.assign([], { item: () => null, namedItem: () => null, refresh: noop }),
+    mimeTypes: Object.assign([], { item: () => null, namedItem: () => null }),
   }
   g.screen = { width: 1512, height: 982, availWidth: 1512, availHeight: 950, colorDepth: 24, pixelDepth: 24, orientation: { type: 'landscape-primary', angle: 0, addEventListener: noop } }
   for (const k of ['innerWidth', 'outerWidth']) define(g, k, () => __width())
@@ -290,13 +371,52 @@
     media: String(q), matches: __media(String(q)), onchange: null,
     addListener: noop, removeListener: noop, addEventListener: noop, removeEventListener: noop, dispatchEvent: () => true,
   })
-  const computedProps = ['display', 'visibility', 'opacity', 'color', 'backgroundColor', 'fontSize', 'fontWeight', 'lineHeight', 'position', 'width', 'height', 'overflow']
-  g.getComputedStyle = el => {
-    const s = { getPropertyValue: p => __computed(el, p) || (el && el.style ? el.style.getPropertyValue(p) : '') }
-    for (const k of computedProps) define(s, k, () => __computed(el, k))
-    for (const k of ['transform', 'zIndex', 'marginTop', 'marginBottom', 'paddingTop', 'paddingBottom', 'borderTopWidth', 'transitionDuration', 'animationName', 'pointerEvents', 'cursor', 'direction', 'boxSizing', 'content'])
-      define(s, k, () => (el && el.style && el.style[k]) || (k === 'transform' || k === 'animationName' ? 'none' : k === 'transitionDuration' ? '0s' : k === 'direction' ? 'ltr' : ''))
-    return s
+  // getComputedStyle: a live, read-only view of the engine's cascade.
+  // Any property name works (camelCase, kebab-case, `--custom`).
+  let computedNames
+  const kebab = p => p.startsWith('--') ? p : p.replace(/[A-Z]/g, c => '-' + c.toLowerCase()).replace(/^(webkit|moz|ms)-/, '-$1-')
+  const usedSize = (el, p, v) => {
+    // `width`/`height` resolve to the used size once laid out, as in browsers.
+    if (!(v === 'auto' || v.endsWith('%') || v.startsWith('calc')) || __computed(el, 'display') === 'none' || __computed(el, 'display') === 'inline') return v
+    if (!el.isConnected) return v
+    const r = el.getBoundingClientRect()
+    const box = __computed(el, 'box-sizing') === 'border-box'
+    const a = p === 'width' ? ['left', 'right'] : ['top', 'bottom']
+    let n = p === 'width' ? r.width : r.height
+    if (!box) for (const s of a) n -= (parseFloat(__computed(el, 'padding-' + s)) || 0) + (parseFloat(__computed(el, 'border-' + s + '-width')) || 0)
+    return Math.max(0, Math.round(n * 100) / 100) + 'px'
+  }
+  g.CSSStyleDeclaration = g.CSSStyleDeclaration || function CSSStyleDeclaration() {}
+  g.getComputedStyle = (el, pseudo) => {
+    if (!(el instanceof Element)) throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.")
+    const get = p => {
+      p = kebab(String(p))
+      const v = pseudo && /^:?:?(before|after)$/.test(pseudo) && p === 'content' ? 'none' : __computed(el, p)
+      return !pseudo && (p === 'width' || p === 'height') ? usedSize(el, p, v) : v
+    }
+    const target = Object.create(CSSStyleDeclaration.prototype)
+    const methods = {
+      getPropertyValue: p => get(p),
+      getPropertyPriority: () => '',
+      setProperty() { throw new DOMException("Failed to execute 'setProperty' on 'CSSStyleDeclaration': These styles are computed, and therefore read-only.", 'NoModificationAllowedError') },
+      removeProperty() { throw new DOMException("Failed to execute 'removeProperty' on 'CSSStyleDeclaration': These styles are computed, and therefore read-only.", 'NoModificationAllowedError') },
+      item: i => (computedNames ||= __computedNames())[i] ?? '',
+    }
+    return new Proxy(target, {
+      get(t, k) {
+        if (typeof k === 'symbol') return k === Symbol.iterator ? function* () { yield* (computedNames ||= __computedNames()) } : t[k]
+        if (k in methods) return methods[k]
+        if (k === 'length') return (computedNames ||= __computedNames()).length
+        if (k === 'cssText') return ''
+        if (k === 'parentRule') return null
+        if (k === 'cssFloat') return get('float')
+        if (/^\d+$/.test(k)) return (computedNames ||= __computedNames())[+k]
+        if (k in t || k === 'constructor' || k === 'toString' || k === 'then') return t[k]
+        return get(k)
+      },
+      set() { return true },
+      has(t, k) { return typeof k === 'string' && (k in methods || k === 'length' || /^[a-zA-Z-]/.test(k)) },
+    })
   }
 
   class Storage {
@@ -345,7 +465,12 @@
   class Response {
     constructor(body, init) {
       init = init || {}
-      this._body = body == null ? '' : String(body)
+      if (body != null && typeof body === 'object' && g.ReadableStream && body instanceof g.ReadableStream) { this._stream = body; this._body = '' }
+      else if (body instanceof ArrayBuffer) this._bytes = body.slice(0)
+      else if (body != null && ArrayBuffer.isView(body)) this._bytes = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)
+      else if (g.Blob && body instanceof g.Blob) { const u = body._u8(); this._bytes = u.buffer.slice(u.byteOffset, u.byteOffset + u.length); this._btype = body.type }
+      else this._body = body == null ? '' : String(body)
+      if (this._bytes) this._body = undefined
       this.status = init.status === undefined ? 200 : init.status
       this.statusText = init.statusText || ''
       this.ok = this.status >= 200 && this.status < 300
@@ -355,13 +480,45 @@
       this.type = 'basic'
       this.bodyUsed = false
     }
-    text() { this.bodyUsed = true; return Promise.resolve(this._body) }
-    json() { this.bodyUsed = true; try { return Promise.resolve(JSON.parse(this._body)) } catch (e) { return Promise.reject(e) } }
-    blob() { this.bodyUsed = true; return Promise.resolve(new Blob([this._bytes || this._body], { type: this.headers.get('content-type') || '' })) }
-    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(this._bytes ? this._bytes.slice(0) : new TextEncoder().encode(this._body).buffer) }
+    // The whole body as bytes (an ArrayBuffer), reading a stream body to its end.
+    _all() {
+      if (this.bodyUsed) return Promise.reject(new TypeError('The body has already been read'))
+      this.bodyUsed = true
+      const s = this._stream
+      if (!s) return Promise.resolve(this._bytes ? this._bytes.slice(0) : new TextEncoder().encode(this._body || '').buffer)
+      if (s.locked) return Promise.reject(new TypeError('The body is locked'))
+      const reader = s.getReader(), parts = []
+      const pump = () => reader.read().then(({ value, done }) => {
+        if (done) {
+          let n = 0
+          for (const p of parts) n += p.length
+          const out = new Uint8Array(n)
+          let at = 0
+          for (const p of parts) { out.set(p, at); at += p.length }
+          return out.buffer
+        }
+        parts.push(typeof value === 'string' ? new TextEncoder().encode(value) : value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+        return pump()
+      })
+      return pump()
+    }
+    text() {
+      if (!this._stream && this._bytes === undefined) { if (this.bodyUsed) return Promise.reject(new TypeError('The body has already been read')); this.bodyUsed = true; return Promise.resolve(this._body) }
+      return this._all().then(b => new TextDecoder().decode(b))
+    }
+    json() { return this.text().then(t => JSON.parse(t)) }
+    blob() { return this._all().then(b => new Blob([b], { type: this.headers.get('content-type') || this._btype || '' })) }
+    arrayBuffer() { return this._all() }
     bytes() { return this.arrayBuffer().then(b => new Uint8Array(b)) }
     formData() { return Promise.resolve(new FormData()) }
-    clone() { return new Response(this._body, { status: this.status, headers: this.headers, url: this.url }) }
+    clone() {
+      if (this.bodyUsed) throw new TypeError('The body has already been read')
+      const r = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url })
+      r.type = this.type; r.redirected = this.redirected
+      if (this._stream) { const [a, b] = this._stream.tee(); this._stream = a; r._stream = b }
+      else { r._body = this._body; r._bytes = this._bytes && this._bytes.slice(0); r._btype = this._btype }
+      return r
+    }
     static json(data, init) { return new Response(JSON.stringify(data), Object.assign({ headers: { 'content-type': 'application/json' } }, init)) }
     static error() { return new Response('', { status: 0 }) }
     static redirect(url, status) { return new Response('', { status: status || 302, headers: { location: url } }) }
@@ -491,13 +648,17 @@
   g.PerformanceObserver.supportedEntryTypes = []
   g.ReportingObserver = class ReportingObserver { observe() {} disconnect() {} }
   // Everything counts as on screen: lazy loaders load at once.
+  class IntersectionObserverEntry {
+    constructor(init) { Object.assign(this, init) }
+  }
+  g.IntersectionObserverEntry = IntersectionObserverEntry
   g.IntersectionObserver = class IntersectionObserver {
-    constructor(cb, opts) { this.cb = cb; this.root = null; this.rootMargin = (opts && opts.rootMargin) || '0px'; this.thresholds = [0]; this._on = true }
+    constructor(cb, opts) { this.cb = cb; this.root = (opts && opts.root) || null; this.rootMargin = (opts && opts.rootMargin) || '0px'; const t = opts && opts.threshold; this.thresholds = t === undefined ? [0] : [].concat(t); this._on = true }
     observe(el) {
       setTimeout(() => {
         if (!this._on) return
         const r = el.getBoundingClientRect()
-        this.cb([{ target: el, isIntersecting: true, intersectionRatio: 1, boundingClientRect: r, intersectionRect: r, rootBounds: null, time: performance.now() }], this)
+        this.cb([new IntersectionObserverEntry({ target: el, isIntersecting: true, intersectionRatio: 1, boundingClientRect: r, intersectionRect: r, rootBounds: null, time: performance.now() })], this)
       }, 0)
     }
     unobserve() {}
@@ -614,6 +775,617 @@
       return new Blob([u.slice(s, Math.max(s, e))], { type: type === undefined ? '' : type })
     }
     stream() { const u = this._u8(); return new ReadableStream({ start(c) { c.enqueue(new Uint8Array(u)); c.close() } }) }
+  }
+  // ---- Streams: ReadableStream, WritableStream, TransformStream and the
+  // encoder/decoder streams, with the queueing the specification describes.
+  {
+    const size1 = () => 1
+    const strategyOf = (s, hwm) => {
+      s = s || {}
+      const h = s.highWaterMark === undefined ? hwm : Number(s.highWaterMark)
+      if (Number.isNaN(h) || h < 0) throw new RangeError('highWaterMark must be a non-negative number')
+      if (s.size !== undefined && typeof s.size !== 'function') throw new TypeError('size must be a function')
+      return { hwm: h, size: s.size || size1 }
+    }
+    const later = f => Promise.resolve().then(f)
+    class ReadableStreamDefaultController {
+      constructor() { throw new TypeError('Illegal constructor') }
+      get desiredSize() { const s = this._s; return s._state === 'errored' ? null : s._state === 'closed' ? 0 : this._hwm - this._qsize }
+      enqueue(chunk) {
+        const s = this._s
+        if (this._closing || s._state !== 'readable') throw new TypeError('The stream is not readable')
+        if (s._reads.length) { s._reads.shift().res({ value: chunk, done: false }) }
+        else {
+          let n
+          try { n = Number(this._size(chunk)) } catch (e) { this.error(e); throw e }
+          if (Number.isNaN(n) || n < 0 || n === Infinity) { const e = new RangeError('invalid chunk size'); this.error(e); throw e }
+          this._q.push([chunk, n]); this._qsize += n
+        }
+        this._pullMaybe()
+      }
+      close() {
+        const s = this._s
+        if (this._closing || s._state !== 'readable') throw new TypeError('The stream can\'t be closed')
+        this._closing = true
+        if (!this._q.length) s._close()
+      }
+      error(e) { this._s._error(e) }
+      _pullMaybe() {
+        const s = this._s
+        if (!this._started || this._closing || s._state !== 'readable') return
+        if (!(s._reads.length || this.desiredSize > 0)) return
+        if (this._pulling) { this._again = true; return }
+        this._pulling = true
+        let p
+        try { p = Promise.resolve(this._pull ? this._pull(this) : undefined) } catch (e) { p = Promise.reject(e) }
+        p.then(() => { this._pulling = false; if (this._again) { this._again = false; this._pullMaybe() } }, e => this.error(e))
+      }
+    }
+    class ReadableStreamDefaultReader {
+      constructor(stream) {
+        if (!(stream instanceof ReadableStream)) throw new TypeError('not a ReadableStream')
+        if (stream._reader) throw new TypeError('The stream is locked')
+        stream._reader = this
+        this._s = stream
+        this._closed = new Promise((res, rej) => { this._cres = res; this._crej = rej })
+        this._closed.catch(() => {})
+        if (stream._state === 'closed') this._cres()
+        else if (stream._state === 'errored') this._crej(stream._err)
+      }
+      get closed() { return this._closed }
+      read() {
+        const s = this._s
+        if (!s) return Promise.reject(new TypeError('The reader was released'))
+        if (s._state === 'closed') return Promise.resolve({ value: undefined, done: true })
+        if (s._state === 'errored') return Promise.reject(s._err)
+        const c = s._c
+        if (c._q.length) {
+          const [v, n] = c._q.shift()
+          c._qsize -= n
+          if (c._closing && !c._q.length) s._close()
+          else c._pullMaybe()
+          return Promise.resolve({ value: v, done: false })
+        }
+        return new Promise((res, rej) => { s._reads.push({ res, rej }); c._pullMaybe() })
+      }
+      cancel(reason) { return this._s ? this._s._cancel(reason) : Promise.reject(new TypeError('The reader was released')) }
+      releaseLock() {
+        const s = this._s
+        if (!s) return
+        const e = new TypeError('The reader was released')
+        for (const r of s._reads.splice(0)) r.rej(e)
+        if (s._state === 'readable') this._crej(e)
+        else { this._closed = Promise.reject(e); this._closed.catch(() => {}) }
+        s._reader = null; this._s = null
+      }
+    }
+    class ReadableStream {
+      constructor(source, strategy) {
+        source = source == null ? {} : source
+        if (source.type === 'bytes') strategy = Object.assign({ highWaterMark: 0 }, strategy, { size: undefined })
+        const { hwm, size } = strategyOf(strategy, 1)
+        this._state = 'readable'; this._reads = []; this._reader = null
+        const c = Object.create(ReadableStreamDefaultController.prototype)
+        Object.assign(c, { _s: this, _q: [], _qsize: 0, _hwm: hwm, _size: size, _closing: false, _started: false, _pulling: false, _again: false })
+        c._pull = source.pull && (ctl => source.pull.call(source, ctl))
+        c._cancel = source.cancel && (r => source.cancel.call(source, r))
+        if (source.type === 'bytes') { c.byobRequest = null }
+        this._c = c
+        const st = source.start ? source.start.call(source, c) : undefined
+        Promise.resolve(st).then(() => { c._started = true; c._pullMaybe() }, e => c.error(e))
+      }
+      get locked() { return !!this._reader }
+      getReader(opts) {
+        if (opts && opts.mode !== undefined && String(opts.mode) !== 'byob') throw new TypeError('invalid reader mode')
+        return new ReadableStreamDefaultReader(this)
+      }
+      cancel(reason) { return this._reader ? Promise.reject(new TypeError('The stream is locked')) : this._cancel(reason) }
+      _cancel(reason) {
+        if (this._state === 'closed') return Promise.resolve()
+        if (this._state === 'errored') return Promise.reject(this._err)
+        this._c._q = []; this._c._qsize = 0
+        this._close()
+        let p
+        try { p = Promise.resolve(this._c._cancel ? this._c._cancel(reason) : undefined) } catch (e) { p = Promise.reject(e) }
+        return p.then(() => undefined)
+      }
+      _close() {
+        if (this._state !== 'readable') return
+        this._state = 'closed'
+        for (const r of this._reads.splice(0)) r.res({ value: undefined, done: true })
+        if (this._reader) this._reader._cres()
+      }
+      _error(e) {
+        if (this._state !== 'readable') return
+        this._state = 'errored'; this._err = e
+        this._c._q = []; this._c._qsize = 0
+        for (const r of this._reads.splice(0)) r.rej(e)
+        if (this._reader) this._reader._crej(e)
+      }
+      tee() {
+        const reader = this.getReader()
+        let ca, cb, canceled = 0, reasons = []
+        let resolveCancel
+        const cancelled = new Promise(r => { resolveCancel = r })
+        const pump = () => reader.read().then(({ value, done }) => {
+          if (done) { try { ca.close() } catch (e) {} try { cb.close() } catch (e) {} return }
+          try { ca.enqueue(value) } catch (e) {}
+          try { cb.enqueue(value) } catch (e) {}
+        }, e => { ca.error(e); cb.error(e) })
+        const branch = i => new ReadableStream({
+          start(c) { if (i) cb = c; else ca = c },
+          pull: () => pump(),
+          cancel(r) { reasons[i] = r; if (++canceled === 2) resolveCancel(reader.cancel(reasons)); return cancelled }
+        })
+        return [branch(0), branch(1)]
+      }
+      pipeTo(dest, opts) {
+        opts = opts || {}
+        if (!(dest instanceof WritableStream)) return Promise.reject(new TypeError('pipeTo needs a WritableStream'))
+        if (this.locked || dest.locked) return Promise.reject(new TypeError('The stream is locked'))
+        const reader = this.getReader(), writer = dest.getWriter()
+        const signal = opts.signal
+        return new Promise((res, rej) => {
+          let done = false
+          const finish = (err, failed) => {
+            if (done) return
+            done = true
+            reader.releaseLock(); writer.releaseLock()
+            failed ? rej(err) : res()
+          }
+          if (signal) {
+            const abort = () => {
+              const why = signal.reason
+              const steps = []
+              if (!opts.preventAbort) steps.push(writer.abort(why))
+              if (!opts.preventCancel) steps.push(reader.cancel(why))
+              Promise.all(steps).then(() => finish(why, true), e => finish(e, true))
+            }
+            if (signal.aborted) return abort()
+            signal.addEventListener('abort', abort)
+          }
+          const step = () => {
+            if (done) return
+            writer.ready.then(() => reader.read()).then(({ value, done: end }) => {
+              if (end) {
+                if (opts.preventClose) finish()
+                else writer.close().then(() => finish(), e => finish(e, true))
+                return
+              }
+              writer.write(value).catch(() => {})
+              step()
+            }, e => {
+              if (this._state === 'errored') {
+                if (opts.preventAbort) finish(e, true)
+                else writer.abort(e).then(() => finish(e, true), () => finish(e, true))
+              } else {
+                if (opts.preventCancel) finish(e, true)
+                else reader.cancel(e).then(() => finish(e, true), () => finish(e, true))
+              }
+            })
+          }
+          step()
+        })
+      }
+      pipeThrough(pair, opts) {
+        if (this.locked) throw new TypeError('The stream is locked')
+        if (pair.writable.locked) throw new TypeError('The writable side is locked')
+        this.pipeTo(pair.writable, opts).catch(() => {})
+        return pair.readable
+      }
+      values(opts) {
+        const reader = this.getReader(), keep = opts && opts.preventCancel
+        const it = {
+          next: () => reader.read().then(r => { if (r.done) reader.releaseLock(); return r }),
+          return: v => {
+            const p = keep ? Promise.resolve() : reader.cancel(v)
+            reader.releaseLock()
+            return p.then(() => ({ value: v, done: true }))
+          },
+          [Symbol.asyncIterator]() { return this }
+        }
+        return it
+      }
+      [Symbol.asyncIterator](opts) { return this.values(opts) }
+      static from(src) {
+        if (src instanceof ReadableStream) return src
+        const it = src[Symbol.asyncIterator] ? src[Symbol.asyncIterator]() : src[Symbol.iterator]()
+        return new ReadableStream({
+          pull(c) { return Promise.resolve(it.next()).then(r => Promise.resolve(r.value).then(v => r.done ? c.close() : c.enqueue(v))) },
+          cancel(r) { return it.return ? Promise.resolve(it.return(r)).then(() => undefined) : undefined }
+        }, { highWaterMark: 0 })
+      }
+    }
+    Object.defineProperty(ReadableStream.prototype, Symbol.toStringTag, { value: 'ReadableStream', configurable: true })
+    class WritableStreamDefaultController {
+      constructor() { throw new TypeError('Illegal constructor') }
+      error(e) { this._s._error(e) }
+      get signal() { return this._ac.signal }
+    }
+    class WritableStreamDefaultWriter {
+      constructor(stream) {
+        if (!(stream instanceof WritableStream)) throw new TypeError('not a WritableStream')
+        if (stream._writer) throw new TypeError('The stream is locked')
+        stream._writer = this
+        this._s = stream
+        this._closed = new Promise((res, rej) => { this._cres = res; this._crej = rej })
+        this._closed.catch(() => {})
+        if (stream._state === 'closed') this._cres()
+        else if (stream._state === 'errored') this._crej(stream._err)
+      }
+      get closed() { return this._closed }
+      get ready() { const s = this._s; return s ? s._ready() : Promise.reject(new TypeError('The writer was released')) }
+      get desiredSize() { const s = this._s; if (!s) throw new TypeError('The writer was released'); return s._state === 'errored' ? null : s._state === 'closed' ? 0 : s._hwm - s._qsize }
+      write(chunk) { return this._s ? this._s._write(chunk) : Promise.reject(new TypeError('The writer was released')) }
+      close() { return this._s ? this._s._closeW() : Promise.reject(new TypeError('The writer was released')) }
+      abort(r) { return this._s ? this._s._abort(r) : Promise.reject(new TypeError('The writer was released')) }
+      releaseLock() {
+        const s = this._s
+        if (!s) return
+        const e = new TypeError('The writer was released')
+        if (s._state === 'writable') this._crej(e)
+        else { this._closed = Promise.reject(e); this._closed.catch(() => {}) }
+        s._writer = null; this._s = null
+      }
+    }
+    class WritableStream {
+      constructor(sink, strategy) {
+        sink = sink == null ? {} : sink
+        const { hwm, size } = strategyOf(strategy, 1)
+        Object.assign(this, { _state: 'writable', _writer: null, _q: [], _qsize: 0, _hwm: hwm, _size: size, _busy: false, _started: false, _closing: null, _waiters: [] })
+        this._sink = sink
+        const c = Object.create(WritableStreamDefaultController.prototype)
+        c._s = this; c._ac = new AbortController()
+        this._c = c
+        const st = sink.start ? sink.start.call(sink, c) : undefined
+        Promise.resolve(st).then(() => { this._started = true; this._advance() }, e => this._error(e))
+      }
+      get locked() { return !!this._writer }
+      getWriter() { return new WritableStreamDefaultWriter(this) }
+      abort(r) { return this._writer ? Promise.reject(new TypeError('The stream is locked')) : this._abort(r) }
+      close() { return this._writer ? Promise.reject(new TypeError('The stream is locked')) : this._closeW() }
+      _ready() {
+        if (this._state === 'errored') return Promise.reject(this._err)
+        if (this._state !== 'writable' || this._qsize < this._hwm || this._hwm === Infinity) return Promise.resolve()
+        return new Promise((res, rej) => this._waiters.push({ res, rej }))
+      }
+      _wake() {
+        if (this._qsize < this._hwm) for (const w of this._waiters.splice(0)) w.res()
+      }
+      _write(chunk) {
+        if (this._state === 'errored') return Promise.reject(this._err)
+        if (this._state !== 'writable' || this._closing) return Promise.reject(new TypeError('The stream is closing or closed'))
+        let n
+        try { n = Number(this._size(chunk)) } catch (e) { this._error(e); return Promise.reject(e) }
+        return new Promise((res, rej) => {
+          this._q.push({ chunk, n, res, rej }); this._qsize += n
+          this._advance()
+        })
+      }
+      _advance() {
+        if (!this._started || this._busy || this._state !== 'writable') return
+        const w = this._q[0]
+        if (!w) {
+          if (this._closing) {
+            this._busy = true
+            let p
+            try { p = Promise.resolve(this._sink.close ? this._sink.close.call(this._sink) : undefined) } catch (e) { p = Promise.reject(e) }
+            p.then(() => {
+              this._state = 'closed'
+              this._closing.res()
+              if (this._writer) this._writer._cres()
+            }, e => { this._closing.rej(e); this._error(e) })
+          }
+          return
+        }
+        this._busy = true
+        let p
+        try { p = Promise.resolve(this._sink.write ? this._sink.write.call(this._sink, w.chunk, this._c) : undefined) } catch (e) { p = Promise.reject(e) }
+        p.then(() => {
+          this._q.shift(); this._qsize -= w.n; this._busy = false
+          w.res(); this._wake(); this._advance()
+        }, e => { this._busy = false; w.rej(e); this._error(e) })
+      }
+      _closeW() {
+        if (this._state === 'errored') return Promise.reject(this._err)
+        if (this._state !== 'writable' || this._closing) return Promise.reject(new TypeError('The stream is closing or closed'))
+        return new Promise((res, rej) => { this._closing = { res, rej }; this._advance() })
+      }
+      _abort(r) {
+        if (this._state === 'closed') return Promise.resolve()
+        if (this._state === 'errored') return Promise.resolve()
+        this._c._ac.abort(r)
+        this._error(r)
+        let p
+        try { p = Promise.resolve(this._sink.abort ? this._sink.abort.call(this._sink, r) : undefined) } catch (e) { p = Promise.reject(e) }
+        return p.then(() => undefined)
+      }
+      _error(e) {
+        if (this._state === 'errored' || this._state === 'closed') return
+        this._state = 'errored'; this._err = e
+        for (const w of this._q.splice(0)) w.rej(e)
+        this._qsize = 0
+        for (const w of this._waiters.splice(0)) w.rej(e)
+        if (this._closing) this._closing.rej(e)
+        if (this._writer) this._writer._crej(e)
+      }
+    }
+    Object.defineProperty(WritableStream.prototype, Symbol.toStringTag, { value: 'WritableStream', configurable: true })
+    class TransformStreamDefaultController {
+      constructor() { throw new TypeError('Illegal constructor') }
+      get desiredSize() { return this._rc.desiredSize }
+      enqueue(c) { this._rc.enqueue(c) }
+      error(e) { this._rc.error(e); this._ts.writable._error(e) }
+      terminate() { try { this._rc.close() } catch (e) {} this._ts.writable._error(new TypeError('The stream was terminated')) }
+    }
+    class TransformStream {
+      constructor(t, ws, rs) {
+        t = t == null ? {} : t
+        const tc = Object.create(TransformStreamDefaultController.prototype)
+        tc._ts = this
+        let started
+        const ready = new Promise(r => { started = r })
+        this.readable = new ReadableStream({ start(c) { tc._rc = c; return ready } }, rs || { highWaterMark: 0 })
+        this.writable = new WritableStream({
+          start() { return ready },
+          write(chunk) {
+            if (t.transform) return t.transform.call(t, chunk, tc)
+            tc.enqueue(chunk)
+          },
+          close() { return Promise.resolve(t.flush ? t.flush.call(t, tc) : undefined).then(() => { try { tc._rc.close() } catch (e) {} }) },
+          abort(r) { tc._rc.error(r); return t.cancel ? t.cancel.call(t, r) : undefined }
+        }, ws)
+        Promise.resolve(t.start ? t.start.call(t, tc) : undefined).then(started, e => { started(); tc.error(e) })
+      }
+    }
+    class CountQueuingStrategy {
+      constructor(o) { this.highWaterMark = o.highWaterMark }
+      get size() { return size1 }
+    }
+    const byteSize = c => c.byteLength
+    class ByteLengthQueuingStrategy {
+      constructor(o) { this.highWaterMark = o.highWaterMark }
+      get size() { return byteSize }
+    }
+    class TextEncoderStream extends TransformStream {
+      constructor() { const e = new TextEncoder(); super({ transform(c, ctl) { const b = e.encode(String(c)); if (b.length) ctl.enqueue(b) } }) }
+      get encoding() { return 'utf-8' }
+    }
+    class TextDecoderStream extends TransformStream {
+      constructor(label, opts) {
+        const d = new TextDecoder(label, opts)
+        super({
+          transform(c, ctl) { const s = d.decode(c, { stream: true }); if (s) ctl.enqueue(s) },
+          flush(ctl) { const s = d.decode(); if (s) ctl.enqueue(s) }
+        })
+        this._d = d
+      }
+      get encoding() { return this._d.encoding }
+      get fatal() { return this._d.fatal }
+      get ignoreBOM() { return this._d.ignoreBOM }
+    }
+    Object.assign(g, { ReadableStream, ReadableStreamDefaultReader, ReadableStreamDefaultController, WritableStream, WritableStreamDefaultWriter, WritableStreamDefaultController, TransformStream, TransformStreamDefaultController, CountQueuingStrategy, ByteLengthQueuingStrategy, TextEncoderStream, TextDecoderStream })
+    // A response's body as a stream of bytes.
+    const bodyStream = r => {
+      if (r._stream === undefined) {
+        const has = r._bytes || (r._body !== undefined && r._body !== '')
+        r._stream = has ? new ReadableStream({
+          start(c) {
+            const u = r._bytes ? new Uint8Array(r._bytes) : new TextEncoder().encode(r._body)
+            if (u.length) c.enqueue(u)
+            c.close()
+          }
+        }) : null
+      }
+      return r._stream
+    }
+    Object.defineProperty(g.Response.prototype, 'body', { get() { return bodyStream(this) }, configurable: true, enumerable: true })
+  }
+  // ---- XPath (document.evaluate): location paths with the child, descendant,
+  // parent, self, attribute and following-sibling axes, name tests, text() and
+  // node(), and predicates (positions, comparisons, contains, starts-with,
+  // and/or/not, normalize-space, count, last, position, string-length).
+  {
+    class XPathResult {
+      constructor(type, nodes, value) {
+        this.resultType = type; this._n = nodes || []; this._i = 0
+        if (type === 1) this.numberValue = value
+        if (type === 2) this.stringValue = value
+        if (type === 3) this.booleanValue = value
+        if (type === 8 || type === 9) this.singleNodeValue = this._n[0] || null
+        if (type === 6 || type === 7) this.snapshotLength = this._n.length
+      }
+      iterateNext() { return this._n[this._i++] || null }
+      snapshotItem(i) { return this._n[i] || null }
+    }
+    const T = ['ANY_TYPE', 'NUMBER_TYPE', 'STRING_TYPE', 'BOOLEAN_TYPE', 'UNORDERED_NODE_ITERATOR_TYPE', 'ORDERED_NODE_ITERATOR_TYPE', 'UNORDERED_NODE_SNAPSHOT_TYPE', 'ORDERED_NODE_SNAPSHOT_TYPE', 'ANY_UNORDERED_NODE_TYPE', 'FIRST_ORDERED_NODE_TYPE']
+    T.forEach((n, i) => { XPathResult[n] = i; XPathResult.prototype[n] = i })
+    const lex = src => {
+      const out = [], re = /\s*(\/\/|\/|\.\.|\.|@|::|\(|\)|\[|\]|,|\||!=|<=|>=|=|<|>|\*|-?\d+(?:\.\d+)?|"[^"]*"|'[^']*'|[A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)/y
+      let m
+      re.lastIndex = 0
+      while (re.lastIndex < src.length && (m = re.exec(src))) out.push(m[1])
+      if (src.slice(re.lastIndex).trim()) throw domErr('SyntaxError', 'The expression is not a legal expression.')
+      return out
+    }
+    const strOf = v => Array.isArray(v) ? (v.length ? v[0].textContent || (v[0].nodeValue || '') : '') : typeof v === 'boolean' ? String(v) : typeof v === 'number' ? String(v) : String(v)
+    const numOf = v => Number(Array.isArray(v) ? strOf(v) : v)
+    const boolOf = v => Array.isArray(v) ? v.length > 0 : typeof v === 'string' ? v.length > 0 : !!v
+    const kids = n => Array.from(n.childNodes || [])
+    const desc = (n, out) => { for (const c of kids(n)) { out.push(c); desc(c, out) } return out }
+    const order = list => {
+      const uniq = [...new Set(list)]
+      return uniq.sort((a, b) => a === b ? 0 : (a.compareDocumentPosition(b) & 4) ? -1 : 1)
+    }
+    function evaluate(expr, ctx) {
+      const t = lex(expr)
+      let p = 0
+      const peek = () => t[p], next = () => t[p++], eat = x => t[p] === x ? (p++, true) : false
+      const nameTest = (n, test, axis) => {
+        if (test === 'node()') return true
+        if (test === 'text()') return n.nodeType === 3
+        if (test === 'comment()') return n.nodeType === 8
+        if (axis === 'attribute') return test === '*' || n.name === test
+        if (n.nodeType !== 1) return false
+        return test === '*' || n.localName === test.toLowerCase() || n.tagName === test
+      }
+      const axisNodes = (n, axis) => {
+        switch (axis) {
+          case 'child': return kids(n)
+          case 'descendant': return desc(n, [])
+          case 'descendant-or-self': return [n, ...desc(n, [])]
+          case 'parent': return n.parentNode ? [n.parentNode] : []
+          case 'ancestor': { const o = []; let x = n.parentNode; while (x) { o.push(x); x = x.parentNode } return o }
+          case 'ancestor-or-self': { const o = [n]; let x = n.parentNode; while (x) { o.push(x); x = x.parentNode } return o }
+          case 'self': return [n]
+          case 'attribute': return n.attributes ? Array.from(n.attributes) : []
+          case 'following-sibling': { const o = []; let x = n.nextSibling; while (x) { o.push(x); x = x.nextSibling } return o }
+          case 'preceding-sibling': { const o = []; let x = n.previousSibling; while (x) { o.push(x); x = x.previousSibling } return o }
+          default: throw domErr('SyntaxError', 'unsupported XPath axis ' + axis)
+        }
+      }
+      // A step: [axis::]test[predicates]*, applied to each context node.
+      const step = (nodes) => {
+        let axis = 'child', test
+        if (eat('.')) return nodes
+        if (eat('..')) return order(nodes.flatMap(n => n.parentNode ? [n.parentNode] : []))
+        if (eat('@')) axis = 'attribute'
+        else if (t[p + 1] === '::') { axis = next(); p++ }
+        test = next()
+        if (t[p] === '(' && t[p + 1] === ')' && /^(text|node|comment)$/.test(test)) { p += 2; test += '()' }
+        const preds = []
+        while (peek() === '[') { p++; const s = p; let depth = 1; while (p < t.length && depth) { if (t[p] === '[') depth++; else if (t[p] === ']') depth--; p++ } preds.push(t.slice(s, p - 1)) }
+        let out = []
+        for (const n of nodes) {
+          let got = axisNodes(n, axis).filter(x => nameTest(x, test, axis))
+          for (const pr of preds) got = got.filter((x, i) => { const v = sub(pr, x, i + 1, got.length); return typeof v === 'number' ? v === i + 1 : boolOf(v) })
+          out = out.concat(got)
+        }
+        return order(out)
+      }
+      const path = (start) => {
+        let nodes
+        if (peek() === '/' || peek() === '//') {
+          const root = ctx.nodeType === 9 ? ctx : ctx.ownerDocument
+          nodes = [root]
+          if (next() === '//') nodes = order([root, ...desc(root, [])])
+          if (p >= t.length || /^[)\],|=<>!]/.test(peek()) || peek() === 'and' || peek() === 'or') return nodes
+        } else nodes = start
+        nodes = step(nodes)
+        while (peek() === '/' || peek() === '//') {
+          if (next() === '//') nodes = order(nodes.flatMap(n => [n, ...desc(n, [])]))
+          nodes = step(nodes)
+        }
+        return nodes
+      }
+      let cur = [ctx], pos = 1, size = 1
+      const fn = (name, args) => {
+        const a = args.map(f => f())
+        switch (name) {
+          case 'contains': return strOf(a[0]).includes(strOf(a[1]))
+          case 'starts-with': return strOf(a[0]).startsWith(strOf(a[1]))
+          case 'not': return !boolOf(a[0])
+          case 'normalize-space': return strOf(a.length ? a[0] : cur).trim().replace(/\s+/g, ' ')
+          case 'string-length': return strOf(a.length ? a[0] : cur).length
+          case 'string': return strOf(a.length ? a[0] : cur)
+          case 'number': return numOf(a.length ? a[0] : cur)
+          case 'count': return a[0].length
+          case 'last': return size
+          case 'position': return pos
+          case 'concat': return a.map(strOf).join('')
+          case 'translate': { const [s, f, r] = a.map(strOf); return [...s].map(c => { const k = f.indexOf(c); return k < 0 ? c : (r[k] || '') }).join('') }
+          case 'true': return true
+          case 'false': return false
+          case 'name': case 'local-name': { const n = a.length ? a[0][0] : cur[0]; return n ? (n.localName || n.nodeName || '').toString() : '' }
+          default: throw domErr('SyntaxError', 'unsupported XPath function ' + name)
+        }
+      }
+      // expression := or; deferred evaluation keeps the context right in predicates.
+      const primary = () => {
+        const k = peek()
+        if (k === undefined) throw domErr('SyntaxError', 'The expression is not a legal expression.')
+        if (k === '(') { p++; const v = or(); eat(')'); return v }
+        if (/^["']/.test(k)) { p++; const s = k.slice(1, -1); return () => s }
+        if (/^-?\d/.test(k)) { p++; const n = Number(k); return () => n }
+        if (/^[A-Za-z_]/.test(k) && t[p + 1] === '(' && !/^(text|node|comment)$/.test(k)) {
+          p += 2
+          const args = []
+          if (!eat(')')) { do args.push(or()); while (eat(',')); eat(')') }
+          return () => fn(k, args)
+        }
+        const s = p
+        // A path: find where it ends, then evaluate it against the context each time.
+        let depth = 0
+        while (p < t.length) {
+          const x = t[p]
+          if (x === '[' || x === '(') depth++
+          else if (x === ']' || x === ')') { if (!depth) break; depth-- }
+          else if (!depth && (x === ',' || x === '|' || x === '=' || x === '!=' || x === '<' || x === '>' || x === '<=' || x === '>=' || ((x === 'and' || x === 'or') && p > s && t[p - 1] !== '/' && t[p - 1] !== '//' && t[p - 1] !== '@' && t[p - 1] !== '::'))) break
+          p++
+        }
+        const toks = t.slice(s, p)
+        return () => { const saveT = t.splice(0, t.length, ...toks), saveP = p; p = 0; try { return path(cur) } finally { t.splice(0, t.length, ...saveT); p = saveP } }
+      }
+      const union = () => { let a = primary(); while (eat('|')) { const l = a, r = primary(); a = () => order([...l(), ...r()]) } return a }
+      const cmp = () => {
+        let a = union()
+        while (['=', '!=', '<', '>', '<=', '>='].includes(peek())) {
+          const op = next(), l = a, r = union()
+          a = () => {
+            const x = l(), y = r()
+            const xs = Array.isArray(x) ? x.map(n => n.textContent !== undefined && n.nodeType !== 2 ? n.textContent : n.value) : [x]
+            const ys = Array.isArray(y) ? y.map(n => n.textContent !== undefined && n.nodeType !== 2 ? n.textContent : n.value) : [y]
+            const num = op !== '=' && op !== '!='
+            return xs.some(u => ys.some(v => {
+              if (num || typeof u === 'number' || typeof v === 'number') { u = Number(u); v = Number(v) } else if (typeof u === 'boolean' || typeof v === 'boolean') { u = boolOf(u); v = boolOf(v) } else { u = String(u); v = String(v) }
+              return op === '=' ? u === v : op === '!=' ? u !== v : op === '<' ? u < v : op === '>' ? u > v : op === '<=' ? u <= v : u >= v
+            }))
+          }
+        }
+        return a
+      }
+      const and = () => { let a = cmp(); while (eat('and')) { const l = a, r = cmp(); a = () => boolOf(l()) && boolOf(r()) } return a }
+      function or() { let a = and(); while (eat('or')) { const l = a, r = and(); a = () => boolOf(l()) || boolOf(r()) } return a }
+      function sub(toks, node, ps, sz) {
+        const saveT = t.splice(0, t.length, ...toks), saveP = p, saveC = cur, savePos = pos, saveSize = size
+        p = 0; cur = [node]; pos = ps; size = sz
+        try { const f = or(); return f() } finally { t.splice(0, t.length, ...saveT); p = saveP; cur = saveC; pos = savePos; size = saveSize }
+      }
+      const f = or()
+      if (p < t.length) throw domErr('SyntaxError', 'The expression is not a legal expression.')
+      return f()
+    }
+    g.XPathResult = XPathResult
+    g.XPathExpression = class XPathExpression { constructor(e) { this._e = e } evaluate(n, type) { return document.evaluate(this._e, n, null, type) } }
+    g.XPathEvaluator = class XPathEvaluator {
+      createExpression(e) { lex(String(e)); return new g.XPathExpression(String(e)) }
+      createNSResolver(n) { return n }
+      evaluate(e, n, r, type) { return document.evaluate(e, n, r, type) }
+    }
+    const docEval = function (expr, node, resolver, type) {
+      node = node || this
+      type = Number(type) || 0
+      const v = evaluate(String(expr), node)
+      if (Array.isArray(v)) {
+        if (type === 1 || type === 2 || type === 3) return new XPathResult(type, [], type === 1 ? numOf(v) : type === 2 ? strOf(v) : boolOf(v))
+        if (type === 0) type = 4
+        return new XPathResult(type, v)
+      }
+      if (type === 0) type = typeof v === 'number' ? 1 : typeof v === 'string' ? 2 : 3
+      if (type >= 4) throw new TypeError('The result is not a node set')
+      return new XPathResult(type, [], type === 1 ? Number(v) : type === 2 ? String(v) : boolOf(v))
+    }
+    if (g.Document) {
+      g.Document.prototype.evaluate = docEval
+      g.Document.prototype.createExpression = function (e) { return new g.XPathEvaluator().createExpression(e) }
+      g.Document.prototype.createNSResolver = function (n) { return n }
+    }
+  }
+  g.SVGAnimatedString = class SVGAnimatedString { constructor(v) { this.baseVal = v || ''; this.animVal = v || '' } }
+  g.FileList = class FileList {
+    constructor() { throw new TypeError('Illegal constructor') }
+    item(i) { return this[i] ?? null }
+    *[Symbol.iterator]() { for (let i = 0; i < this.length; i++) yield this[i] }
   }
   g.File = class File extends g.Blob { constructor(parts, name, opts) { super(parts, opts); this.name = name; this.lastModified = Date.now() } }
   g.FileReader = class FileReader extends EventTarget {
@@ -1894,6 +2666,71 @@
     }
   }
 
+  // ---------------------------------------------------------------- namespace lookup (DOM's "locate a namespace")
+  {
+    const XMLNS = 'http://www.w3.org/2000/xmlns/', XML = 'http://www.w3.org/XML/1998/namespace'
+    const owner = n => {
+      switch (n.nodeType) {
+        case 1: return n
+        case 9: return n.documentElement
+        case 10: case 11: return null
+        case 2: return n.ownerElement
+        default: return n.parentElement
+      }
+    }
+    const locate = (n, prefix) => {
+      if (n.nodeType !== 1) { const e = owner(n); return e ? locate(e, prefix) : null }
+      if (prefix === 'xml') return XML
+      if (prefix === 'xmlns') return XMLNS
+      if (n.namespaceURI !== null && n.prefix === prefix) return n.namespaceURI
+      for (const a of n.attributes) {
+        if ((a.namespaceURI === XMLNS && a.prefix === 'xmlns' && a.localName === prefix) || (prefix === null && a.namespaceURI === XMLNS && a.prefix === null && a.localName === 'xmlns'))
+          return a.value === '' ? null : a.value
+      }
+      return n.parentElement ? locate(n.parentElement, prefix) : null
+    }
+    const prefixOf = (e, ns) => {
+      for (; e; e = e.parentElement) {
+        if (e.namespaceURI === ns && e.prefix !== null) return e.prefix
+        for (const a of e.attributes) if (a.prefix === 'xmlns' && a.value === ns) return a.localName
+      }
+      return null
+    }
+    Node.prototype.lookupNamespaceURI = function (prefix) { return locate(this, prefix === '' || prefix === undefined ? null : prefix == null ? null : String(prefix)) }
+    Node.prototype.lookupPrefix = function (ns) { if (ns == null || ns === '') return null; const e = owner(this); return e ? prefixOf(e, String(ns)) : null }
+    Node.prototype.isDefaultNamespace = function (ns) { ns = ns == null || ns === '' ? null : String(ns); return locate(this, null) === ns }
+  }
+  Element.prototype.webkitMatchesSelector = Element.prototype.matches
+  // outerText reads as innerText; setting it replaces the element with text.
+  Object.defineProperty(HTMLElement.prototype, 'outerText', {
+    configurable: true, enumerable: true,
+    get() { return this.innerText },
+    set(v) {
+      const p = this.parentNode
+      if (!p) throw new DOMException('the element has no parent', 'NoModificationAllowedError')
+      const parts = String(v).split(/\r\n|\r|\n/), frag = document.createDocumentFragment()
+      parts.forEach((t, i) => { if (i) frag.appendChild(document.createElement('br')); if (t) frag.appendChild(document.createTextNode(t)) })
+      if (!frag.firstChild) frag.appendChild(document.createTextNode(''))
+      p.replaceChild(frag, this)
+    },
+  })
+  // The document's dir and its legacy colour attributes reflect <html dir> and <body>'s.
+  {
+    const DIRS = ['ltr', 'rtl', 'auto']
+    Object.defineProperty(Document.prototype, 'dir', {
+      configurable: true, enumerable: true,
+      get() { const h = this.documentElement; const v = h && h.localName === 'html' ? (h.getAttribute('dir') || '').toLowerCase() : ''; return DIRS.includes(v) ? v : '' },
+      set(v) { const h = this.documentElement; if (h && h.localName === 'html') h.setAttribute('dir', String(v)) },
+    })
+    for (const [prop, attr] of [['fgColor', 'text'], ['linkColor', 'link'], ['vlinkColor', 'vlink'], ['alinkColor', 'alink'], ['bgColor', 'bgcolor']]) {
+      Object.defineProperty(Document.prototype, prop, {
+        configurable: true, enumerable: true,
+        get() { const b = this.body; return b && b.localName === 'body' ? b.getAttribute(attr) || '' : '' },
+        set(v) { const b = this.body; if (b && b.localName === 'body') b.setAttribute(attr, v === null ? '' : String(v)) },
+      })
+    }
+  }
+
   // ---------------------------------------------------------------- CharacterData, Text, Comment
   const needs = (args, n, what) => { if (args.length < n) throw new TypeError(what + ' needs ' + n + ' argument' + (n > 1 ? 's' : '')) }
   const reconstruct = (name, parent, make) => {
@@ -1995,7 +2832,13 @@
       ['formNoValidate', 'b', 'formnovalidate'], ['formTarget', 's', 'formtarget'], ['height', 'ul'], ['max', 's'], ['min', 's'], ['multiple', 'b'], ['name', 's'],
       ['pattern', 's'], ['placeholder', 's'], ['readOnly', 'b', 'readonly'], ['required', 'b'], ['size', 'lul', 0, 20], ['src', 'u'], ['step', 's'],
       ['type', 'e', 0, { k: ['hidden', 'text', 'search', 'tel', 'url', 'email', 'password', 'date', 'month', 'week', 'time', 'datetime-local', 'number', 'range', 'color', 'checkbox', 'radio', 'file', 'submit', 'image', 'reset', 'button'], m: 'text', i: 'text' }],
-      ['defaultValue', 's', 'value'], ['width', 'ul'], ['align', 's'], ['useMap', 's', 'usemap']],
+      ['defaultValue', 's', 'value'], ['width', 'ul'], ['align', 's'], ['useMap', 's', 'usemap'],
+      ['formEnctype', 'e', 'formenctype', Object.assign({}, ENCTYPE, { m: '' })], ['formMethod', 'e', 'formmethod', Object.assign({}, FMETHOD, { m: '' })]],
+    HTMLMarqueeElement: [['behavior', 's'], ['bgColor', 's', 'bgcolor'], ['direction', 's'], ['height', 's'], ['hspace', 'ul'], ['scrollAmount', 'ul', 'scrollamount', 6],
+      ['scrollDelay', 'ul', 'scrolldelay', 85], ['trueSpeed', 'b', 'truespeed'], ['vspace', 'ul'], ['width', 's']],
+    HTMLFrameElement: [['name', 's'], ['scrolling', 's'], ['src', 'u'], ['frameBorder', 's', 'frameborder'], ['longDesc', 'u', 'longdesc'], ['noResize', 'b', 'noresize'],
+      ['marginHeight', 'sn', 'marginheight'], ['marginWidth', 'sn', 'marginwidth']],
+    HTMLFrameSetElement: [['cols', 's'], ['rows', 's']],
     HTMLLabelElement: [['htmlFor', 's', 'for']],
     HTMLLegendElement: [['align', 's']],
     HTMLLIElement: [['value', 'l'], ['type', 's']],
@@ -2034,15 +2877,16 @@
     HTMLTrackElement: [['kind', 'e', 0, { k: ['subtitles', 'captions', 'descriptions', 'chapters', 'metadata'], m: 'subtitles', i: 'metadata' }], ['src', 'u'],
       ['srclang', 's'], ['label', 's'], ['default', 'b']],
     HTMLUListElement: [['compact', 'b'], ['type', 's']],
-    HTMLVideoElement: [['width', 'ul'], ['height', 'ul'], ['poster', 'u'], ['playsInline', 'b', 'playsinline']],
+    HTMLVideoElement: [['width', 'ul'], ['height', 'ul'], ['poster', 'u'], ['playsInline', 'b', 'playsinline'], ['loading', 'e', 0, LOADING]],
   }
   for (const m of ['HTMLVideoElement', 'HTMLAudioElement']) REFLECT[m] = (REFLECT[m] || []).concat([['src', 'u'], ['crossOrigin', 'e', 'crossorigin', CORS],
-    ['autoplay', 'b'], ['loop', 'b'], ['controls', 'b'], ['defaultMuted', 'b', 'muted']])
+    ['autoplay', 'b'], ['loop', 'b'], ['controls', 'b'], ['defaultMuted', 'b', 'muted'],
+    ['preload', 'e', 0, { k: ['none', 'metadata', 'auto'], m: 'metadata', i: 'metadata', a: { '': 'auto' } }]])
   {
     const MAX = 2147483647
     const lower = v => v.replace(/[A-Z]/g, c => c.toLowerCase())
     // HTML's rules for parsing integers (and non-negative ones), and floating-point numbers.
-    const int = v => { const m = /^[\t\n\f\r ]*([-+]?)([0-9]+)/.exec(v); return m ? (m[1] === '-' ? -1 : 1) * Number(m[2]) : null }
+    const int = v => { const m = /^[\t\n\f\r ]*([-+]?)([0-9]+)/.exec(v); return m ? (m[1] === '-' ? -1 : 1) * Number(m[2]) + 0 : null }
     const float = v => { const m = /^[\t\n\f\r ]*(-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)/.exec(v); if (!m) return null; const n = Number(m[1]); return isFinite(n) ? (n === 0 ? 0 : n) : null }
     const str = (el, a) => { const v = el.getAttribute(a); return v === null ? '' : v }
     const kinds = {
@@ -2078,6 +2922,7 @@
           const v = this.getAttribute(a)
           if (v === null) return spec.m === undefined ? '' : spec.m
           const k = lower(v)
+          if (spec.a && k in spec.a) return spec.a[k]
           if (spec.k.includes(k)) return k
           return spec.i === undefined ? '' : spec.i
         },

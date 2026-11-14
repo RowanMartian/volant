@@ -405,12 +405,18 @@ pub struct Interp {
     regex_cache: HashMap<(Rc<str>, Rc<str>), Rc<crate::regex::Regex>>,
     pub(crate) steps: u64,
     pub max_steps: u64,
+    /// How long one run may take (set again by each [`Interp::reset_steps`]),
+    /// whatever the step count says: steps differ a lot in cost.
+    pub time_limit: Option<std::time::Duration>,
+    pub(crate) deadline: Option<std::time::Instant>,
     pub(crate) depth: u32,
     /// How deep JS calls may nest. Each level costs native stack, so callers
     /// that raise it run the interpreter on a thread with a large stack.
     pub max_depth: u32,
     /// The names of the JS functions being called, innermost last (for error messages).
     pub call_names: Vec<(Option<Rc<str>>, u32)>,
+    /// The script each of those came from (for stack traces).
+    pub(crate) call_urls: Vec<Option<Rc<str>>>,
     /// Fetches modules (`import`); without one, imports fail.
     pub loader: Option<Rc<dyn crate::module::Loader>>,
     /// Modules by URL, loaded once each.
@@ -419,7 +425,9 @@ pub struct Interp {
     pub base_url: Rc<str>,
     /// When set, a sample every 128 steps (loop iterations and calls) of the
     /// function running (a JS profile).
-    pub profile: Option<HashMap<(Option<Rc<str>>, u32), u64>>,
+    pub profile: Option<HashMap<(Option<Rc<str>>, u32, Option<Rc<str>>), u64>>,
+    /// When the profile last took a sample: each sample weighs the time since.
+    pub(crate) profile_at: Option<std::time::Instant>,
 }
 
 impl Default for Interp {
@@ -471,13 +479,17 @@ impl Interp {
             regex_cache: HashMap::new(),
             steps: 0,
             max_steps: 5_000_000,
+            time_limit: None,
+            deadline: None,
             depth: 0,
             max_depth: 400,
             call_names: Vec::new(),
+            call_urls: Vec::new(),
             loader: None,
             modules: HashMap::new(),
             base_url: "".into(),
             profile: None,
+            profile_at: None,
         };
         crate::builtins::install(&mut i);
         i
@@ -564,8 +576,12 @@ impl Interp {
     /// The JS functions being run, innermost first ("    at name (line N)").
     pub fn stack_trace(&self) -> String {
         let mut out = String::new();
-        for (n, line) in self.call_names.iter().rev().take(10) {
-            out.push_str(&format!("    at {} ({})\n", n.as_deref().unwrap_or("<anonymous>"), crate::parse::Where::unpack(*line)));
+        for (k, (n, line)) in self.call_names.iter().enumerate().rev().take(10) {
+            let at = crate::parse::Where::unpack(*line);
+            match self.call_urls.get(k).cloned().flatten() {
+                Some(u) => out.push_str(&format!("    at {} ({u}: {at})\n", n.as_deref().unwrap_or("<anonymous>"))),
+                None => out.push_str(&format!("    at {} ({at})\n", n.as_deref().unwrap_or("<anonymous>"))),
+            }
         }
         out
     }
@@ -950,17 +966,37 @@ impl Interp {
         let total: u64 = p.values().sum::<u64>().max(1);
         let mut rows: Vec<_> = p.iter().collect();
         rows.sort_by(|a, b| b.1.cmp(a.1));
-        let head = format!("{total} samples (about {:.1} million loop iterations and calls)\n", total as f64 * 128.0 / 1e6);
+        let head = format!("{:.2} s of script time, by function (time between samples goes to the function running at the sample)\n", total as f64 / 1e9);
         head + &rows
             .iter()
             .take(top)
-            .map(|((name, at), n)| format!("{:5.1}%  {} ({})\n", **n as f64 * 100.0 / total as f64, name.as_deref().unwrap_or("<anonymous>"), crate::parse::Where::unpack(*at)))
+            .map(|((name, at, url), n)| {
+                let file = url.as_deref().map(|u| u.rsplit('/').next().unwrap_or(u).split('?').next().unwrap_or(u)).unwrap_or("inline");
+                format!("{:5.1}%  {} ({file}: {})\n", **n as f64 * 100.0 / total as f64, name.as_deref().unwrap_or("<anonymous>"), crate::parse::Where::unpack(*at))
+            })
             .collect::<String>()
     }
 
     pub fn reset_steps(&mut self, budget: u64) {
         self.steps = 0;
         self.max_steps = budget;
+        self.deadline = self.time_limit.map(|d| std::time::Instant::now() + d);
+        if self.profile.is_some() {
+            self.profile_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Past the step budget or the time limit (which then counts as the budget).
+    #[cold]
+    pub(crate) fn out_of_time(&mut self) -> bool {
+        if self.steps > self.max_steps {
+            return true;
+        }
+        if matches!(self.deadline, Some(d) if std::time::Instant::now() > d) {
+            self.max_steps = self.steps.saturating_sub(1);
+            return true;
+        }
+        false
     }
 
     /// A RegExp object for a literal (compiled once per pattern).
@@ -986,8 +1022,17 @@ impl Interp {
 
     /// Runs a classic script; its completion value (the last expression statement's).
     pub fn run(&mut self, src: &str) -> Result<Value, String> {
+        self.run_at(src, None)
+    }
+
+    /// A classic script, from `url` when it's an external one.
+    pub fn run_at(&mut self, src: &str, url: Option<&str>) -> Result<Value, String> {
         let prog = crate::parse::parse(src).map_err(|e| format!("SyntaxError: {e}"))?;
-        let code = crate::compile::Compiler::script(&prog).map_err(|e| format!("SyntaxError: {e}"))?;
+        let code = match url {
+            Some(u) => crate::compile::Compiler::script_at(&prog, u),
+            None => crate::compile::Compiler::script(&prog),
+        }
+        .map_err(|e| format!("SyntaxError: {e}"))?;
         let this = Value::Obj(self.global_obj.clone());
         let r = self.run_code(code, this);
         // Promise reactions run as soon as the script ends; timers wait for the caller's event loop.
@@ -1107,6 +1152,36 @@ impl Interp {
             Some(n) => n(self, this, args),
             None => self.call_closure(f, this, args, false),
         }
+    }
+
+    /// `Reflect.construct(f, args, new_target)`: builds as `f` does, with
+    /// `new_target.prototype` as the new object's prototype.
+    pub fn construct_as(&mut self, f: &Value, args: Vec<Value>, new_target: &Value) -> Res<Value> {
+        if !Self::is_callable(new_target) {
+            return self.throw("TypeError", "Reflect.construct: newTarget is not a constructor");
+        }
+        let same = matches!((f, new_target), (Value::Obj(a), Value::Obj(b)) if Rc::ptr_eq(a, b));
+        let closure = matches!(f, Value::Obj(o) if matches!(o.borrow().kind, Kind::Function(Callable::Closure(_))));
+        if same || !Self::is_callable(f) || Self::proxy_parts(f).is_some() {
+            return self.construct(f, args);
+        }
+        if closure {
+            let obj = self.new_this(new_target)?;
+            self.depth += 1;
+            if self.depth > self.max_depth {
+                self.depth -= 1;
+                return Err(self.recursion_error());
+            }
+            let r = self.call_closure_as(f, obj, args, true, new_target.clone());
+            self.depth -= 1;
+            return r;
+        }
+        // A built-in: build as usual, then give it new_target's prototype.
+        let made = self.construct(f, args)?;
+        if let (Value::Obj(o), Value::Obj(p)) = (&made, self.get(new_target, "prototype")?) {
+            o.borrow_mut().proto = Some(p);
+        }
+        Ok(made)
     }
 
     pub fn construct(&mut self, f: &Value, args: Vec<Value>) -> Res<Value> {
@@ -1277,6 +1352,73 @@ pub fn utf16_len(s: &Rc<str>) -> usize {
     } else {
         s.encode_utf16().count()
     }
+}
+
+/// Where UTF-16 index `k` falls: the byte offset of the character holding it,
+/// and whether it's that character's second unit. Past the end: `(len, false)`.
+fn place16(s: &Rc<str>, k: usize) -> (usize, bool) {
+    if s.len() >= CACHE_AT {
+        return with_info(s, |e| locate(e, k)).unwrap_or((s.len(), false));
+    }
+    if s.is_ascii() {
+        return (k.min(s.len()), false);
+    }
+    let mut u = 0;
+    for (b, c) in s.char_indices() {
+        let w = c.len_utf16();
+        if k < u + w {
+            return (b, k > u);
+        }
+        u += w;
+    }
+    (s.len(), false)
+}
+
+/// The byte offset where UTF-16 index `k` starts (after the character, if `k`
+/// is inside a surrogate pair).
+pub fn byte_at16(s: &Rc<str>, k: usize) -> usize {
+    match place16(s, k) {
+        (b, true) => b + s[b..].chars().next().map(char::len_utf8).unwrap_or(0),
+        (b, false) => b,
+    }
+}
+
+/// The UTF-16 index of a byte offset (on a character boundary).
+pub fn index16(s: &Rc<str>, byte: usize) -> usize {
+    let ascii = if s.len() >= CACHE_AT { with_info(s, |e| e.ascii) } else { s.is_ascii() };
+    if ascii {
+        byte
+    } else {
+        s[..byte.min(s.len())].encode_utf16().count()
+    }
+}
+
+/// UTF-16 units a..b of a string, as `slice` and `substring` cut it (half a
+/// surrogate pair, which a Rust string can't hold, becomes U+FFFD).
+pub fn slice16(s: &Rc<str>, a: usize, b: usize) -> Rc<str> {
+    if a >= b {
+        return "".into();
+    }
+    let (ba, a_mid) = place16(s, a);
+    let (bb, b_mid) = place16(s, b);
+    if !a_mid && !b_mid {
+        return if ba == 0 && bb == s.len() { s.clone() } else { s[ba..bb].into() };
+    }
+    let width = |at: usize| s[at..].chars().next().map(char::len_utf8).unwrap_or(0);
+    let mut out = String::new();
+    let from = if a_mid {
+        out.push('\u{FFFD}');
+        ba + width(ba)
+    } else {
+        ba
+    };
+    if from < bb {
+        out.push_str(&s[from..bb]);
+    }
+    if b_mid && !(a_mid && ba == bb) {
+        out.push('\u{FFFD}');
+    }
+    out.into()
 }
 
 /// UTF-16 unit `k` of a string (`charCodeAt`).

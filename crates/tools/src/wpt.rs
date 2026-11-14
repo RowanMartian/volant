@@ -121,6 +121,7 @@ pub fn one(root: &str, path: &str) {
     rt.state.borrow_mut().charset = charset;
     // Test files run thousands of tests in one script; the wall-clock limits apply instead.
     rt.budget = 200_000_000;
+    rt.interp.time_limit = Some(std::time::Duration::from_secs(30));
     rt.run_scripts();
     let long = html.contains("name=timeout content=long") || html.contains("name=\"timeout\" content=\"long\"") || html.contains("META: timeout=long");
     let wait = if long { WAIT_LONG } else { WAIT };

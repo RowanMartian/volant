@@ -1393,6 +1393,8 @@ fn run_session(serial: u64, tab: TabId, nav: Navigation, width: f32, dark: bool,
     let env = volant_engine::Env { width, height: 768.0, dark };
     let mut rt = script::Runtime::new_typed(&html, &url, &reply.content_type, env, host.clone());
     rt.state.borrow_mut().charset = charset;
+    // Scripts that measure the page (getBoundingClientRect) see it set in the fonts it's drawn with.
+    rt.state.borrow_mut().fonts = Some(Rc::new(MacFonts));
     eprintln!("engine: loaded {url} ({status}, {} KB) in {:.0} ms", body.len() / 1024, started.elapsed().as_secs_f64() * 1000.0);
     let mut sheets: Vec<(String, String)> = Vec::new();
     let mut shown = 0u64;

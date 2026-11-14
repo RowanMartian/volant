@@ -537,3 +537,34 @@ fn spec_details_from_web_platform_tests() {
     assert_eq!(out("console.log(Object.getPrototypeOf(TypeError) === Error, new Error('m', { cause: 7 }).cause)"), "true 7");
     assert_eq!(out(r"console.log(/[\udc00-\udfff]/.test('u'), 'function'.replace(/(^|[^\ud800-\udbff])([\udc00-\udfff]+)/g, 'X'))"), "false function");
 }
+
+#[test]
+fn reflect_construct_new_target() {
+    let src = "function Base() { this.x = this.init ? this.init() : 'none'; this.t = new.target === Sub }
+        function Sub() {}
+        Sub.prototype = Object.create(Base.prototype, { constructor: { value: Sub } })
+        Sub.prototype.init = function () { return 'sub' }
+        const o = Reflect.construct(Base, [], Sub)
+        class A { constructor() { this.n = new.target.name } } class B {}
+        class C extends A {}
+        console.log(o.x, o.t, Object.getPrototypeOf(o) === Sub.prototype, Reflect.construct(A, [], B).n, new C().n, Reflect.construct(Error, ['m'], B) instanceof B)";
+    assert_eq!(out(src), "sub true true B C true");
+}
+
+#[test]
+fn for_await() {
+    let src = r#"
+        const o = { [Symbol.asyncIterator]() { let i = 0; return { next() { return Promise.resolve({ value: i, done: i++ > 1 }) } } } };
+        async function* g() { yield 1; yield 2; yield 3 }
+        (async () => {
+            const seen = [];
+            for await (const v of o) seen.push('a' + v);
+            for await (const v of [1, Promise.resolve(2)]) seen.push('s' + v);
+            for await (const v of g()) { if (v == 2) break; seen.push('g' + v) }
+            let x; for await (x of g()) {}
+            seen.push('x' + x);
+            console.log(seen.join(' '));
+        })()
+    "#;
+    assert_eq!(out(src), "a0 a1 s1 s2 g1 x3");
+}

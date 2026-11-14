@@ -220,6 +220,9 @@ pub fn install(i: &mut Interp) {
     });
     def(i, &reflect, "construct", |i, _t, a| {
         let args = i.iterate(&arg(&a, 1))?;
+        if a.len() > 2 {
+            return i.construct_as(&arg(&a, 0), args, &arg(&a, 2));
+        }
         i.construct(&arg(&a, 0), args)
     });
     def(i, &reflect, "getPrototypeOf", |_i, _t, a| {

@@ -363,9 +363,11 @@ fn is_doctype_name(s: &str) -> bool {
 }
 /// The native stack a thread running a [`Runtime`] needs.
 pub const STACK: usize = 512 << 20;
-/// The step budget for each script and each event (about three seconds of
-/// work), unless [`Runtime::budget`] says otherwise.
+/// The step budget for each script and each event (loop iterations and
+/// calls), unless [`Runtime::budget`] says otherwise.
 const BUDGET: u64 = 10_000_000;
+/// And the time each may take, however few its steps (`interp.time_limit`).
+pub const TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct Listener {
     ty: String,
@@ -406,6 +408,13 @@ pub struct State {
     pub env: Env,
     /// Style sheets from outside the document (linked sheets), for getComputedStyle.
     pub sheets: Vec<String>,
+    /// How scripts measure text when they ask for geometry (the host's fonts, if it set them).
+    pub fonts: Option<Rc<dyn crate::Fonts>>,
+    /// The last layout made for scripts (getBoundingClientRect, offsetWidth, …).
+    geometry: Option<Rc<Geometry>>,
+    /// Layout time spent for scripts in the current second, to stop a page that
+    /// alternates writes and reads from relaying out without end.
+    layout_spent: (std::time::Instant, std::time::Duration),
     listeners: HashMap<NodeId, Vec<Listener>>,
     wrappers: HashMap<NodeId, Value>,
     styles: HashMap<NodeId, Value>,
@@ -1082,6 +1091,285 @@ fn selector_list(text: &str) -> Option<Vec<css::Selector>> {
     parts.iter().map(|p| css::parse_selector(p.trim().trim_start_matches(":scope").trim())).collect()
 }
 
+/// Pseudo-classes and pseudo-elements CSS defines: a selector naming one
+/// Canard can't match yet is valid (it matches nothing); any other name is
+/// a syntax error.
+const KNOWN_PSEUDO_CLASSES: &[&str] = &[
+    "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default", "defined", "dir", "disabled", "empty", "enabled",
+    "first", "first-child", "first-of-type", "focus", "focus-visible", "focus-within", "fullscreen", "future", "has", "host", "host-context", "hover",
+    "in-range", "indeterminate", "invalid", "is", "lang", "last-child", "last-of-type", "left", "link", "local-link", "matches", "modal", "muted", "not",
+    "nth-child", "nth-col", "nth-last-child", "nth-last-col", "nth-last-of-type", "nth-of-type", "only-child", "only-of-type", "open", "optional",
+    "out-of-range", "past", "paused", "picture-in-picture", "placeholder-shown", "playing", "popover-open", "read-only", "read-write", "required", "right",
+    "root", "scope", "seeking", "stalled", "state", "target", "target-within", "user-invalid", "user-valid", "valid", "visited", "volume-locked", "where",
+    "before", "after", "first-letter", "first-line",
+];
+const KNOWN_PSEUDO_ELEMENTS: &[&str] = &[
+    "after", "backdrop", "before", "checkmark", "column", "cue", "details-content", "file-selector-button", "first-letter", "first-line", "grammar-error",
+    "highlight", "marker", "part", "picker", "picker-icon", "placeholder", "scroll-button", "scroll-marker", "scroll-marker-group", "selection", "slotted",
+    "spelling-error", "target-text", "view-transition", "view-transition-group", "view-transition-image-pair", "view-transition-new", "view-transition-old",
+];
+
+/// Whether a selector list is malformed (the DOM throws SyntaxError), as
+/// opposed to valid but beyond what Canard matches.
+fn selector_syntax_error(text: &str) -> bool {
+    let c: Vec<char> = text.chars().collect();
+    let n = c.len();
+    let ident_start = |ch: char| ch.is_alphabetic() || ch == '_' || ch == '\\' || !ch.is_ascii();
+    let name_char = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '-' || !ch.is_ascii();
+    // Reads an identifier at i (CSS: optional '-', then a start char, or '--'); its end, if any.
+    let ident = |i: usize| -> Option<usize> {
+        let mut j = i;
+        if c.get(j) == Some(&'-') {
+            j += 1;
+            if c.get(j) == Some(&'-') {
+                j += 1;
+            } else if !c.get(j).is_some_and(|&ch| ident_start(ch)) {
+                return None;
+            }
+        } else if !c.get(j).is_some_and(|&ch| ident_start(ch)) {
+            return None;
+        }
+        while j < n && (name_char(c[j]) || c[j] == '\\') {
+            if c[j] == '\\' {
+                j += 1;
+                // A hex escape: up to six hex digits and one white space after.
+                let start = j;
+                while j < n && j - start < 6 && c[j].is_ascii_hexdigit() {
+                    j += 1;
+                }
+                if j > start {
+                    if j < n && c[j].is_whitespace() {
+                        j += 1;
+                    }
+                    continue;
+                }
+            }
+            j += 1;
+        }
+        Some(j.min(n))
+    };
+    // A bracketed or parenthesised run from i (at the opener): the index after its closer.
+    let close = |i: usize, open: char, shut: char| -> Option<usize> {
+        let (mut depth, mut j, mut quote) = (0, i, None::<char>);
+        while j < n {
+            let ch = c[j];
+            match quote {
+                Some(q) if ch == q => quote = None,
+                Some(_) if ch == '\\' => j += 1,
+                Some(_) => {}
+                None if ch == '"' || ch == '\'' => quote = Some(ch),
+                None if ch == '\\' => j += 1,
+                None if ch == open => depth += 1,
+                None if ch == shut => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(j + 1);
+                    }
+                }
+                None => {}
+            }
+            j += 1;
+        }
+        None
+    };
+    let mut i = 0;
+    let mut compound = false; // something since the last combinator
+    let mut explicit = false; // a > + ~ waiting for its right side
+    let mut empty_part = true;
+    while i < n {
+        let ch = c[i];
+        match ch {
+            _ if ch.is_whitespace() => i += 1,
+            ',' => {
+                if empty_part || explicit {
+                    return true;
+                }
+                empty_part = true;
+                compound = false;
+                i += 1;
+            }
+            '>' | '+' | '~' => {
+                if explicit || !compound {
+                    return true;
+                }
+                explicit = true;
+                compound = false;
+                i += 1;
+            }
+            '*' | '|' => {
+                // Type selectors with namespaces: `*|x`, `|x` are fine; no prefixes are declared.
+                let mut j = if ch == '*' { i + 1 } else { i };
+                if c.get(j) == Some(&'|') && c.get(j + 1) != Some(&'=') {
+                    j += 1;
+                    if c.get(j) == Some(&'*') {
+                        j += 1;
+                    } else {
+                        match ident(j) {
+                            Some(e) => j = e,
+                            None => return true,
+                        }
+                    }
+                } else if ch == '|' {
+                    return true;
+                }
+                i = j;
+                compound = true;
+                explicit = false;
+                empty_part = false;
+            }
+            '#' | '.' => match ident(i + 1) {
+                Some(e) => {
+                    i = e;
+                    compound = true;
+                    explicit = false;
+                    empty_part = false;
+                }
+                None => return true,
+            },
+            '[' => {
+                let Some(e) = close(i, '[', ']') else { return true };
+                let inner: String = c[i + 1..e - 1].iter().collect();
+                if attr_syntax_error(inner.trim()) {
+                    return true;
+                }
+                i = e;
+                compound = true;
+                explicit = false;
+                empty_part = false;
+            }
+            ':' => {
+                let double = c.get(i + 1) == Some(&':');
+                let start = if double { i + 2 } else { i + 1 };
+                let Some(e) = ident(start) else { return true };
+                let name: String = c[start..e].iter().collect::<String>().to_ascii_lowercase();
+                let known = if double { KNOWN_PSEUDO_ELEMENTS.contains(&name.as_str()) } else { KNOWN_PSEUDO_CLASSES.contains(&name.as_str()) };
+                if !known && !name.starts_with('-') {
+                    return true;
+                }
+                i = e;
+                if c.get(i) == Some(&'(') {
+                    let Some(e) = close(i, '(', ')') else { return true };
+                    i = e;
+                }
+                compound = true;
+                explicit = false;
+                empty_part = false;
+            }
+            _ if ident_start(ch) || ch == '-' => {
+                let Some(e) = ident(i) else { return true };
+                i = e;
+                if c.get(i) == Some(&'|') && c.get(i + 1) != Some(&'=') {
+                    return true; // an undeclared namespace prefix
+                }
+                compound = true;
+                explicit = false;
+                empty_part = false;
+            }
+            _ => return true,
+        }
+    }
+    empty_part || explicit
+}
+
+/// An attribute selector's inside: `name`, `ns|name`, then an optional
+/// operator, value and case flag.
+fn attr_syntax_error(s: &str) -> bool {
+    let c: Vec<char> = s.chars().collect();
+    let n = c.len();
+    let name_char = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '-' || !ch.is_ascii();
+    let mut i = 0;
+    let read_name = |i: &mut usize| -> bool {
+        let start = *i;
+        while *i < n && (name_char(c[*i]) || c[*i] == '\\') {
+            if c[*i] == '\\' {
+                *i += 1;
+            }
+            *i += 1;
+        }
+        *i > start && !c[start].is_ascii_digit()
+    };
+    if c.first() == Some(&'*') || c.first() == Some(&'|') {
+        // `*|name` or `|name`.
+        i = if c[0] == '*' { 1 } else { 0 };
+        if c.get(i) != Some(&'|') || c.get(i + 1) == Some(&'=') {
+            return true;
+        }
+        i += 1;
+        if !read_name(&mut i) {
+            return true;
+        }
+    } else {
+        if !read_name(&mut i) {
+            return true;
+        }
+        if c.get(i) == Some(&'|') && c.get(i + 1) != Some(&'=') {
+            return true; // an undeclared namespace prefix
+        }
+    }
+    while i < n && c[i].is_whitespace() {
+        i += 1;
+    }
+    if i == n {
+        return false;
+    }
+    // The operator.
+    if c[i] != '=' {
+        if !matches!(c[i], '~' | '|' | '^' | '$' | '*') || c.get(i + 1) != Some(&'=') {
+            return true;
+        }
+        i += 1;
+    }
+    i += 1;
+    while i < n && c[i].is_whitespace() {
+        i += 1;
+    }
+    if i == n {
+        return true;
+    }
+    // The value: a string or an identifier.
+    if c[i] == '"' || c[i] == '\'' {
+        let q = c[i];
+        i += 1;
+        while i < n && c[i] != q {
+            if c[i] == '\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= n {
+            return false; // an unclosed string ends at the bracket
+        }
+        i += 1;
+    } else {
+        let start = i;
+        if c[i] == '-' {
+            i += 1;
+        }
+        if i < n && c[i].is_ascii_digit() {
+            return true;
+        }
+        while i < n && (name_char(c[i]) || c[i] == '\\') {
+            if c[i] == '\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i == start {
+            return true;
+        }
+    }
+    while i < n && c[i].is_whitespace() {
+        i += 1;
+    }
+    if i < n && matches!(c[i], 'i' | 'I' | 's' | 'S') {
+        i += 1;
+        while i < n && c[i].is_whitespace() {
+            i += 1;
+        }
+    }
+    i != n
+}
+
 fn matches_any(dom: &Dom, id: NodeId, sels: &[css::Selector]) -> bool {
     // A selector of a pseudo-element (::before, ::first-letter) matches no element.
     is_element(dom, id) && sels.iter().any(|s| s.element.is_none() && style::matches(dom, id, s))
@@ -1336,7 +1624,33 @@ fn flush(i: &mut Interp, st: &S) {
 /// A new event object.
 pub fn make_event(i: &mut Interp, st: &S, ty: &str, bubbles: bool, cancelable: bool) -> Value {
     let e = i.obj(Kind::Plain);
-    let proto = st.borrow().protos.as_ref().map(|p| p.event.clone());
+    // The interface the engine's own events have (the prelude's classes, once defined).
+    let iface = match ty {
+        "click" | "dblclick" | "mousedown" | "mouseup" | "mousemove" | "mouseover" | "mouseout" | "mouseenter" | "mouseleave" | "contextmenu" | "auxclick" => "MouseEvent",
+        "keydown" | "keyup" | "keypress" => "KeyboardEvent",
+        "input" | "beforeinput" => "InputEvent",
+        "focus" | "blur" | "focusin" | "focusout" => "FocusEvent",
+        "wheel" => "WheelEvent",
+        "pointerdown" | "pointerup" | "pointermove" | "pointerover" | "pointerout" | "pointerenter" | "pointerleave" | "pointercancel" => "PointerEvent",
+        "hashchange" => "HashChangeEvent",
+        "popstate" => "PopStateEvent",
+        "pageshow" | "pagehide" => "PageTransitionEvent",
+        "submit" => "SubmitEvent",
+        _ => "",
+    };
+    let own = if iface.is_empty() {
+        None
+    } else {
+        let ctor = i.global_obj.borrow().get_own(iface).cloned();
+        match ctor {
+            Some(Slot::Data(Value::Obj(c))) => match c.borrow().get_own("prototype") {
+                Some(Slot::Data(Value::Obj(p))) => Some(p.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let proto = own.or_else(|| st.borrow().protos.as_ref().map(|p| p.event.clone()));
     if let Value::Obj(o) = &e {
         let mut b = o.borrow_mut();
         b.proto = proto;
@@ -1561,13 +1875,17 @@ fn execute(i: &mut Interp, st: &S, id: NodeId) {
                 }
                 ScriptKind::Classic => {
                     let prev = st.borrow_mut().current_script.replace(id);
-                    let r = i.run(&code).map(|_| ());
+                    let r = i.run_at(&code, external.then_some(origin.as_str())).map(|_| ());
                     st.borrow_mut().current_script = prev;
                     r
                 }
             };
             if let Err(e) = r {
                 let place = if external { origin } else { format!("inline script in {origin}") };
+                if std::env::var_os("VOLANT_SCRIPT_ERRORS").is_some() && !external {
+                    eprintln!("--- {place}: {e}\n{}\n---", code.chars().take(400).collect::<String>());
+                    let _ = std::fs::write(format!("/tmp/volant-script-error-{id}.js"), &code);
+                }
                 i.errors.push(format!("{place}: {e}"));
             }
             true
@@ -2228,6 +2546,8 @@ fn install(i: &mut Interp, st: &S) {
     ctor(i, "DocumentFragment", &fragment);
     ctor(i, "Document", &document);
     ctor(i, "Event", &event);
+    ctor(i, "CSSStyleDeclaration", &style_p);
+    ctor(i, "DOMTokenList", &class_list);
     #[rustfmt::skip]
     let node_types = [("ELEMENT_NODE", 1.0), ("ATTRIBUTE_NODE", 2.0), ("TEXT_NODE", 3.0), ("CDATA_SECTION_NODE", 4.0), ("ENTITY_REFERENCE_NODE", 5.0),
         ("ENTITY_NODE", 6.0), ("PROCESSING_INSTRUCTION_NODE", 7.0), ("COMMENT_NODE", 8.0), ("DOCUMENT_NODE", 9.0), ("DOCUMENT_TYPE_NODE", 10.0),
@@ -2825,7 +3145,10 @@ fn install(i: &mut Interp, st: &S) {
     fn query(i: &mut Interp, st: &S, scope: NodeId, sel: &Value, all: bool) -> Res<Value> {
         let text = i.to_str(sel)?;
         let Some(sels) = selector_list(&text) else {
-            // A selector we can't parse matches nothing (rather than throwing, which breaks more pages).
+            if selector_syntax_error(&text) {
+                return i.throw("SyntaxError", &format!("'{text}' is not a valid selector"));
+            }
+            // A valid selector Canard can't match yet matches nothing.
             return Ok(if all { i.array(Vec::new()) } else { Value::Null });
         };
         flush(i, st);
@@ -2840,8 +3163,18 @@ fn install(i: &mut Interp, st: &S) {
         };
         Ok(if all { wrap_list(i, st, found) } else { wrap_opt(i, st, found.first().copied()) })
     }
-    method(i, st, &node, "querySelector", |i, st, id, a| query(i, st, id, &arg(&a, 0), false));
-    method(i, st, &node, "querySelectorAll", |i, st, id, a| query(i, st, id, &arg(&a, 0), true));
+    method(i, st, &node, "querySelector", |i, st, id, a| {
+        if a.is_empty() {
+            return i.throw("TypeError", "querySelector: 1 argument required, but only 0 present.");
+        }
+        query(i, st, id, &arg(&a, 0), false)
+    });
+    method(i, st, &node, "querySelectorAll", |i, st, id, a| {
+        if a.is_empty() {
+            return i.throw("TypeError", "querySelectorAll: 1 argument required, but only 0 present.");
+        }
+        query(i, st, id, &arg(&a, 0), true)
+    });
     // In HTML documents HTML elements match the name lower-cased, others as given.
     method(i, st, &node, "getElementsByTagName", |i, st, id, a| {
         let t = i.to_str(&arg(&a, 0))?.to_string();
@@ -3195,6 +3528,33 @@ fn install(i: &mut Interp, st: &S) {
         |_i, st, id| Ok(str_val(&inner_html(&st.borrow().dom, id))),
         |i, st, id, v| {
             let h = if matches!(v, Value::Null) { "".into() } else { i.to_str(&v)? };
+            // In a script, a style sheet, a textarea or a title the markup is text
+            // (the fragment parser starts in that element's text state).
+            let text_only = {
+                let s = st.borrow();
+                let html_ns = s.dom.ns.get(&id).is_none_or(|n| n.0.as_deref().is_none_or(|u| u == "http://www.w3.org/1999/xhtml"));
+                match s.dom.tag(id) {
+                    Some("script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext") if html_ns => Some(h.to_string()),
+                    Some("textarea" | "title") if html_ns => {
+                        let mut out = String::new();
+                        html::decode_into(&h, &mut out);
+                        Some(out)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(t) = text_only {
+                let mut s = st.borrow_mut();
+                for c in s.dom.children(id).to_vec() {
+                    detach(&mut s.dom, c);
+                }
+                if !t.is_empty() {
+                    let n = new_node(&mut s.dom, Data::Text(t.into()));
+                    let _ = insert(&mut s.dom, id, n, None);
+                }
+                s.generation += 1;
+                return Ok(());
+            }
             let parsed = html::parse_with_scripts(&h);
             let mut s = st.borrow_mut();
             for c in s.dom.children(id).to_vec() {
@@ -3235,7 +3595,10 @@ fn install(i: &mut Interp, st: &S) {
         st,
         &element,
         "innerText",
-        |_i, st, id| Ok(str_val(&st.borrow().dom.text(id))),
+        |i, st, id| {
+            flush(i, st);
+            Ok(str_val(&with_styles(st, |dom, style| inner_text(dom, id, style)).unwrap_or_default()))
+        },
         |i, st, id, v| {
             let t = i.to_str(&v)?;
             set_text(&mut st.borrow_mut().dom, id, &t);
@@ -3273,13 +3636,25 @@ fn install(i: &mut Interp, st: &S) {
         Ok(Value::Undefined)
     });
     method(i, st, &element, "matches", |i, st, id, a| {
+        if a.is_empty() {
+            return i.throw("TypeError", "matches: 1 argument required, but only 0 present.");
+        }
         let text = i.to_str(&arg(&a, 0))?;
+        if selector_list(&text).is_none() && selector_syntax_error(&text) {
+            return i.throw("SyntaxError", &format!("'{text}' is not a valid selector"));
+        }
         flush(i, st);
         let s = st.borrow();
         Ok(Value::Bool(selector_list(&text).map(|sels| matches_any(&s.dom, id, &sels)).unwrap_or(false)))
     });
     method(i, st, &element, "closest", |i, st, id, a| {
+        if a.is_empty() {
+            return i.throw("TypeError", "closest: 1 argument required, but only 0 present.");
+        }
         let text = i.to_str(&arg(&a, 0))?;
+        if selector_list(&text).is_none() && selector_syntax_error(&text) {
+            return i.throw("SyntaxError", &format!("'{text}' is not a valid selector"));
+        }
         flush(i, st);
         let found = {
             let s = st.borrow();
@@ -3810,20 +4185,28 @@ fn install(i: &mut Interp, st: &S) {
         changed(st);
         Ok(Value::Undefined)
     });
-    // Geometry: the engine lays out elsewhere, so these are estimates.
+    // Geometry, from a layout of the document as it is now (made when asked, and kept until it changes).
     let rect = |i: &mut Interp, st: &S, id: NodeId| -> Res<Value> {
-        let (w, h) = {
-            let s = st.borrow();
-            let hidden = closest(&s.dom, id, |d, n| d.attr(n, "hidden").is_some()).is_some();
-            if hidden || !connected(&s.dom, id) {
-                (0.0, 0.0)
-            } else {
-                (s.env.width as f64, 20.0)
+        flush(i, st);
+        let [x, y, w, h] = geometry(st).boxes.get(&id).copied().unwrap_or_default().map(|v| v as f64);
+        let proto = {
+            let c = i.global_obj.borrow().get_own("DOMRect").cloned();
+            match c {
+                Some(Slot::Data(c)) => match i.get(&c, "prototype")? {
+                    Value::Obj(p) => Some(p),
+                    _ => None,
+                },
+                _ => None,
             }
         };
         let o = i.obj(Kind::Plain);
-        for (k, v) in [("x", 0.0), ("y", 0.0), ("left", 0.0), ("top", 0.0), ("width", w), ("height", h), ("right", w), ("bottom", h)] {
-            i.set(&o, k, Value::Num(v))?;
+        if let (Value::Obj(oo), Some(p)) = (&o, proto) {
+            oo.borrow_mut().proto = Some(p);
+        }
+        for (k, v) in [("x", x), ("y", y), ("left", x), ("top", y), ("width", w), ("height", h), ("right", x + w), ("bottom", y + h)] {
+            if let Value::Obj(oo) = &o {
+                oo.borrow_mut().set_own(k, Value::Num(v));
+            }
         }
         Ok(o)
     };
@@ -3832,19 +4215,54 @@ fn install(i: &mut Interp, st: &S) {
         let r = rect(i, st, id)?;
         Ok(i.array(vec![r]))
     });
-    for (prop, which) in [("offsetWidth", 0), ("clientWidth", 0), ("scrollWidth", 0), ("offsetHeight", 1), ("clientHeight", 1), ("scrollHeight", 1)] {
-        getter(i, st, &element, prop, move |_i, st, id| {
-            let s = st.borrow();
-            let hidden = closest(&s.dom, id, |d, n| d.attr(n, "hidden").is_some()).is_some() || !connected(&s.dom, id);
-            Ok(Value::Num(if hidden { 0.0 } else if which == 0 { s.env.width as f64 } else { 20.0 }))
+    for (prop, which) in [("offsetWidth", 0), ("clientWidth", 2), ("scrollWidth", 4), ("offsetHeight", 1), ("clientHeight", 3), ("scrollHeight", 5)] {
+        getter(i, st, &element, prop, move |i, st, id| {
+            flush(i, st);
+            let g = geometry(st);
+            let root = st.borrow().dom.tag(id) == Some("html");
+            // The root element's client box is the viewport.
+            if root && (which == 2 || which == 3) {
+                let s = st.borrow();
+                return Ok(Value::Num(if which == 2 { s.env.width as f64 } else { s.env.height as f64 }));
+            }
+            let [_, _, w, h] = g.boxes.get(&id).copied().unwrap_or_default();
+            let v = match which {
+                0 | 2 => w,
+                1 | 3 => h,
+                4 => g.extents.get(&id).map_or(w, |e| e[0].max(w)),
+                _ => g.extents.get(&id).map_or(h, |e| e[1].max(h)),
+            };
+            // client* leave out the borders.
+            let v = if which == 2 || which == 3 {
+                let side = |p: &str| computed(st, id, p).trim_end_matches("px").parse::<f32>().unwrap_or(0.0);
+                let b = if which == 2 { side("border-left-width") + side("border-right-width") } else { side("border-top-width") + side("border-bottom-width") };
+                (v - b).max(0.0)
+            } else {
+                v
+            };
+            Ok(Value::Num(v.round() as f64))
         });
     }
-    for prop in ["offsetTop", "offsetLeft", "clientTop", "clientLeft", "scrollTop", "scrollLeft"] {
+    for (prop, which) in [("offsetTop", 1), ("offsetLeft", 0)] {
+        getter(i, st, &element, prop, move |i, st, id| {
+            flush(i, st);
+            let g = geometry(st);
+            let Some(b) = g.boxes.get(&id).copied() else { return Ok(Value::Num(0.0)) };
+            let parent = offset_parent(st, id);
+            let base = parent.filter(|&p| st.borrow().dom.tag(p) != Some("body")).and_then(|p| g.boxes.get(&p).copied()).unwrap_or_default();
+            Ok(Value::Num((b[which] - base[which]).round() as f64))
+        });
+    }
+    for (prop, side) in [("clientTop", "border-top-width"), ("clientLeft", "border-left-width")] {
+        getter(i, st, &element, prop, move |_i, st, id| Ok(Value::Num(computed(st, id, side).trim_end_matches("px").parse::<f64>().unwrap_or(0.0).round())));
+    }
+    for prop in ["scrollTop", "scrollLeft"] {
         accessor(i, st, &element, prop, |_i, _st, _id| Ok(Value::Num(0.0)), |_i, _st, _id, _v| Ok(()));
     }
-    getter(i, st, &element, "offsetParent", |i, st, _id| {
-        let body = st.borrow().dom.find("body");
-        Ok(wrap_opt(i, st, body))
+    getter(i, st, &element, "offsetParent", |i, st, id| {
+        flush(i, st);
+        let p = offset_parent(st, id);
+        Ok(wrap_opt(i, st, p))
     });
     for name in ["scrollIntoView", "scrollTo", "scrollBy", "scroll", "setPointerCapture", "releasePointerCapture", "requestFullscreen"] {
         method(i, st, &element, name, |_i, _st, _id, _a| Ok(Value::Undefined));
@@ -4118,7 +4536,16 @@ fn install(i: &mut Interp, st: &S) {
         made_by(st, doc, n);
         Ok(wrap(i, st, n))
     });
-    method(i, st, &document, "createEvent", |i, st, _id, _a| Ok(make_event(i, st, "", false, false)));
+    method(i, st, &document, "createEvent", |i, st, _id, a| {
+        if a.is_empty() {
+            return i.throw("TypeError", "createEvent: 1 argument required, but only 0 present.");
+        }
+        let f = i.global_obj.borrow().get_own("__createEvent").cloned();
+        match f {
+            Some(Slot::Data(f)) if Interp::is_callable(&f) => i.call(&f, Value::Undefined, vec![arg(&a, 0)]),
+            _ => Ok(make_event(i, st, "", false, false)),
+        }
+    });
     method(i, st, &document, "importNode", |i, st, doc, a| {
         let Some(n) = node_of(&arg(&a, 0)) else { return i.throw("TypeError", "the argument is not a Node") };
         if matches!(st.borrow().dom.nodes[n as usize].data, Data::Document) {
@@ -4397,6 +4824,11 @@ fn install(i: &mut Interp, st: &S) {
         Ok(str_val(&computed(&st2, id, &prop)))
     });
     hook(i, "__computed", f);
+    let f = i.native(move |i, _t, _a| {
+        let names: Vec<Value> = COMPUTED_PROPS.iter().map(|p| str_val(p)).collect();
+        Ok(i.array(names))
+    });
+    hook(i, "__computedNames", f);
 
     // Members are defined once, on Element's and Node's prototypes; each
     // interface's prototype also holds its own (the same functions), so code that
@@ -4413,7 +4845,12 @@ fn install(i: &mut Interp, st: &S) {
     for (name, members) in INTERFACE_MEMBERS {
         let proto = ifaces.iter().find(|(n, _)| n == name).map(|(_, p)| p.clone());
         if let Some(p) = proto {
-            own(&[&element, &html_element], &p, members);
+            // HTMLElement's members shadow Element's, except template's own `content`.
+            if *name == "HTMLTemplateElement" {
+                own(&[&element, &html_element], &p, members);
+            } else {
+                own(&[&html_element, &element], &p, members);
+            }
         }
     }
     own(&[&node, &element], &document, DOCUMENT_MEMBERS);
@@ -4528,6 +4965,399 @@ const DOCUMENT_MEMBERS: &[&str] = &[
     "createComment", "createDocumentFragment", "createEvent", "importNode", "adoptNode",
 ];
 
+/// Where everything was laid out, for scripts: each node's border box (x, y,
+/// width, height; an inline element's spans its pieces) and how far its
+/// content reaches (scrollWidth and scrollHeight).
+#[derive(Default)]
+struct Geometry {
+    generation: u64,
+    boxes: HashMap<NodeId, [f32; 4]>,
+    extents: HashMap<NodeId, [f32; 2]>,
+}
+
+/// The layout scripts see: made again when the document has changed since,
+/// unless the page has spent too long relaying out this second.
+fn geometry(st: &S) -> Rc<Geometry> {
+    let now = std::time::Instant::now();
+    {
+        let mut s = st.borrow_mut();
+        if let Some(g) = &s.geometry {
+            if g.generation == s.generation {
+                return g.clone();
+            }
+        }
+        if now.duration_since(s.layout_spent.0) > std::time::Duration::from_secs(1) {
+            s.layout_spent = (now, std::time::Duration::ZERO);
+        }
+        if s.layout_spent.1 > std::time::Duration::from_millis(250) {
+            if let Some(g) = &s.geometry {
+                return g.clone();
+            }
+        }
+    }
+    let s = st.borrow();
+    let (snap, _) = snapshot_of(&s);
+    let mut sheets = crate::style_sheets(&snap.dom);
+    sheets.extend(s.sheets.iter().filter(|x| !x.is_empty()).cloned());
+    let styled = style::compute(&snap.dom, &sheets, &s.env);
+    let fonts = s.fonts.clone();
+    let page = match &fonts {
+        Some(f) => crate::layout::layout(&snap.dom, &styled, s.env.width, s.env.height, &**f, &crate::NoImages),
+        None => crate::layout::layout(&snap.dom, &styled, s.env.width, s.env.height, &crate::ApproxFonts, &crate::NoImages),
+    };
+    let mut own: HashMap<NodeId, [f32; 4]> = HashMap::new();
+    let mut inner: HashMap<NodeId, [f32; 4]> = HashMap::new();
+    let union = |m: &mut HashMap<NodeId, [f32; 4]>, n: NodeId, h: &crate::layout::Hit| {
+        let e = m.entry(n).or_insert([h.x, h.y, h.x + h.w, h.y + h.h]);
+        *e = [e[0].min(h.x), e[1].min(h.y), e[2].max(h.x + h.w), e[3].max(h.y + h.h)];
+    };
+    for h in &page.hits {
+        let Some(&n) = snap.map.get(h.node as usize) else { continue };
+        union(&mut own, n, h);
+        // Ancestors: what their content covers.
+        let mut p = s.dom.parent(n);
+        let mut guard = 0;
+        while p != ROOT && guard < 10_000 {
+            union(&mut inner, p, h);
+            let q = s.dom.parent(p);
+            if q == p {
+                break;
+            }
+            p = q;
+            guard += 1;
+        }
+    }
+    let mut g = Geometry { generation: s.generation, ..Default::default() };
+    for (&n, b) in &inner {
+        if !own.contains_key(&n) {
+            g.boxes.insert(n, [b[0], b[1], b[2] - b[0], b[3] - b[1]]);
+        }
+    }
+    for (&n, b) in &own {
+        g.boxes.insert(n, [b[0], b[1], b[2] - b[0], b[3] - b[1]]);
+        if let Some(c) = inner.get(&n) {
+            g.extents.insert(n, [c[2] - b[0], c[3] - b[1]]);
+        }
+    }
+    drop(s);
+    let g = Rc::new(g);
+    let mut s = st.borrow_mut();
+    s.layout_spent.1 += now.elapsed();
+    s.geometry = Some(g.clone());
+    g
+}
+
+/// An element's offsetParent: its nearest positioned ancestor (or a table
+/// cell or table), else `<body>`; none for the root, `<body>`, fixed boxes
+/// and elements that aren't rendered.
+fn offset_parent(st: &S, id: NodeId) -> Option<NodeId> {
+    let (connected_, tag) = {
+        let s = st.borrow();
+        (connected(&s.dom, id), s.dom.tag(id).map(str::to_string))
+    };
+    if !connected_ || matches!(tag.as_deref(), Some("html" | "body")) {
+        return None;
+    }
+    with_styles(st, |dom, style| {
+        let own = style(id);
+        if own.display == style::Display::None || own.position == style::Position::Fixed {
+            return None;
+        }
+        let mut p = dom.parent(id);
+        while p != ROOT {
+            if dom.tag(p).is_some() {
+                let ps = style(p);
+                if ps.display == style::Display::None {
+                    return None;
+                }
+                if ps.position != style::Position::Static || matches!(dom.tag(p), Some("td" | "th" | "table" | "body")) {
+                    return Some(p);
+                }
+            }
+            let q = dom.parent(p);
+            if q == p {
+                break;
+            }
+            p = q;
+        }
+        None
+    })
+    .flatten()
+}
+
+/// `innerText`: the text as rendered, from the engine's cascade. Elements
+/// that don't render are skipped (display: none) or silent (visibility:
+/// hidden), white space collapses unless `white-space` keeps it, block-level
+/// boxes and table rows break lines, cells are tab-separated, replaced
+/// elements count as content, and `text-transform` applies. An element that
+/// isn't rendered itself gives its `textContent`.
+fn inner_text(dom: &Dom, id: NodeId, style: &mut dyn FnMut(NodeId) -> style::Style) -> String {
+    use style::{Display, Float, Position, Space, Transform};
+    // Not being rendered (detached, or display: none on it or an ancestor): textContent.
+    let mut at = id;
+    loop {
+        if dom.tag(at).is_some() && style(at).display == Display::None {
+            return dom.text(id);
+        }
+        let p = dom.parent(at);
+        if p == at {
+            if at != ROOT {
+                return dom.text(id);
+            }
+            break;
+        }
+        at = p;
+    }
+    enum Piece {
+        /// Collapsible text.
+        Text(String),
+        /// Preserved text (pre, pre-wrap, a `<br>`'s newline).
+        Raw(String),
+        /// A required line break count (the largest wins).
+        Break(u8),
+        /// A replaced element: content of its own that keeps the spaces beside it.
+        Atom,
+        /// The edges of an inline-block: spaces just inside them go.
+        Open,
+        Close,
+        /// A `<br>`: the spaces before it go.
+        Br,
+    }
+    const REPLACED: &[&str] = &["img", "canvas", "video", "audio", "iframe", "embed", "object", "input", "textarea", "meter", "progress"];
+    struct Walk<'a> {
+        dom: &'a Dom,
+        style: &'a mut dyn FnMut(NodeId) -> style::Style,
+        out: Vec<Piece>,
+    }
+    impl Walk<'_> {
+        fn text(&mut self, t: &str, ps: &style::Style) {
+            if ps.hidden {
+                return;
+            }
+            // White space directly in a table, row group or row isn't rendered.
+            if matches!(ps.display, Display::Table | Display::TableRowGroup | Display::TableRow) && t.bytes().all(|b| b.is_ascii_whitespace()) {
+                return;
+            }
+            let t = match ps.transform {
+                Transform::None => t.to_string(),
+                Transform::Upper => t.to_uppercase(),
+                Transform::Lower => t.to_lowercase(),
+                Transform::Capitalize => {
+                    let mut s = String::with_capacity(t.len());
+                    let mut start = true;
+                    for c in t.chars() {
+                        if start && c.is_alphanumeric() {
+                            s.extend(c.to_uppercase());
+                        } else {
+                            s.push(c);
+                        }
+                        start = c.is_whitespace();
+                    }
+                    s
+                }
+            };
+            if matches!(ps.space, Space::Pre | Space::PreWrap) {
+                self.out.push(Piece::Raw(t.replace("\r\n", "\n").replace('\r', "\n")));
+                return;
+            }
+            let mut s = String::with_capacity(t.len());
+            let mut space = false;
+            for c in t.chars() {
+                if matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c') {
+                    space = true;
+                } else {
+                    if space {
+                        s.push(' ');
+                    }
+                    space = false;
+                    s.push(c);
+                }
+            }
+            if space {
+                s.push(' ');
+            }
+            self.out.push(Piece::Text(s));
+        }
+
+        fn element(&mut self, n: NodeId, ps: &style::Style, blockify: bool) {
+            let mut s = (self.style)(n);
+            let dom = self.dom;
+            let tag = dom.tag(n).unwrap_or("").to_ascii_lowercase();
+            // Options render as blocks (the engine draws <select> natively, so hides them).
+            if matches!(tag.as_str(), "option" | "optgroup") && s.display == Display::None {
+                s.display = Display::Block;
+            }
+            // <rp> doesn't render unless made a block.
+            if tag == "rp" && s.display == Display::Inline {
+                return;
+            }
+            if s.display == Display::None {
+                return;
+            }
+            let block = !s.inline_level && matches!(s.display, Display::Block | Display::ListItem | Display::Flex | Display::Grid | Display::Table | Display::TableCaption);
+            let block = block || s.float != Float::None || matches!(s.position, Position::Absolute | Position::Fixed) || (blockify && !matches!(s.display, Display::TableCell | Display::TableRow));
+            let visible = !s.hidden;
+            if tag == "br" {
+                if visible {
+                    self.out.push(Piece::Br);
+                }
+                return;
+            }
+            if REPLACED.contains(&tag.as_str()) && dom.nodes[n as usize].parent != n {
+                let b = if block && visible { 1 } else { 0 };
+                self.out.push(Piece::Break(b));
+                self.out.push(Piece::Atom);
+                self.out.push(Piece::Break(b));
+                return;
+            }
+            let lines = if !visible { 0 } else if tag == "p" { 2 } else if block || s.display == Display::TableRow && !s.inline_level { 1 } else { 0 };
+            let atomic = matches!(s.display, Display::InlineBlock) || (s.inline_level && matches!(s.display, Display::Flex | Display::Grid | Display::Table));
+            if lines > 0 {
+                self.out.push(Piece::Break(lines));
+            }
+            // Cells in a row are tab-separated.
+            if s.display == Display::TableCell && visible {
+                let p = dom.parent(n);
+                let earlier = dom.children(p).iter().take_while(|&&c| c != n).any(|&c| dom.tag(c).is_some() && (self.style)(c).display == Display::TableCell);
+                if earlier {
+                    self.out.push(Piece::Raw("\t".into()));
+                }
+            }
+            if atomic {
+                self.out.push(Piece::Atom);
+                self.out.push(Piece::Open);
+            }
+            let flexy = matches!(s.display, Display::Flex | Display::Grid);
+            // An unopened <details> shows only its first summary.
+            let closed_details = tag == "details" && dom.attr(n, "open").is_none();
+            let summary = if closed_details { dom.children(n).iter().copied().find(|&c| dom.tag(c).is_some_and(|t| t.eq_ignore_ascii_case("summary"))) } else { None };
+            for &c in dom.children(n) {
+                if closed_details && Some(c) != summary {
+                    continue;
+                }
+                self.node(c, &s, flexy);
+            }
+            if atomic {
+                self.out.push(Piece::Close);
+                self.out.push(Piece::Atom);
+            }
+            if lines > 0 {
+                self.out.push(Piece::Break(lines));
+            }
+            let _ = ps;
+        }
+
+        fn node(&mut self, n: NodeId, ps: &style::Style, blockify: bool) {
+            match &self.dom.nodes[n as usize].data {
+                html::Data::Text(t) => self.text(t, ps),
+                html::Data::Element { .. } => self.element(n, ps, blockify),
+                _ => {}
+            }
+        }
+    }
+    let top = style(id);
+    let flexy = matches!(top.display, Display::Flex | Display::Grid);
+    let mut w = Walk { dom, style, out: Vec::new() };
+    let tag = dom.tag(id).unwrap_or("").to_ascii_lowercase();
+    if !REPLACED.contains(&tag.as_str()) || tag == "textarea" && false {
+        for &c in dom.children(id) {
+            w.node(c, &top, flexy);
+        }
+    }
+    // Join the pieces.
+    let mut out = String::new();
+    let mut pending: u8 = 0;
+    let mut keep = 0usize; // spaces before this are not collapsible
+    let mut line_start = true;
+    let mut after_atom = false;
+    let mut marks: Vec<usize> = Vec::new();
+    let trim = |out: &mut String, floor: usize| {
+        while out.len() > floor && out.ends_with(' ') {
+            out.pop();
+        }
+    };
+    let flush = |out: &mut String, pending: &mut u8, keep: &mut usize, line_start: &mut bool| {
+        if *pending > 0 {
+            let k = *keep;
+            trim(out, k);
+            if !out.is_empty() {
+                for _ in 0..*pending {
+                    out.push('\n');
+                }
+                *keep = out.len();
+            }
+            *pending = 0;
+            *line_start = true;
+        }
+    };
+    for p in w.out {
+        match p {
+            Piece::Break(n) => {
+                pending = pending.max(n);
+                if n > 0 {
+                    after_atom = false;
+                }
+            }
+            Piece::Text(t) => {
+                if t.is_empty() {
+                    continue;
+                }
+                let had_pending = pending > 0;
+                // Collapsible space where a line starts is nothing.
+                if t == " " && !after_atom && (had_pending || line_start || out.is_empty() || (out.len() > keep && out.ends_with(' '))) {
+                    continue;
+                }
+                flush(&mut out, &mut pending, &mut keep, &mut line_start);
+                let strip = !after_atom && (had_pending || line_start || out.is_empty() || (out.len() > keep && out.ends_with(' ')));
+                let t = if strip { t.strip_prefix(' ').unwrap_or(&t) } else { t.as_str() };
+                if t.is_empty() {
+                    continue;
+                }
+                out.push_str(t);
+                line_start = false;
+                after_atom = false;
+            }
+            Piece::Raw(t) => {
+                if t.is_empty() {
+                    continue;
+                }
+                flush(&mut out, &mut pending, &mut keep, &mut line_start);
+                out.push_str(&t);
+                keep = out.len();
+                line_start = false;
+                after_atom = false;
+            }
+            Piece::Br => {
+                flush(&mut out, &mut pending, &mut keep, &mut line_start);
+                trim(&mut out, keep);
+                out.push('\n');
+                keep = out.len();
+                line_start = true;
+                after_atom = false;
+            }
+            Piece::Atom => {
+                if pending > 0 {
+                    trim(&mut out, keep);
+                }
+                keep = out.len();
+                after_atom = true;
+                line_start = false;
+            }
+            Piece::Open => {
+                marks.push(out.len());
+                line_start = true;
+                after_atom = false;
+            }
+            Piece::Close => {
+                let m = marks.pop().unwrap_or(0);
+                trim(&mut out, m.max(keep));
+            }
+        }
+    }
+    trim(&mut out, keep);
+    out
+}
+
 /// insertAdjacent*: beforebegin, afterbegin, beforeend, afterend.
 fn adjacent(dom: &mut Dom, id: NodeId, pos: &str, n: NodeId) {
     let parent = dom.nodes[id as usize].parent;
@@ -4554,11 +5384,14 @@ fn adjacent(dom: &mut Dom, id: NodeId, pos: &str, n: NodeId) {
 }
 
 fn computed(st: &S, id: NodeId, prop: &str) -> String {
+    with_styles(st, |dom, style| if (id as usize) < dom.nodes.len() { computed_value(&style(id), prop).unwrap_or_default() } else { String::new() }).unwrap_or_default()
+}
+
+/// Runs `f` with the document and a function from element to computed style
+/// (cached until the document or its style sheets change).
+fn with_styles<R>(st: &S, f: impl FnOnce(&Dom, &mut dyn FnMut(NodeId) -> style::Style) -> R) -> Option<R> {
     let mut s = st.borrow_mut();
     let generation = s.generation;
-    if (id as usize) >= s.dom.nodes.len() {
-        return String::new();
-    }
     if s.computed.as_ref().map(|c| c.generation) != Some(generation) {
         use std::hash::{Hash, Hasher};
         let mut all = crate::style_sheets(&s.dom);
@@ -4575,30 +5408,243 @@ fn computed(st: &S, id: NodeId, prop: &str) -> String {
         s.computed = Some(Computed { generation, sheets: key, cascade, memo: HashMap::new() });
     }
     let state = &mut *s;
-    let Some(c) = state.computed.as_mut() else { return String::new() };
-    let st = &c.cascade.clone().style_of(&state.dom, id, &mut c.memo);
-    let color = |c: style::Color| if c.a == 255 { format!("rgb({}, {}, {})", c.r, c.g, c.b) } else { format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a as f32 / 255.0) };
-    let len = |l: style::Len| match l {
-        style::Len::Px(v) => format!("{v}px"),
-        style::Len::Pct(p) => format!("{p}%"),
-        _ => "auto".into(),
-    };
-    match prop {
-        "display" => format!("{:?}", st.display).to_ascii_lowercase().replace("listitem", "list-item").replace("inlineblock", "inline-block"),
-        "visibility" => (if st.hidden { "hidden" } else { "visible" }).into(),
-        "opacity" => format!("{}", st.opacity),
-        "color" => color(st.color),
-        "background-color" | "backgroundColor" => color(st.background),
-        "font-size" | "fontSize" => format!("{}px", st.font_size),
-        "font-weight" | "fontWeight" => format!("{}", st.weight),
-        "line-height" | "lineHeight" => format!("{}px", st.line_height),
-        "position" => format!("{:?}", st.position).to_ascii_lowercase(),
-        "width" => len(st.width),
-        "height" => len(st.height),
-        "overflow" => (if st.overflow_clip { "hidden" } else { "visible" }).into(),
-        _ => String::new(),
-    }
+    let c = state.computed.as_mut()?;
+    let cascade = c.cascade.clone();
+    let memo = &mut c.memo;
+    let dom = &state.dom;
+    let mut style = |n: NodeId| cascade.style_of(dom, n, memo);
+    Some(f(dom, &mut style))
 }
+
+/// A property's computed value as `getComputedStyle` gives it (None for
+/// properties Canard doesn't know).
+fn computed_value(st: &style::Style, prop: &str) -> Option<String> {
+    use style::{AlignItems, BorderStyle, Display, Justify, Len, Position};
+    if let Some(name) = prop.strip_prefix("--") {
+        return Some(st.vars.get(&format!("--{name}")).or_else(|| st.vars.get(name)).map(|v| v.trim().to_string()).unwrap_or_default());
+    }
+    // camelCase names too (`fontSize`, `WebkitTransform`).
+    let kebab: String;
+    let prop = if prop.bytes().any(|b| b.is_ascii_uppercase()) {
+        let mut k = String::new();
+        for (i, c) in prop.chars().enumerate() {
+            if c.is_ascii_uppercase() {
+                if i > 0 {
+                    k.push('-');
+                }
+                k.push(c.to_ascii_lowercase());
+            } else {
+                k.push(c);
+            }
+        }
+        kebab = if k.starts_with("webkit-") || k.starts_with("moz-") { format!("-{k}") } else { k };
+        kebab.as_str()
+    } else {
+        prop
+    };
+    let prop = prop.strip_prefix("-webkit-").unwrap_or(prop);
+    let color = |c: style::Color| if c.a == 255 { format!("rgb({}, {}, {})", c.r, c.g, c.b) } else { format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, (c.a as f32 / 255.0 * 1000.0).round() / 1000.0) };
+    let num = |v: f32| {
+        let r = (v * 1000.0).round() / 1000.0;
+        if r == r.trunc() { format!("{}", r as i64) } else { format!("{r}") }
+    };
+    let px = |v: f32| format!("{}px", num(v));
+    let len = |l: Len, auto: &str| match l {
+        Len::Px(v) => px(v),
+        Len::Pct(p) => format!("{}%", num(p)),
+        Len::Mix(v, p) => format!("calc({}% + {})", num(p), px(v)),
+        Len::Auto => auto.to_string(),
+    };
+    let side = |name: &str| ["top", "right", "bottom", "left"].iter().position(|s| *s == name);
+    let bstyle = |b: BorderStyle| format!("{b:?}").to_ascii_lowercase();
+    let align = |a: AlignItems| match a {
+        AlignItems::Stretch => "stretch",
+        AlignItems::Start => "flex-start",
+        AlignItems::Center => "center",
+        AlignItems::End => "flex-end",
+        AlignItems::Baseline => "baseline",
+        AlignItems::LastBaseline => "last baseline",
+    };
+    let display = || -> String {
+        if st.contents {
+            return "contents".into();
+        }
+        if st.flow_root && st.display == Display::Block {
+            return "flow-root".into();
+        }
+        match st.display {
+            Display::Flex if st.inline_level => "inline-flex".into(),
+            Display::Grid if st.inline_level => "inline-grid".into(),
+            Display::Table if st.inline_level => "inline-table".into(),
+            Display::ListItem => "list-item".into(),
+            Display::InlineBlock => "inline-block".into(),
+            Display::TableRowGroup => match st.table_section {
+                1 => "table-header-group".into(),
+                2 => "table-footer-group".into(),
+                _ => "table-row-group".into(),
+            },
+            Display::TableRow => "table-row".into(),
+            Display::TableCell => "table-cell".into(),
+            Display::TableCaption => "table-caption".into(),
+            Display::TableColumn => "table-column".into(),
+            Display::TableColumnGroup => "table-column-group".into(),
+            d => format!("{d:?}").to_ascii_lowercase(),
+        }
+    };
+    let family = || match st.family {
+        style::Family::Face(i) => crate::fonts::face_info(i).map(|(n, _)| if n.contains(' ') { format!("\"{n}\"") } else { n }).unwrap_or_else(|| "sans-serif".into()),
+        style::Family::Serif => "serif".into(),
+        style::Family::Mono => "monospace".into(),
+        style::Family::Sans => "sans-serif".into(),
+    };
+    let overflow = || (if st.overflow_clip { "hidden" } else { "visible" }).to_string();
+    let transform = || match st.translate.or(st.translate_own) {
+        Some((Len::Px(x), Len::Px(y))) if x != 0.0 || y != 0.0 => format!("matrix(1, 0, 0, 1, {}, {})", num(x), num(y)),
+        _ => "none".to_string(),
+    };
+    Some(match prop {
+        "display" => display(),
+        "visibility" => (if st.hidden { "hidden" } else { "visible" }).into(),
+        "opacity" => num(st.opacity),
+        "color" => color(st.color),
+        "background-color" => color(st.background),
+        "background-image" => match &st.bg {
+            Some(b) if !b.images.is_empty() => b.images.iter().map(|u| if u.is_empty() { "none".to_string() } else if u.contains('(') { u.clone() } else { format!("url(\"{u}\")") }).collect::<Vec<_>>().join(", "),
+            _ => "none".into(),
+        },
+        "font-size" => px(st.font_size),
+        "font-weight" => st.weight.to_string(),
+        "font-style" => (if st.italic { "italic" } else { "normal" }).into(),
+        "font-family" => family(),
+        "line-height" => px(st.line_height),
+        "letter-spacing" => "normal".into(),
+        "word-spacing" => len(st.word_spacing, "0px"),
+        "text-indent" => len(st.indent, "0px"),
+        "text-align" => format!("{:?}", st.align).to_ascii_lowercase().replace("left", "start"),
+        "text-transform" => match st.transform {
+            style::Transform::None => "none",
+            style::Transform::Upper => "uppercase",
+            style::Transform::Lower => "lowercase",
+            style::Transform::Capitalize => "capitalize",
+        }
+        .into(),
+        "text-decoration" | "text-decoration-line" => match (st.underline, st.strike) {
+            (false, false) => "none".into(),
+            (true, false) => "underline".into(),
+            (false, true) => "line-through".into(),
+            (true, true) => "underline line-through".into(),
+        },
+        "white-space" => match st.space {
+            style::Space::Normal => "normal",
+            style::Space::Pre => "pre",
+            style::Space::PreWrap => "pre-wrap",
+            style::Space::NoWrap => "nowrap",
+        }
+        .into(),
+        "word-break" => (if st.break_all { "break-all" } else if st.keep_all { "keep-all" } else { "normal" }).into(),
+        "overflow-wrap" | "word-wrap" => (if st.wrap_anywhere { "anywhere" } else if st.break_words { "break-word" } else { "normal" }).into(),
+        "vertical-align" => format!("{:?}", st.valign).to_ascii_lowercase().replace("texttop", "text-top").replace("textbottom", "text-bottom"),
+        "list-style-type" => format!("{:?}", st.list).to_ascii_lowercase(),
+        "direction" => "ltr".into(),
+        "writing-mode" => "horizontal-tb".into(),
+        "position" => match st.position {
+            Position::Static => "static",
+            Position::Relative => "relative",
+            Position::Absolute => "absolute",
+            Position::Fixed => "fixed",
+            Position::Sticky => "sticky",
+        }
+        .into(),
+        "top" | "right" | "bottom" | "left" => len(st.inset[side(prop)?], "auto"),
+        "z-index" => st.z_index.map(|z| z.to_string()).unwrap_or_else(|| "auto".into()),
+        "float" | "css-float" => format!("{:?}", st.float).to_ascii_lowercase(),
+        "clear" => format!("{:?}", st.clear).to_ascii_lowercase(),
+        "width" => len(st.width, "auto"),
+        "height" => len(st.height, "auto"),
+        "min-width" => len(st.min_width, "auto"),
+        "min-height" => len(st.min_height, "auto"),
+        "max-width" => len(st.max_width, "none"),
+        "max-height" => len(st.max_height, "none"),
+        "box-sizing" => (if st.border_box { "border-box" } else { "content-box" }).into(),
+        "overflow" | "overflow-x" | "overflow-y" => overflow(),
+        "transform" => transform(),
+        "border-radius" | "border-top-left-radius" | "border-top-right-radius" | "border-bottom-left-radius" | "border-bottom-right-radius" => len(st.radius, "0px"),
+        "border-collapse" => (if st.border_collapse { "collapse" } else { "separate" }).into(),
+        "border-spacing" => format!("{} {}", px(st.border_spacing.0), px(st.border_spacing.1)),
+        "border-width" => px(st.border_width[0]),
+        "border-style" => bstyle(st.border_style[0]),
+        "border-color" => color(st.border_color[0]),
+        "flex-direction" => match (st.column, st.reverse) {
+            (false, false) => "row",
+            (false, true) => "row-reverse",
+            (true, false) => "column",
+            (true, true) => "column-reverse",
+        }
+        .into(),
+        "flex-wrap" => (if st.wrap { "wrap" } else { "nowrap" }).into(),
+        "flex-grow" => num(st.grow),
+        "flex-shrink" => num(st.shrink),
+        "flex-basis" => len(st.basis, "auto"),
+        "flex" => format!("{} {} {}", num(st.grow), num(st.shrink), len(st.basis, "auto")),
+        "order" => st.order.to_string(),
+        "justify-content" => match st.justify {
+            Justify::Start => "normal",
+            Justify::Center => "center",
+            Justify::End => "flex-end",
+            Justify::Between => "space-between",
+            Justify::Around => "space-around",
+            Justify::Evenly => "space-evenly",
+        }
+        .into(),
+        "align-items" => (if st.align_items == AlignItems::Stretch { "normal" } else { align(st.align_items) }).into(),
+        "align-self" => st.align_self.map(align).unwrap_or("auto").into(),
+        "align-content" => format!("{:?}", st.align_content).to_ascii_lowercase().replace("between", "space-between").replace("around", "space-around").replace("evenly", "space-evenly").replace("stretch", "normal"),
+        "row-gap" => if st.row_gap == 0.0 { "normal".into() } else { px(st.row_gap) },
+        "column-gap" => if st.column_gap == 0.0 { "normal".into() } else { px(st.column_gap) },
+        "gap" => format!("{} {}", if st.row_gap == 0.0 { "normal".into() } else { px(st.row_gap) }, if st.column_gap == 0.0 { "normal".into() } else { px(st.column_gap) }),
+        "content" => st.content.clone().unwrap_or_else(|| "normal".into()),
+        "object-fit" => format!("{:?}", st.object_fit).to_ascii_lowercase().replace("scaledown", "scale-down"),
+        "cursor" | "pointer-events" | "user-select" | "touch-action" | "will-change" | "appearance" => "auto".into(),
+        "transition-duration" | "animation-duration" | "transition-delay" | "animation-delay" => "0s".into(),
+        "transition-property" => "all".into(),
+        "transition" => "all 0s ease 0s".into(),
+        "animation-name" | "filter" | "backdrop-filter" | "box-shadow" | "text-shadow" | "clip-path" | "mask-image" | "outline-style" | "perspective" => "none".into(),
+        "outline-width" => "0px".into(),
+        "outline-color" => color(st.color),
+        "visibility-hidden" => return None,
+        p => {
+            // The four sides of margin, padding and border.
+            let (head, rest) = p.split_once('-')?;
+            match head {
+                "margin" => len(st.margin[side(rest)?], "auto"),
+                "padding" => len(st.padding[side(rest)?], "0px"),
+                "border" => {
+                    let (s, what) = rest.split_once('-')?;
+                    let k = side(s)?;
+                    match what {
+                        "width" => px(if st.border_style[k].visible() { st.border_width[k] } else { 0.0 }),
+                        "style" => bstyle(st.border_style[k]),
+                        "color" => color(st.border_color[k]),
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            }
+        }
+    })
+}
+
+/// The properties a computed style lists (`length`, `item()`, iteration).
+const COMPUTED_PROPS: &[&str] = &[
+    "align-content", "align-items", "align-self", "background-color", "background-image", "border-bottom-color", "border-bottom-style", "border-bottom-width",
+    "border-collapse", "border-left-color", "border-left-style", "border-left-width", "border-right-color", "border-right-style", "border-right-width",
+    "border-spacing", "border-top-color", "border-top-style", "border-top-width", "bottom", "box-sizing", "clear", "color", "column-gap", "content",
+    "cursor", "direction", "display", "flex-basis", "flex-direction", "flex-grow", "flex-shrink", "flex-wrap", "float", "font-family", "font-size",
+    "font-style", "font-weight", "height", "justify-content", "left", "letter-spacing", "line-height", "list-style-type", "margin-bottom", "margin-left",
+    "margin-right", "margin-top", "max-height", "max-width", "min-height", "min-width", "object-fit", "opacity", "order", "overflow-x", "overflow-y",
+    "padding-bottom", "padding-left", "padding-right", "padding-top", "pointer-events", "position", "right", "row-gap", "text-align", "text-decoration-line",
+    "text-indent", "text-transform", "top", "transform", "vertical-align", "visibility", "white-space", "width", "word-break", "word-spacing", "z-index",
+];
 
 // ------------------------------------------------------------------ the runtime
 
@@ -4698,6 +5744,9 @@ impl Runtime {
             url: url.to_string(),
             env,
             sheets: Vec::new(),
+            fonts: None,
+            geometry: None,
+            layout_spent: (std::time::Instant::now(), std::time::Duration::ZERO),
             listeners: HashMap::new(),
             wrappers: HashMap::new(),
             styles: HashMap::new(),
@@ -4733,6 +5782,7 @@ impl Runtime {
         interp.base_url = url.into();
         interp.loader = Some(state.borrow().loader.clone());
         install(&mut interp, &state);
+        interp.time_limit = Some(TIME_LIMIT);
         interp.reset_steps(BUDGET);
         if let Err(e) = interp.run(PRELUDE) {
             interp.errors.push(format!("prelude: {e}"));
@@ -5187,7 +6237,20 @@ impl Runtime {
     /// The document, laid out-ready: in document order, form controls filled in.
     pub fn snapshot(&mut self) -> Snapshot {
         flush(&mut self.interp, &self.state);
-        let s = self.state.borrow();
+        let (mut snap, canvas_nodes) = snapshot_of(&self.state.borrow());
+        for (copy, orig) in canvas_nodes {
+            if let Some(c) = self.canvas(orig) {
+                snap.canvases.insert(crate::canvas::src_for(copy), c);
+            }
+        }
+        snap
+    }
+}
+
+/// A copy of the document to style and lay out (without canvas pixels),
+/// and the (copy, original) pairs of its canvases.
+fn snapshot_of(s: &State) -> (Snapshot, Vec<(NodeId, NodeId)>) {
+    {
         let mut dom = Dom { nodes: vec![Node { parent: ROOT, children: Vec::new(), data: Data::Document }], ns: Default::default(), attr_ns: Default::default() };
         let mut map = vec![ROOT];
         // Interaction states, marked on the copy for `:hover`, `:focus`, `:focus-within` and `:target`.
@@ -5263,14 +6326,7 @@ impl Runtime {
         }
         let title = dom.find("title").map(|t| dom.text(t).split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
         let (url, generation, canvas_nodes) = (s.url.clone(), s.generation, cp.canvases);
-        drop(s);
-        let mut canvases = HashMap::new();
-        for (copy, orig) in canvas_nodes {
-            if let Some(c) = self.canvas(orig) {
-                canvases.insert(crate::canvas::src_for(copy), c);
-            }
-        }
-        Snapshot { dom, canvases, map, title, url, generation }
+        (Snapshot { dom, canvases: HashMap::new(), map, title, url, generation }, canvas_nodes)
     }
 }
 
@@ -5325,3 +6381,32 @@ pub fn stylesheet_links(dom: &Dom, base: &str) -> Vec<(String, String)> {
 mod canvas_run;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod selector_syntax_tests {
+    use super::selector_syntax_error;
+
+    #[test]
+    fn valid_selectors_pass() {
+        for sel in [
+            "a[href^=\"http\"]", "div > p:not(.x)", "input[type=checkbox]:checked", "[data-foo]", "li:nth-child(2n+1)", "*", ":is(a, b) > c", ".a\\:b",
+            "#\\31 23", "[data-x=\"a,b\"]", "a:has(> img)", "::-webkit-scrollbar", "div::after", ":root", "[lang|=en]", ".foo-bar_baz", "html[dir=\"rtl\"] .x",
+            "a[href$=\".pdf\" i]", "#id.class[attr]:hover::before", "body *", "tr:nth-of-type(odd)", ".a ~ .b + .c > .d", ":host(.x)", "div:not([hidden])",
+            "[aria-expanded='true']", "a:not(:first-child)", "[class*=\"col-\"]", "input:-webkit-autofill", ".grid--2", "*|div", "|div", "div, span", "-x", "--y",
+            "a:before", "x-foo", "[ data-a = b ]", "é", ".日本", "div:where(.a, .b)", "a:-moz-any-link", "rect", ":scope > li", "a>b", "a+b~c",
+        ] {
+            assert!(!selector_syntax_error(sel), "{sel} flagged");
+        }
+    }
+
+    #[test]
+    fn invalid_selectors_fail() {
+        for sel in [
+            "", " ", "div,", ",div", ">", ">*", "div >", "div ~~ p", "div ++ p", "div % p", "#", ".", ".5cm", "..test", ".foo..quux", ".bar.", "ns|div", "[",
+            "]", "(", ")", "{", "}", "[*=test]", "[*|*=test]", ":example", "::example", "div:linkexample", ":::before", "^|div", "$|div", "[class= space unquoted ]",
+            "<", "div::",
+        ] {
+            assert!(selector_syntax_error(sel), "{sel:?} not flagged");
+        }
+    }
+}

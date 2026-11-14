@@ -33,12 +33,23 @@ fn getter(i: &Interp, o: &Obj, name: &str, f: impl Fn(&mut Interp, Value, Vec<Va
     o.borrow_mut().set_slot(name, Slot::Accessor(Some(fv), None));
 }
 
-fn substr(chars: &[char], a: usize, b: usize) -> Value {
-    Value::Str(chars[a.min(chars.len())..b.min(chars.len())].iter().collect::<String>().into())
+/// Units a..b of a string as a string (half a surrogate pair becomes U+FFFD).
+fn substr(units: &[u16], a: usize, b: usize) -> Value {
+    let (a, b) = (a.min(units.len()), b.min(units.len()));
+    Value::Str(String::from_utf16_lossy(&units[a.min(b)..b]).into())
+}
+
+fn push_char(out: &mut Vec<u16>, c: char) {
+    let mut buf = [0u16; 2];
+    out.extend_from_slice(c.encode_utf16(&mut buf));
+}
+
+fn units_of(s: &str) -> Vec<u16> {
+    s.encode_utf16().collect()
 }
 
 /// The array `exec` returns: the match, its groups, `index`, `input` and `groups`.
-fn match_array(i: &mut Interp, re: &Regex, caps: &Captures, chars: &[char], input: &Rc<str>) -> Res<Value> {
+fn match_array(i: &mut Interp, re: &Regex, caps: &Captures, chars: &[u16], input: &Rc<str>) -> Res<Value> {
     let items: Vec<Value> = caps.iter().map(|c| c.map(|(a, b)| substr(chars, a, b)).unwrap_or(Value::Undefined)).collect();
     let arr = i.array(items);
     let start = caps[0].map(|c| c.0).unwrap_or(0);
@@ -59,8 +70,8 @@ fn match_array(i: &mut Interp, re: &Regex, caps: &Captures, chars: &[char], inpu
 }
 
 /// RegExp.prototype.exec, honouring `lastIndex` for global and sticky patterns.
-fn exec(i: &mut Interp, re: &Regex, o: &Obj, input: &Rc<str>) -> Res<Option<(Captures, Vec<char>)>> {
-    let chars: Vec<char> = input.chars().collect();
+fn exec(i: &mut Interp, re: &Regex, o: &Obj, input: &Rc<str>) -> Res<Option<(Captures, Vec<u16>)>> {
+    let chars = units_of(input);
     let uses_last = re.global || re.sticky;
     let ov = Value::Obj(o.clone());
     let start = if uses_last {
@@ -92,7 +103,7 @@ fn exec(i: &mut Interp, re: &Regex, o: &Obj, input: &Rc<str>) -> Res<Option<(Cap
 }
 
 /// Every match from the start (for global replace, match and matchAll).
-fn all_matches(re: &Regex, chars: &[char]) -> Vec<Captures> {
+fn all_matches(re: &Regex, chars: &[u16]) -> Vec<Captures> {
     let mut out = Vec::new();
     let mut pos = 0;
     while pos <= chars.len() {
@@ -108,21 +119,21 @@ fn all_matches(re: &Regex, chars: &[char]) -> Vec<Captures> {
 }
 
 /// `$&`, `$1`, `$<name>`, `` $` ``, `$'` and `$$` in a replacement string.
-fn expand(template: &str, re: &Regex, caps: &Captures, chars: &[char]) -> String {
+fn expand(template: &str, re: &Regex, caps: &Captures, chars: &[u16]) -> Vec<u16> {
     let t: Vec<char> = template.chars().collect();
     let (a, b) = caps[0].unwrap_or((0, 0));
-    let mut out = String::new();
+    let mut out = Vec::new();
     let mut k = 0;
     while k < t.len() {
         if t[k] != '$' || k + 1 >= t.len() {
-            out.push(t[k]);
+            push_char(&mut out, t[k]);
             k += 1;
             continue;
         }
         let n = t[k + 1];
         match n {
             '$' => {
-                out.push('$');
+                out.push(b'$' as u16);
                 k += 2;
             }
             '&' => {
@@ -150,7 +161,7 @@ fn expand(template: &str, re: &Regex, caps: &Captures, chars: &[char]) -> String
                     }
                     k += used;
                 } else {
-                    out.push('$');
+                    out.push(b'$' as u16);
                     k += 1;
                 }
             }
@@ -167,13 +178,13 @@ fn expand(template: &str, re: &Regex, caps: &Captures, chars: &[char]) -> String
                         k += len + 3;
                     }
                     None => {
-                        out.push('$');
+                        out.push(b'$' as u16);
                         k += 1;
                     }
                 }
             }
             _ => {
-                out.push('$');
+                out.push(b'$' as u16);
                 k += 1;
             }
         }
@@ -182,12 +193,12 @@ fn expand(template: &str, re: &Regex, caps: &Captures, chars: &[char]) -> String
 }
 
 fn replace_regex(i: &mut Interp, s: &Rc<str>, re: &Regex, o: &Obj, with: &Value) -> Res<Value> {
-    let chars: Vec<char> = s.chars().collect();
+    let chars = units_of(&s);
     if re.global {
         i.set(&Value::Obj(o.clone()), "lastIndex", Value::Num(0.0))?;
     }
     let matches = all_matches(re, &chars);
-    let mut out = String::new();
+    let mut out: Vec<u16> = Vec::new();
     let mut last = 0;
     for caps in &matches {
         let (a, b) = caps[0].unwrap_or((0, 0));
@@ -205,20 +216,20 @@ fn replace_regex(i: &mut Interp, s: &Rc<str>, re: &Regex, o: &Obj, with: &Value)
                 args.push(g);
             }
             let r = i.call(with, Value::Undefined, args)?;
-            i.to_str(&r)?.to_string()
+            units_of(&i.to_str(&r)?)
         } else {
             let t = i.to_str(with)?;
             expand(&t, re, caps, &chars)
         };
-        out.push_str(&rep);
+        out.extend_from_slice(&rep);
         last = b;
     }
     out.extend(&chars[last.min(chars.len())..]);
-    Ok(Value::Str(out.into()))
+    Ok(Value::Str(String::from_utf16_lossy(&out).into()))
 }
 
 fn split_regex(i: &mut Interp, s: &Rc<str>, re: &Regex, limit: usize) -> Value {
-    let chars: Vec<char> = s.chars().collect();
+    let chars = units_of(&s);
     let mut out: Vec<Value> = Vec::new();
     if chars.is_empty() {
         return i.array(if re.exec_at(&chars, 0).is_some() { vec![] } else { vec![Value::Str(s.clone())] });
@@ -366,7 +377,7 @@ pub fn install(i: &mut Interp) {
                 None => Ok(Value::Null),
             };
         }
-        let chars: Vec<char> = s.chars().collect();
+        let chars = units_of(&s);
         let found: Vec<Value> = all_matches(&re, &chars).iter().map(|c| c[0].map(|(x, y)| substr(&chars, x, y)).unwrap_or(Value::Undefined)).collect();
         i.set(&Value::Obj(o), "lastIndex", Value::Num(0.0))?;
         Ok(if found.is_empty() { Value::Null } else { i.array(found) })
@@ -377,7 +388,7 @@ pub fn install(i: &mut Interp) {
         if !re.global {
             return i.throw("TypeError", "matchAll needs a global (g) regular expression");
         }
-        let chars: Vec<char> = s.chars().collect();
+        let chars = units_of(&s);
         let mut out = Vec::new();
         for caps in all_matches(&re, &chars) {
             out.push(match_array(i, &re, &caps, &chars, &s)?);
@@ -387,7 +398,7 @@ pub fn install(i: &mut Interp) {
     def(i, &sp, "search", move |i, t, a| {
         let s = this_str(i, &t)?;
         let (re, _) = to_regex(i, &arg(&a, 0), "")?;
-        let chars: Vec<char> = s.chars().collect();
+        let chars = units_of(&s);
         Ok(Value::Num(re.exec_at(&chars, 0).and_then(|c| c[0]).map(|c| c.0 as f64).unwrap_or(-1.0)))
     });
     for name in ["replace", "replaceAll"] {

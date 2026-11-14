@@ -188,6 +188,8 @@ pub enum Op {
     RunStatic,
     /// [v → iter]
     GetIter,
+    /// [v → async iter]: `for await`, a sync iterator standing in when there's no async one
+    GetAsyncIter,
     /// [iter → iter v], or [iter] and a jump when it's done
     IterNext(u32),
     /// [iter → iter v] (undefined once done)
@@ -758,6 +760,14 @@ impl Compiler {
     /// A classic script: its top-level declarations are globals.
     pub fn script(src_prog: &[Stmt]) -> R<Rc<Code>> {
         let mut c = Compiler::new();
+        c.top_level(src_prog, Top::Script)
+    }
+
+    /// A classic script from a URL (which `import()` in it resolves against,
+    /// and stack traces name).
+    pub fn script_at(src_prog: &[Stmt], url: &str) -> R<Rc<Code>> {
+        let mut c = Compiler::new();
+        c.url = Some(url.into());
         c.top_level(src_prog, Top::Script)
     }
 
@@ -1682,11 +1692,36 @@ impl Compiler {
     }
 
     fn for_in(&mut self, kind: &str, pat: &Expr, of: bool, iter: &Expr, body: &Stmt, labels: Vec<Rc<str>>) -> R<()> {
-        self.expr(iter)?;
-        self.emit(if of { Op::GetIter } else { Op::ForInKeys });
+        let is_await = matches!(iter, Expr::Unary("for await", _));
+        match iter {
+            Expr::Unary("for await", inner) => {
+                self.expr(inner)?;
+                self.emit(Op::GetAsyncIter);
+            }
+            _ => {
+                self.expr(iter)?;
+                self.emit(if of { Op::GetIter } else { Op::ForInKeys });
+            }
+        }
         self.st().pins += 1;
         let top = self.here();
-        let next = self.emit(Op::IterNext(0));
+        let next = if is_await {
+            // [it] → [it it next] → [it result] (awaited) → done? → [it value] (awaited)
+            self.emit(Op::Dup);
+            let c = self.name_const("next");
+            let ic = self.ic();
+            self.emit(Op::GetMethod(c, ic));
+            self.emit(Op::Call(0));
+            self.emit(Op::Await);
+            self.emit(Op::Dup);
+            self.get_prop("done");
+            let exit = self.emit(Op::JumpIfTrue(0));
+            self.get_prop("value");
+            self.emit(Op::Await);
+            exit
+        } else {
+            self.emit(Op::IterNext(0))
+        };
         // Each iteration binds afresh.
         let mut lex = Vec::new();
         if kind == "let" || kind == "const" {
@@ -1716,6 +1751,10 @@ impl Compiler {
         self.patch_continues(cont);
         self.emit(Op::Jump(top));
         self.patch(next);
+        if is_await {
+            // The last result.
+            self.emit(Op::Pop);
+        }
         self.st().pins -= 1;
         self.emit(Op::Pop);
         self.pop_ctx_breakable();
@@ -2445,6 +2484,13 @@ impl Compiler {
                                 self.expr(a)?;
                             }
                             self.emit(Op::SuperCall(args.len() as u32));
+                        }
+                        // super() can replace `this`: refresh a captured copy of it.
+                        if !self.fns.last().is_some_and(|f| f.arrow) {
+                            if let Some(l @ Loc::Env(..)) = self.lookup_here("this") {
+                                self.emit(Op::This);
+                                self.store_loc(l, true);
+                            }
                         }
                         return Ok(());
                     }

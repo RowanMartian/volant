@@ -270,6 +270,10 @@ impl Lexer<'_> {
             let digits: String = s[ds..self.i].iter().filter(|&&c| c != '_' && c != 'n').collect();
             return match u128::from_str_radix(&digits, radix) {
                 Ok(n) => Ok(Tok::Num(n as f64)),
+                // Longer than 128 bits (obfuscators write such constants): in floating point.
+                Err(_) if !digits.is_empty() && digits.chars().all(|c| c.is_digit(radix)) => {
+                    Ok(Tok::Num(digits.chars().fold(0.0, |n, c| n * radix as f64 + c.to_digit(radix).unwrap_or(0) as f64)))
+                }
                 Err(_) => self.err("bad number"),
             };
         }
@@ -1072,7 +1076,9 @@ impl Parser {
 
     fn for_stmt(&mut self) -> R<Stmt> {
         self.next();
-        self.eat_word("await");
+        let is_await = self.eat_word("await");
+        // `for await (… of x)`: the iterable is marked, for the compiler.
+        let mark = move |of: bool, iter: Expr| if of && is_await { Expr::Unary("for await", Box::new(iter)) } else { iter };
         self.expect("(")?;
         let mut init = None;
         if !self.is(";") {
@@ -1089,7 +1095,7 @@ impl Parser {
                     self.next();
                     let iter = if of { self.assign()? } else { self.expr()? };
                     self.expect(")")?;
-                    return Ok(Stmt::ForIn(kind, target, of, iter, Box::new(self.stmt()?)));
+                    return Ok(Stmt::ForIn(kind, target, of, mark(of, iter), Box::new(self.stmt()?)));
                 }
                 let mut decls = vec![(target, if self.eat("=") { Some(self.assign_no_in()?) } else { None })];
                 while self.eat(",") {
@@ -1109,7 +1115,7 @@ impl Parser {
                     let iter = self.expr()?;
                     self.expect(")")?;
                     let target = to_pattern(e).ok_or("bad for-in target")?;
-                    return Ok(Stmt::ForIn("", target, of, iter, Box::new(self.stmt()?)));
+                    return Ok(Stmt::ForIn("", target, of, mark(of, iter), Box::new(self.stmt()?)));
                 }
                 // Not a for-in after all: finish the expression from what was read.
                 let e = self.continue_expr(e)?;

@@ -56,6 +56,8 @@ pub struct Frame {
     handlers: Vec<Handler>,
     /// A `new` call: an object it returns replaces `this`.
     construct: bool,
+    /// `new.target` when it isn't the function itself (`Reflect.construct`, `super()`).
+    new_target: Value,
 }
 
 /// A frame that's waiting: a generator between `next()`s, an async function
@@ -217,12 +219,14 @@ impl Interp {
     fn enter(&mut self, code: &Code) {
         self.frames += 1;
         self.call_names.push((code.name.clone(), code.line));
+        self.call_urls.push(code.url.clone());
     }
 
     #[inline]
     fn leave(&mut self) {
         self.frames = self.frames.saturating_sub(1);
         self.call_names.pop();
+        self.call_urls.pop();
     }
 
     /// A frame for `code` whose arguments are already on the stack at `bp`.
@@ -232,7 +236,7 @@ impl Interp {
         let lp = bp + argc;
         stack.resize(lp + code.nlocals as usize, Value::Undefined);
         let env = if code.has_env { Some(Rc::new(Env::new(code.env_size, env))) } else { env };
-        Frame { code, pc: 0, bp, argc, lp, env, this, func, handlers: Vec::new(), construct }
+        Frame { code, pc: 0, bp, argc, lp, env, this, func, handlers: Vec::new(), construct, new_target: Value::Undefined }
     }
 
     /// A base class's instance fields, set up on `this` before its constructor runs.
@@ -262,6 +266,11 @@ impl Interp {
 
     /// Calls a compiled function (from Rust: a native, a timer, an event).
     pub(crate) fn call_closure(&mut self, f: &Value, this: Value, args: Vec<Value>, construct: bool) -> Res<Value> {
+        self.call_closure_as(f, this, args, construct, Value::Undefined)
+    }
+
+    /// `call_closure` with an explicit `new.target`.
+    pub(crate) fn call_closure_as(&mut self, f: &Value, this: Value, args: Vec<Value>, construct: bool, new_target: Value) -> Res<Value> {
         let (code, env, base_class) = match f {
             Value::Obj(o) => match &o.borrow().kind {
                 Kind::Function(Callable::Closure(c)) => (c.code.clone(), c.env.clone(), c.code.class_ctor && c.sup.is_none()),
@@ -277,7 +286,8 @@ impl Interp {
         stack.push(f.clone());
         let argc = args.len();
         stack.extend(args);
-        let frame = self.make_frame(&mut stack, code.clone(), env, this, f.clone(), 2, argc, construct);
+        let mut frame = self.make_frame(&mut stack, code.clone(), env, this, f.clone(), 2, argc, construct);
+        frame.new_target = new_target;
         if code.is_gen {
             let st = GenState { susp: Some(Suspended { frame, stack }), started: false, running: false, is_async: code.is_async };
             let g = self.obj(Kind::Generator(Rc::new(RefCell::new(st))));
@@ -487,12 +497,17 @@ impl Interp {
                         () => {
                             self.steps += 1;
                             if self.steps & 127 == 0 {
-                                if self.steps > self.max_steps {
+                                if self.out_of_time() {
                                     break 'inner self.error("RangeError", "the script ran too long and was stopped");
                                 }
                                 if let Some(p) = &mut self.profile {
-                                    let at = self.call_names.last().cloned().unwrap_or((None, 0));
-                                    *p.entry(at).or_insert(0) += 1;
+                                    let (name, at) = self.call_names.last().cloned().unwrap_or((None, 0));
+                                    let url = self.call_urls.last().cloned().flatten();
+                                    let now = std::time::Instant::now();
+                                    // Gaps longer than a second are time outside scripts (network, layout).
+                                    let ns = self.profile_at.map(|t| now.duration_since(t).as_nanos() as u64).filter(|&ns| ns < 1_000_000_000).unwrap_or(0);
+                                    self.profile_at = Some(now);
+                                    *p.entry((name, at, url)).or_insert(0) += ns;
                                 }
                             }
                         };
@@ -1023,12 +1038,20 @@ impl Interp {
                                 if matches!(&parent, Value::Obj(o) if matches!(o.borrow().kind, Kind::Proxy(..))) {
                                     tri!(self.call(&parent, this.clone(), args));
                                 } else {
-                                    tri!(self.call_closure(&parent, this.clone(), args, true));
+                                    let nt = if matches!(f.new_target, Value::Undefined) { f.func.clone() } else { f.new_target.clone() };
+                                    let made = tri!(self.call_closure_as(&parent, this.clone(), args, true, nt));
+                                    // A parent constructor that returns an object makes it `this`.
+                                    if let (Value::Obj(m), Value::Obj(t)) = (&made, &this) {
+                                        if !Rc::ptr_eq(m, t) {
+                                            f.this = made.clone();
+                                        }
+                                    }
                                 }
                             } else {
                                 break 'inner self.error("TypeError", "super() outside a derived class");
                             }
                             let ctor = f.func.clone();
+                            let this = f.this.clone();
                             tri!(self.run_fields(&ctor, &this));
                             stack.push(Value::Undefined);
                         }
@@ -1038,7 +1061,11 @@ impl Interp {
                             stack.push(Value::Obj(Rc::new(RefCell::new(fo))));
                         }
                         Op::This => stack.push(f.this.clone()),
-                        Op::NewTarget => stack.push(if f.construct { f.func.clone() } else { Value::Undefined }),
+                        Op::NewTarget => stack.push(match (f.construct, &f.new_target) {
+                            (false, _) => Value::Undefined,
+                            (true, Value::Undefined) => f.func.clone(),
+                            (true, nt) => nt.clone(),
+                        }),
                         Op::Callee => stack.push(f.func.clone()),
                         Op::Arguments => {
                             let a = stack[f.bp..f.bp + f.argc].to_vec();
@@ -1184,6 +1211,11 @@ impl Interp {
                         Op::GetIter => {
                             let v = pop!();
                             let it = tri!(self.get_iter(v));
+                            stack.push(it);
+                        }
+                        Op::GetAsyncIter => {
+                            let v = pop!();
+                            let it = tri!(self.async_iter(v));
                             stack.push(it);
                         }
                         Op::IterNext(exit) => {
@@ -1499,6 +1531,48 @@ impl Interp {
             _ => {}
         }
         Ok(())
+    }
+
+    /// What `for await` steps through: `v[Symbol.asyncIterator]()`, or an
+    /// object over its sync iterator whose `next` gives `{value, done}`.
+    fn async_iter(&mut self, v: Value) -> Res<Value> {
+        if !matches!(v, Value::Undefined | Value::Null) {
+            let f = self.get(&v, "\0@asyncIterator")?;
+            if Interp::is_callable(&f) {
+                let it = self.call(&f, v, vec![])?;
+                if !matches!(it, Value::Obj(_)) {
+                    return self.throw("TypeError", "Symbol.asyncIterator didn't return an object");
+                }
+                return Ok(it);
+            }
+        }
+        let sync = self.get_iter(v)?;
+        let step = |i: &mut Interp, v: Option<Value>| {
+            let r = i.obj(Kind::Plain);
+            if let Value::Obj(o) = &r {
+                let mut b = o.borrow_mut();
+                b.set_own("value", v.clone().unwrap_or(Value::Undefined));
+                b.set_own("done", Value::Bool(v.is_none()));
+            }
+            r
+        };
+        let s1 = sync.clone();
+        let next = self.native(move |i, _t, _a| {
+            let v = i.iter_next(&s1)?;
+            Ok(step(i, v))
+        });
+        let s2 = sync;
+        let ret = self.native(move |i, _t, _a| {
+            i.iter_close(&s2)?;
+            Ok(step(i, None))
+        });
+        let w = self.obj(Kind::Plain);
+        if let Value::Obj(o) = &w {
+            let mut b = o.borrow_mut();
+            b.set_own("next", next);
+            b.set_own("return", ret);
+        }
+        Ok(w)
     }
 
     fn get_iter(&mut self, v: Value) -> Res<Value> {
