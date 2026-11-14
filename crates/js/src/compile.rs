@@ -3052,6 +3052,13 @@ fn collect_funcs_expr(e: &Expr, out: &mut Vec<Rc<Func>>, classes: &mut Vec<HashS
 
 fn finish(st: FnState, name: Option<Rc<str>>, nparams: u32, method: bool, class_ctor: bool, line: u32, url: Option<Rc<str>>) -> Code {
     let has_env = st.top == Top::Module || !st.captured.is_empty();
+    // VOLANT_OPS=1 prints each function's instructions as it's compiled (for tuning).
+    if std::env::var_os("VOLANT_OPS").is_some() {
+        eprintln!("== {} ({} locals, env {has_env})", name.as_deref().unwrap_or("<anonymous>"), st.max_locals);
+        for (k, op) in st.ops.iter().enumerate() {
+            eprintln!("{k:5} {op:?}");
+        }
+    }
     Code {
         has_env,
         url,

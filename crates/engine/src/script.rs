@@ -1769,6 +1769,12 @@ pub fn dispatch(i: &mut Interp, st: &S, target: NodeId, ev: &Value) -> bool {
 }
 
 fn dispatch_path(i: &mut Interp, st: &S, target: NodeId, ev: &Value) -> bool {
+    // VOLANT_EVENTS=1 logs each dispatch (for finding event storms).
+    if std::env::var_os("VOLANT_EVENTS").is_some() {
+        let ty = i.get(ev, "type").ok().map(|t| i.to_str(&t).map(|s| s.to_string()).unwrap_or_default()).unwrap_or_default();
+        let tag = st.borrow().dom.tag(target).unwrap_or("#").to_string();
+        eprintln!("event {ty} at {tag}");
+    }
     let mut path = vec![target];
     if target != WINDOW {
         let dom_path = {
@@ -1875,7 +1881,7 @@ fn execute(i: &mut Interp, st: &S, id: NodeId) {
         (script_kind(&s.dom, id), s.dom.attr(id, "src").is_some())
     };
     let Some(kind) = kind else { return };
-    let ok = match script_source(st, id) {
+    let ok = match i.waiting(|| script_source(st, id)) {
         Ok((code, origin)) => {
             let r = match kind {
                 ScriptKind::ImportMap => {
@@ -4679,7 +4685,7 @@ fn install(i: &mut Interp, st: &S) {
             let s = st2.borrow();
             (s.host.clone(), resolve_url(&s.url, &url), s.url.clone())
         };
-        let r = match cors_fetch(&*host, &page, &method, &abs, headers, body.as_deref().map(str::as_bytes), &credentials, &mode) {
+        let r = match i.waiting(|| cors_fetch(&*host, &page, &method, &abs, headers, body.as_deref().map(str::as_bytes), &credentials, &mode)) {
             Ok(r) => r,
             Err(why) => {
                 i.output.push(format!("{why}"));
@@ -4746,7 +4752,7 @@ fn install(i: &mut Interp, st: &S) {
     });
     hook(i, "__cvfont", f);
     let st2 = st.clone();
-    let f = i.native(move |_i, _t, _a| {
+    let f = i.native(move |i, _t, _a| {
         // __fontfaces(): loads the document's @font-face files Canard can read; how many it has
         let (sheets, url) = {
             let s = st2.borrow();
@@ -4754,7 +4760,7 @@ fn install(i: &mut Interp, st: &S) {
         };
         let mut n = 0;
         for f in sheets.iter().flat_map(|css| css::font_faces(css)) {
-            n += load_font(&st2, &f.family, f.weight, f.italic, &f.sources, &url) as u32;
+            n += i.waiting(|| load_font(&st2, &f.family, f.weight, f.italic, &f.sources, &url)) as u32;
         }
         Ok(Value::Num(n as f64))
     });
@@ -4772,7 +4778,7 @@ fn install(i: &mut Interp, st: &S) {
         let src = i.to_str(&src)?.to_string();
         let sources = css::font_faces(&format!("@font-face {{ font-family: x; src: {src} }}")).into_iter().next().map(|f| f.sources).unwrap_or_default();
         let url = st2.borrow().url.clone();
-        Ok(Value::Bool(load_font(&st2, &family, weight, italic, &sources, &url)))
+        Ok(Value::Bool(i.waiting(|| load_font(&st2, &family, weight, italic, &sources, &url))))
     });
     hook(i, "__fontload", f);
     let st2 = st.clone();

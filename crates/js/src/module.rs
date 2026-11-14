@@ -72,7 +72,7 @@ impl Interp {
         let Some(loader) = self.loader.clone() else {
             return self.throw("TypeError", &format!("can't load {url}"));
         };
-        match loader.load(url) {
+        match self.waiting(|| loader.load(url)) {
             Ok(src) => self.link(url, &src),
             Err(e) => self.throw("TypeError", &format!("couldn't load module {url}: {e}")),
         }

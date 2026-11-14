@@ -1042,6 +1042,25 @@ impl Interp {
         }
     }
 
+    /// Time spent waiting outside the script (a fetch, a module download) doesn't
+    /// count against its time limit, nor go to the running function in a profile.
+    pub fn exclude_wait(&mut self, waited: std::time::Duration) {
+        if let Some(d) = &mut self.deadline {
+            *d += waited;
+        }
+        if let Some(t) = &mut self.profile_at {
+            *t += waited;
+        }
+    }
+
+    /// Runs `f` (a blocking wait for the network), not counting its time as the script's.
+    pub fn waiting<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        let t = std::time::Instant::now();
+        let r = f();
+        self.exclude_wait(t.elapsed());
+        r
+    }
+
     /// Past the step budget or the time limit (which then counts as the budget).
     #[cold]
     pub(crate) fn out_of_time(&mut self) -> bool {
